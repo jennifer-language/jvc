@@ -1,0 +1,14 @@
+# The Jennifer interpreter binary (copied in locally, not source).
+/jennifer
+/jennifer-tiny
+
+# Crash-atomic flatdb temp files.
+*.tmp
+
+# CLI install artifacts.
+/decks/
+camcorder.lock
+
+# Editor / OS noise.
+*.swp
+.DS_Store

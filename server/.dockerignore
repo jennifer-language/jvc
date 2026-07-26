@@ -1,0 +1,16 @@
+# The local interpreter binary (13 MB) - the image builds its own from the AUR.
+jennifer
+jennifer-tiny
+
+# VCS / tooling / docs not needed in the image build context.
+.git
+.gitignore
+.claude
+.editorconfig
+*.md
+
+# Local install / run artifacts.
+decks/
+camcorder.lock
+*.tmp
+*.log

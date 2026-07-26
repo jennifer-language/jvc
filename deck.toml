@@ -1,0 +1,29 @@
+[package]
+name = "jvc"
+version = "0.1.0"
+description = "the jennifer deck manager - CLI and deck repository"
+license = "LGPL-3.0-only"
+authors = ["edv@gmi.eu"]
+keywords = ["package-manager", "decks", "jennifer"]
+
+# Project URLs by role. `deck` (the deck's own manifest / registry
+# location) is mandatory; `homepage` and `manual` are optional.
+[package.urls]
+deck = "https://raw.githubusercontent.com/jennifer-language/jvc/main/deck.toml"
+homepage = "https://github.com/mplx/jennifer-lang"
+manual = "https://mplx.github.io/jennifer-lang/"
+
+# Jennifer engines that can run this deck: engine = version range. jvc uses only
+# bundled stdlib modules (toml, yaml, json, flatdb, http, semver, web, ...), so
+# its runtime dependency is the engine itself - hence [engines], not [decks].
+[engines]
+jennifer = "^0.21.0"
+
+# Runtime requirements: deck = version constraint. Registry decks only, and they
+# MUST be scoped (@scope/deck); bundled modules go in [engines] above and local
+# modules need no entry. jvc has no scoped-deck dependencies.
+[decks]
+
+# What this deck provides: capability = concrete version.
+[provides]
+deckmanager = "0.1.0"
