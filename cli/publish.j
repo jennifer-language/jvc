@@ -24,7 +24,6 @@
  */
 
 use fs;
-use io;
 use json;
 use strings;
 use path;
@@ -33,6 +32,8 @@ use encoding;
 use archive;
 import "./manifest.j" as manifest;
 import "./deckname.j" as deckname;
+import "./pragma.j" as pragma;
+import "./verify.j" as verify;
 import "../server/store.j" as store;
 import "../server/admin.j" as admin;
 import "flatdb.j" as flatdb;
@@ -63,8 +64,10 @@ func hexSha256(data as bytes) {
 
 /**
  * Package a deck directory into a `.tar.gz`: its `deck.toml` plus every file
- * under `src/` (nothing else - `vendor/`, `dist/`, tests, VCS metadata are left
- * out). Returns the archive bytes.
+ * under `src/` (the code, which is what gets vendored) and `template/` (the
+ * frame template `jvc new` stamps, which is read from the release but never
+ * vendored). Nothing else - `vendor/`, `dist/`, tests, VCS metadata are left
+ * out. Returns the archive bytes.
  * @param dir {string} the deck's root directory
  * @return {bytes} the `.tar.gz` archive bytes
  */
@@ -80,7 +83,8 @@ export func packDeck(dir as string) {
             $rel = strings.substring($rel, len($prefix), len($rel));
         }
         if ($rel == "deck.toml" or $rel == "deck.yaml" or $rel == "deck.yml" or
-            $rel == "deck.json" or strings.startsWith($rel, "src/")) {
+            $rel == "deck.json" or strings.startsWith($rel, "src/") or
+            strings.startsWith($rel, "template/")) {
             $entries[] = archive.Entry{
                 name: $rel,
                 data: fs.readBytes($st.path),
@@ -113,8 +117,18 @@ export func requiresSpecOf(m as manifest.Manifest) {
 }
 
 /**
- * Render a manifest's `[engines]` as a `deckadmin --engines` spec: `"engine
- * range, engine range"`. Empty when the deck declares no engine restriction.
+ * Render a manifest's declared host capabilities as a `deckadmin
+ * --capabilities` spec: `"net, exec"`. Empty when the deck needs none, which
+ * means its code runs on any build including `jennifer-tiny`.
+ * @param m {manifest.Manifest} the deck's manifest
+ * @return {string} the capabilities spec, or ""
+ */
+export func capabilitiesSpecOf(m as manifest.Manifest) {
+    return strings.join($m.pkg.capabilities, ", ");
+}
+
+/**
+ * Render a manifest's `[engines]` as a `deckadmin --engines` spec.
  * @param m {manifest.Manifest} the deck's manifest
  * @return {string} the engines spec, or ""
  */
@@ -133,7 +147,8 @@ export func enginesSpecOf(m as manifest.Manifest) {
 
 # deckadminArgv builds the argument vector `admin.run` consumes for an add.
 func deckadminArgv(name as string, version as string, url as string,
-    checksum as string, description as string, requiresSpec as string, enginesSpec as string) {
+    checksum as string, description as string, requiresSpec as string,
+    enginesSpec as string, capabilitiesSpec as string) {
     def argv as list of string init [
         "deckadmin", "add", $name, $version, $url, $checksum, $description
     ];
@@ -144,6 +159,10 @@ func deckadminArgv(name as string, version as string, url as string,
     if (not ($enginesSpec == "")) {
         $argv[] = "--engines";
         $argv[] = $enginesSpec;
+    }
+    if (not ($capabilitiesSpec == "")) {
+        $argv[] = "--capabilities";
+        $argv[] = $capabilitiesSpec;
     }
     return $argv;
 }
@@ -160,7 +179,8 @@ func deckadminArgv(name as string, version as string, url as string,
  * @return {string} the ready-to-run command
  */
 export func publishCommand(name as string, version as string, url as string,
-    checksum as string, description as string, requiresSpec as string, enginesSpec as string) {
+    checksum as string, description as string, requiresSpec as string,
+    enginesSpec as string, capabilitiesSpec as string) {
     def cmd as string init "deckadmin add " + $name + " " + $version + " " +
         $url + " " + $checksum + " \"" + $description + "\"";
     if (not ($requiresSpec == "")) {
@@ -169,7 +189,55 @@ export func publishCommand(name as string, version as string, url as string,
     if (not ($enginesSpec == "")) {
         $cmd = $cmd + " --engines \"" + $enginesSpec + "\"";
     }
+    if (not ($capabilitiesSpec == "")) {
+        $cmd = $cmd + " --capabilities \"" + $capabilitiesSpec + "\"";
+    }
     return $cmd;
+}
+
+/**
+ * Scan a deck's `src/` tree for the capabilities its code declares through
+ * `# pragma-jennifer-capability` headers, merged and deduplicated.
+ *
+ * This is the ground truth: the interpreter refuses to load a file whose
+ * capability the running build lacks, so what the source declares is what a
+ * consumer's build must provide. `publish` compares it against the manifest so a
+ * deck cannot be published claiming less than its code needs.
+ * @param dir {string} the deck's root directory
+ * @return {list of string} the capabilities the source declares
+ */
+export func capabilitiesOf(dir as string) {
+    def out as list of string init [];
+    for (def st in fs.walk($dir + "/src")) {
+        if ($st.isDir or not strings.endsWith($st.path, ".j")) {
+            continue;
+        }
+        $out = pragma.merge($out, pragma.capabilities(fs.readString($st.path)));
+    }
+    return $out;
+}
+
+# capabilityProblem compares a manifest's declared capability set against what
+# the source actually needs, returning "" when the manifest is honest. Both
+# directions matter: an undeclared capability would surprise a consumer whose
+# build cannot provide it, and an unknown name is rejected by the interpreter
+# itself at read time.
+func capabilityProblem(m as manifest.Manifest, dir as string) {
+    for (def name in $m.pkg.capabilities) {
+        if (not pragma.isKnown($name)) {
+            return "[package] capabilities lists \"" + $name + "\", which is not a " +
+                "Jennifer capability (known: " + strings.join(pragma.known(), ", ") + ")";
+        }
+    }
+    def undeclared as list of string init
+        pragma.missing(capabilitiesOf($dir), $m.pkg.capabilities);
+    if (len($undeclared) > 0) {
+        return "src/ declares the capability pragma " + strings.join($undeclared, ", ") +
+            " but [package] capabilities does not list it; add capabilities = [\"" +
+            strings.join($undeclared, "\", \"") + "\"] so consumers can see what " +
+            "this deck needs";
+    }
+    return "";
 }
 
 # validate checks that a manifest describes a publishable deck rooted at dir,
@@ -201,7 +269,7 @@ func validate(m as manifest.Manifest, dir as string) {
     if (not fs.exists($entry)) {
         return "missing entrypoint src/" + deckname.entryFile($m.pkg.name);
     }
-    return "";
+    return capabilityProblem($m, $dir);
 }
 
 # writePlanJson records the release metadata beside the tarball for tooling.
@@ -234,7 +302,7 @@ func writePlanJson(outDir as string, name as string, version as string,
  * @return {Result} the outcome
  */
 export func publish(dir as string, url as string, dbPath as string,
-    outDir as string, now as string) {
+    outDir as string, now as string, runChecks as bool) {
     def manifestPath as string init manifest.findManifest($dir);
     if ($manifestPath == "") {
         return fail("no deck manifest found in " + $dir + "; run 'jvc init' first");
@@ -243,6 +311,20 @@ export func publish(dir as string, url as string, dbPath as string,
     def problem as string init validate($m, $dir);
     if (not ($problem == "")) {
         return fail($problem);
+    }
+    # The ecosystem quality gate. A deck that cannot pass its own lint, tests,
+    # and docblock checks does not get published.
+    def gate as string init "";
+    if ($runChecks) {
+        def report as verify.Report init verify.verify($dir);
+        if (not $report.ok) {
+            return fail("publish blocked by the quality gate:" +
+                verify.reportText($report) +
+                "\n\nfix these, or pass --no-verify to publish anyway");
+        }
+        $gate = "\n  checks:   passed" + verify.reportText($report);
+    } else {
+        $gate = "\n  checks:   SKIPPED (--no-verify)";
     }
     def name as string init $m.pkg.name;
     def version as string init $m.pkg.version;
@@ -256,6 +338,7 @@ export func publish(dir as string, url as string, dbPath as string,
     def checksum as string init "sha256:" + hexSha256($data);
     def requiresSpec as string init requiresSpecOf($m);
     def enginesSpec as string init enginesSpecOf($m);
+    def capabilitiesSpec as string init capabilitiesSpecOf($m);
 
     if ($dbPath == "") {
         if ($url == "") {
@@ -263,9 +346,9 @@ export func publish(dir as string, url as string, dbPath as string,
         }
         writePlanJson($outDir, $name, $version, $url, $checksum, $requiresSpec);
         def cmd as string init publishCommand($name, $version, $url, $checksum,
-            $m.pkg.description, $requiresSpec, $enginesSpec);
+            $m.pkg.description, $requiresSpec, $enginesSpec, $capabilitiesSpec);
         return ok("packaged " + $name + "@" + $version + "\n  tarball:  " + $tarPath +
-            "\n  checksum: " + $checksum +
+            "\n  checksum: " + $checksum + $gate +
             "\n\nto register it, host the tarball at your URL and run:\n  " + $cmd);
     }
 
@@ -273,7 +356,7 @@ export func publish(dir as string, url as string, dbPath as string,
         return fail("publishing to a registry needs --url <tarball-url>");
     }
     def argv as list of string init deckadminArgv($name, $version, $url, $checksum,
-        $m.pkg.description, $requiresSpec, $enginesSpec);
+        $m.pkg.description, $requiresSpec, $enginesSpec, $capabilitiesSpec);
     def db as flatdb.DB init store.open($dbPath);
     def r as admin.AdminResult init admin.run($db, $argv, $now);
     if (not $r.ok) {
@@ -282,5 +365,5 @@ export func publish(dir as string, url as string, dbPath as string,
     store.save($r.db);
     return ok("published " + $name + "@" + $version + " to " + $dbPath +
         "\n  tarball:  " + $tarPath + "\n  checksum: " + $checksum +
-        "\n  " + $r.message);
+        $gate + "\n  " + $r.message);
 }

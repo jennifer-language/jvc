@@ -21,8 +21,19 @@
 use json;
 use strings;
 use convert;
+use lists;
 import "./deckname.j" as deckname;
+import "./catalog.j" as catalog;
 import "http.j" as http;
+
+# The fixed, unversioned path a registry serves its discovery document at. This
+# is the one path a client may hard-code; everything else hangs off the base path
+# the document advertises.
+def const DISCOVERY_PATH as string init "/.well-known/jennifer-registry";
+
+# The registry API major versions this build of jvc speaks. Negotiation picks the
+# highest version present in both this list and the registry's.
+def const API_VERSIONS as list of int init [1];
 
 # Characters left unescaped in a query component (RFC 3986 unreserved set).
 def const UNRESERVED as string init
@@ -38,6 +49,51 @@ def const HEX as string init "0123456789ABCDEF";
  */
 export def struct Client {
     baseUrl as string
+};
+
+/**
+ * One API version a registry advertises.
+ * @field version {int} the integer major version
+ * @field path {string} the base path that version's endpoints hang off, e.g. "/v1"
+ * @field status {string} "stable", "deprecated", or "sunset"
+ * @field sunset {string} the date the version stops working ("" when open-ended)
+ */
+export def struct ApiVersion {
+    version as int,
+    path as string,
+    status as string,
+    sunset as string
+};
+
+/**
+ * A registry's discovery document: what it is, which API versions it serves, and
+ * which optional operations it offers.
+ * @field registry {string} a human-readable identifier for messages
+ * @field specVersion {string} the registry specification version it implements
+ * @field api {list of ApiVersion} every API version served
+ * @field features {list of string} the optional operations offered (see `hasFeature`)
+ */
+export def struct Discovery {
+    registry as string,
+    specVersion as string,
+    api as list of ApiVersion,
+    features as list of string
+};
+
+/**
+ * The outcome of negotiating an API version with a registry.
+ * @field ok {bool} true when this client and the registry share a version
+ * @field version {int} the negotiated major version (0 when none)
+ * @field basePath {string} the path prefix to put in front of every request
+ * @field warning {string} a deprecation notice to show the user ("" when none)
+ * @field error {string} why negotiation failed ("" when ok)
+ */
+export def struct Negotiated {
+    ok as bool,
+    version as int,
+    basePath as string,
+    warning as string,
+    error as string
 };
 
 /**
@@ -124,6 +180,18 @@ export func resolveUrl(baseUrl as string, name as string, constraint as string) 
         "&constraint=" + percentEncode($constraint);
 }
 
+/**
+ * Join a client's base URL with the negotiated API base path (§4.2 of the
+ * registry specification). A legacy registry negotiates an empty path, so this
+ * degrades to the bare base URL.
+ * @param client {Client} the repository client
+ * @param basePath {string} the negotiated base path ("" for a legacy registry)
+ * @return {string} the prefix to build request URLs from
+ */
+export func apiRoot(client as Client, basePath as string) {
+    return $client.baseUrl + $basePath;
+}
+
 # strOr reads a string field at pointer, or "" when it is absent.
 func strOr(doc as json.Value, pointer as string) {
     if (json.has($doc, $pointer)) {
@@ -162,8 +230,34 @@ export func parseResolution(body as string) {
     };
 }
 
-# readEngines reads a JSON `engines` object at pointer into a name -> range map.
-func readEngines(doc as json.Value, pointer as string) {
+# --- deck metadata (what the local resolver resolves against) ---------------
+
+/**
+ * Build the absolute deck-metadata URL for a deck name. The name travels as a
+ * **query parameter** rather than a path segment because a scoped name holds a
+ * `/`, which a path route would split into two segments.
+ * @param baseUrl {string} the repository base URL (no trailing slash expected)
+ * @param name {string} the deck name
+ * @return {string} the absolute deck URL
+ */
+export func deckUrl(baseUrl as string, name as string) {
+    return $baseUrl + "/deck?name=" + percentEncode($name);
+}
+
+# readStringList reads a JSON array of strings at pointer, or an empty list.
+func readStringList(doc as json.Value, pointer as string) {
+    def out as list of string init [];
+    if (json.has($doc, $pointer)) {
+        for (def i as int init 0; $i < json.length($doc, $pointer); $i = $i + 1) {
+            $out[] = json.asString($doc, $pointer + "/" + convert.toString($i));
+        }
+    }
+    return $out;
+}
+
+# readStringMap reads a JSON object at pointer into a name -> value map, with
+# each key pointer-escaped so a scoped name survives as one key.
+func readStringMap(doc as json.Value, pointer as string) {
     def out as map of string to string init {};
     if (json.has($doc, $pointer)) {
         for (def key in json.keys($doc, $pointer)) {
@@ -171,6 +265,64 @@ func readEngines(doc as json.Value, pointer as string) {
         }
     }
     return $out;
+}
+
+/**
+ * Parse a deck-record response body into the candidate versions it publishes.
+ * The record's `versions` table becomes one `catalog.Candidate` per version,
+ * carrying that version's delivery fields, its own `requires`, and its
+ * `engines`. A body with no `versions` table (a 404 error body, or a deck with
+ * no releases) yields an empty list rather than throwing.
+ * @param body {string} the JSON response body
+ * @return {list of catalog.Candidate} the deck's candidate versions
+ * @throws {Error} when the body is not valid JSON
+ */
+export func parseDeckDoc(body as string) {
+    def doc as json.Value init json.decode($body);
+    def out as list of catalog.Candidate init [];
+    if (not json.has($doc, "/versions")) {
+        return $out;
+    }
+    def name as string init strOr($doc, "/name");
+    for (def version in json.keys($doc, "/versions")) {
+        def p as string init "/versions/" + deckname.ptrEscape($version);
+        def kind as string init strOr($doc, $p + "/kind");
+        if ($kind == "") {
+            $kind = "tar.gz";
+        }
+        $out[] = catalog.Candidate{
+            name: $name,
+            version: $version,
+            url: strOr($doc, $p + "/url"),
+            checksum: strOr($doc, $p + "/checksum"),
+            kind: $kind,
+            ref: strOr($doc, $p + "/ref"),
+            commit: strOr($doc, $p + "/commit"),
+            description: strOr($doc, $p + "/description"),
+            requires: readStringMap($doc, $p + "/requires"),
+            engines: readStringMap($doc, $p + "/engines"),
+            capabilities: readStringList($doc, $p + "/capabilities")
+        };
+    }
+    return $out;
+}
+
+/**
+ * Fetch one deck's published versions from the repository (a network call), for
+ * the local resolver to resolve against. An unknown deck is an empty list, not
+ * an error, so the caller can report it against the requirement that asked for
+ * it.
+ * @param client {Client} the repository client
+ * @param name {string} the deck name
+ * @param basePath {string} the negotiated API base path ("" for a legacy registry)
+ * @return {list of catalog.Candidate} the deck's candidate versions (empty when unknown)
+ * @throws {Error} on a transport failure or an unparseable body
+ */
+export func fetchDeck(client as Client, name as string, basePath as string) {
+    def headers as map of string to string init {};
+    def resp as http.Response init http.get(
+        deckUrl(apiRoot($client, $basePath), $name), $headers);
+    return parseDeckDoc($resp.body);
 }
 
 /**
@@ -220,7 +372,10 @@ export func parseGraph(body as string) {
                 checksum: json.asString($doc, $p + "/checksum"),
                 description: strOr($doc, $p + "/description"),
                 kind: json.asString($doc, $p + "/kind"),
-                engines: readEngines($doc, $p + "/engines")
+                ref: strOr($doc, $p + "/ref"),
+                commit: strOr($doc, $p + "/commit"),
+                engines: readStringMap($doc, $p + "/engines"),
+                capabilities: readStringList($doc, $p + "/capabilities")
             };
         }
     }
@@ -272,4 +427,183 @@ export func resolve(client as Client, name as string, constraint as string) {
 export func fetch(url as string) {
     def headers as map of string to string init {};
     return http.get($url, $headers);
+}
+
+# --- discovery and version negotiation --------------------------------------
+
+/**
+ * Build the absolute URL of a registry's discovery document.
+ * @param baseUrl {string} the repository base URL
+ * @return {string} the discovery URL
+ */
+export func discoveryUrl(baseUrl as string) {
+    return trimTrailingSlash($baseUrl) + DISCOVERY_PATH;
+}
+
+/**
+ * Parse a discovery document. Unrecognised fields are ignored, which is what
+ * makes an additive change to the document non-breaking.
+ * @param body {string} the JSON response body
+ * @return {Discovery} the parsed document
+ * @throws {Error} when the body is not valid JSON
+ */
+export func parseDiscovery(body as string) {
+    def doc as json.Value init json.decode($body);
+    def versions as list of ApiVersion init [];
+    if (json.has($doc, "/api")) {
+        for (def i as int init 0; $i < json.length($doc, "/api"); $i = $i + 1) {
+            def p as string init "/api/" + convert.toString($i);
+            def status as string init strOr($doc, $p + "/status");
+            if ($status == "") {
+                $status = "stable";
+            }
+            def path as string init strOr($doc, $p + "/path");
+            if ($path == "") {
+                $path = "";
+            }
+            $versions[] = ApiVersion{
+                version: json.asInt($doc, $p + "/version"),
+                path: trimTrailingSlash($path),
+                status: $status,
+                sunset: strOr($doc, $p + "/sunset")
+            };
+        }
+    }
+    return Discovery{
+        registry: strOr($doc, "/registry"),
+        specVersion: strOr($doc, "/specVersion"),
+        api: $versions,
+        features: readStringList($doc, "/features")
+    };
+}
+
+/**
+ * The discovery document assumed for a registry that serves none: API v1 at the
+ * root, with every endpoint presumed present. This keeps registries that predate
+ * the discovery document working rather than failing mysteriously.
+ * @return {Discovery} the assumed document
+ */
+export func legacyDiscovery() {
+    def api as list of ApiVersion init [
+        ApiVersion{ version: 1, path: "", status: "stable", sunset: "" }
+    ];
+    return Discovery{
+        registry: "",
+        specVersion: "",
+        api: $api,
+        features: ["deck", "decks", "resolve", "resolveGraph"]
+    };
+}
+
+/**
+ * Report whether a registry offers an optional operation, so a client can refuse
+ * up front with a clear message instead of provoking a 404.
+ * @param d {Discovery} the discovery document
+ * @param name {string} the feature name, e.g. "publish"
+ * @return {bool} true when the registry offers it
+ */
+export func hasFeature(d as Discovery, name as string) {
+    return lists.contains($d.features, $name);
+}
+
+# describeVersions renders a registry's advertised versions for an error message.
+func describeVersions(api as list of ApiVersion) {
+    def out as string init "";
+    for (def entry in $api) {
+        def one as string init "v" + convert.toString($entry.version);
+        if ($out == "") {
+            $out = $one;
+        } else {
+            $out = $out + ", " + $one;
+        }
+    }
+    if ($out == "") {
+        return "no versions at all";
+    }
+    return $out;
+}
+
+/**
+ * Choose the API version to speak: the highest major present in both the
+ * registry's list and this client's. Returns the base path to prefix every
+ * request with, plus a deprecation warning when the chosen version carries one.
+ *
+ * No overlap is a **clear failure naming both sides**, never a fall-through that
+ * would surface later as a puzzling 404.
+ * @param d {Discovery} the registry's discovery document
+ * @param supported {list of int} the major versions this client speaks
+ * @return {Negotiated} the chosen version, or why none could be chosen
+ */
+export func negotiate(d as Discovery, supported as list of int) {
+    def best as int init 0;
+    def bestPath as string init "";
+    def bestStatus as string init "";
+    def bestSunset as string init "";
+    for (def entry in $d.api) {
+        if (lists.contains($supported, $entry.version) and $entry.version > $best) {
+            $best = $entry.version;
+            $bestPath = $entry.path;
+            $bestStatus = $entry.status;
+            $bestSunset = $entry.sunset;
+        }
+    }
+    if ($best == 0) {
+        def mine as string init "";
+        for (def v in $supported) {
+            def one as string init "v" + convert.toString($v);
+            if ($mine == "") {
+                $mine = $one;
+            } else {
+                $mine = $mine + ", " + $one;
+            }
+        }
+        return Negotiated{
+            ok: false,
+            version: 0,
+            basePath: "",
+            warning: "",
+            error: "this registry speaks API " + describeVersions($d.api) +
+                "; this jvc supports " + $mine +
+                ". Upgrade jvc, or point at a registry that still serves " + $mine + "."
+        };
+    }
+    def warning as string init "";
+    if ($bestStatus == "deprecated" or $bestStatus == "sunset") {
+        $warning = "registry API v" + convert.toString($best) + " is " + $bestStatus;
+        if (not ($bestSunset == "")) {
+            $warning = $warning + " and stops working on " + $bestSunset;
+        }
+    }
+    return Negotiated{
+        ok: true,
+        version: $best,
+        basePath: $bestPath,
+        warning: $warning,
+        error: ""
+    };
+}
+
+/**
+ * Fetch a registry's discovery document (a network call). A `404` is **not** an
+ * error: it means the registry predates the document, and the legacy assumption
+ * (v1 at the root) is returned instead.
+ * @param client {Client} the repository client
+ * @return {Discovery} the document, or the legacy assumption
+ * @throws {Error} on a transport failure or an unparseable body
+ */
+export func discover(client as Client) {
+    def headers as map of string to string init {};
+    def resp as http.Response init http.get(discoveryUrl($client.baseUrl), $headers);
+    if ($resp.status == 404) {
+        return legacyDiscovery();
+    }
+    return parseDiscovery($resp.body);
+}
+
+/**
+ * Return the API major versions this build of jvc speaks.
+ * @return {list of int} the supported majors
+ */
+export func supportedVersions() {
+    return API_VERSIONS;
 }

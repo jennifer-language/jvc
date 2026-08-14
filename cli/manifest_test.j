@@ -83,14 +83,60 @@ func testParseTomlLenientTopLevel() {
 }
 
 func testParseJson() {
-    def src as string init "{\"package\":{\"name\":\"demo\",\"version\":\"0.3.0\"}," +
-        "\"decks\":{\"ansi\":\"^1.2.0\"},\"provides\":{\"logger\":\"1.0.0\"}}";
+    def src as string init '{"package":{"name":"demo","version":"0.3.0"},' +
+        '"decks":{"ansi":"^1.2.0"},"provides":{"logger":"1.0.0"}}';
     def m as Manifest init parse($src, "json");
     testing.assertEqual($m.pkg.name, "demo");
     testing.assertEqual($m.pkg.description, "");
     testing.assertEqual(len($m.decks), 1);
     testing.assertEqual($m.decks[0].constraint, "^1.2.0");
     testing.assertEqual($m.provides[0].constraint, "1.0.0");
+}
+
+# --- [sources] (per-deck git source overrides) ------------------------------
+
+# a source override must survive all three encodings, since a git-sourced deck
+# is otherwise indistinguishable from a repository one in the manifest
+func testSourcesRoundTripInEveryFormat() {
+    def m as Manifest init empty("mydeck", "1.0.0");
+    $m = addDependency($m, "@acme/routeros", "^1.0.0");
+    $m = addSource($m, "@acme/routeros", "https://github.com/acme/deck-routeros.git");
+    for (def format in ["toml", "yaml", "json"]) {
+        def back as Manifest init parse(encode($m, $format), $format);
+        testing.assertEqual(getSource($back, "@acme/routeros"),
+            "https://github.com/acme/deck-routeros.git");
+        # the constraint stays in [decks], independent of the source
+        testing.assertEqual(getConstraint($back, "@acme/routeros"), "^1.0.0");
+    }
+}
+
+func testGetSourceOfAnUnsourcedDeck() {
+    def m as Manifest init empty("mydeck", "1.0.0");
+    $m = addDependency($m, "@acme/routeros", "^1.0.0");
+    testing.assertEqual(getSource($m, "@acme/routeros"), "");
+}
+
+func testRemoveSourceLeavesTheRequirement() {
+    def m as Manifest init empty("mydeck", "1.0.0");
+    $m = addDependency($m, "@acme/routeros", "^1.0.0");
+    $m = addSource($m, "@acme/routeros", "https://x/r.git");
+    $m = removeSource($m, "@acme/routeros");
+    testing.assertEqual(getSource($m, "@acme/routeros"), "");
+    testing.assertTrue(hasDependency($m, "@acme/routeros"));
+}
+
+func testAddSourceReplacesAnExistingUrl() {
+    def m as Manifest init empty("mydeck", "1.0.0");
+    $m = addSource($m, "@acme/routeros", "https://old/r.git");
+    $m = addSource($m, "@acme/routeros", "https://new/r.git");
+    testing.assertEqual(len($m.sources), 1);
+    testing.assertEqual(getSource($m, "@acme/routeros"), "https://new/r.git");
+}
+
+# a manifest written before [sources] existed still parses
+func testManifestWithoutSourcesParses() {
+    def m as Manifest init parse("[package]\nname = \"x\"\nversion = \"1.0.0\"\n", "toml");
+    testing.assertEqual(len($m.sources), 0);
 }
 
 func testTomlRoundTrip() {
@@ -203,7 +249,7 @@ func testFindManifestRejectsBoth() {
     def dir as string init os.tempDir() + "/jvc_find_both";
     fs.mkdirAll($dir);
     fs.writeString($dir + "/deck.toml", "name = \"x\"\n");
-    fs.writeString($dir + "/deck.json", "{\"name\":\"x\"}");
+    fs.writeString($dir + "/deck.json", '{"name":"x"}');
     testing.assertThrows("findBoth", "manifest");
     fs.removeAll($dir);
 }

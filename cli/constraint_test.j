@@ -1,6 +1,9 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+# Copyright (C) 2026 jvc contributors
+#
 # White-box tests for constraint.j. Run with:
 #
-#     JENNIFER_SYSMODDIR=../jennifer-lang/modules jennifer test server/constraint_test.j
+#     jennifer test cli/constraint_test.j
 #
 # The overlay splices constraint.j in first, so the tests reach its exported
 # surface (satisfies / best) by bare identifier.

@@ -1,10 +1,10 @@
 # The deck repository server
 
 The repository (`server/`) is a read-only JSON API over a `flatdb` file,
-serving deck metadata and resolving version constraints. No user management —
+serving deck metadata and resolving version constraints. No user management -
 just the paths the [CLI](cli.md) needs. Every registry deck is a **scoped
 `@scope/deck`** deck (a bare name is an engine-bundled or local module, not a
-registry deck — see [deck-spec.md §7](deck-spec.md)). Delivery is **by external
+registry deck - see [deck-spec.md §7](deck-spec.md)). Delivery is **by external
 URL**: the repository stores metadata and points at where each version's
 `.tar.gz` lives.
 
@@ -17,7 +17,7 @@ JVC_DB=server/decks.json jennifer serve server/serve.j
 
 Environment: `JVC_DB` (store path, default `decks.json`), `JVC_ADDR` (listen
 address, default `:8080`). A current `jennifer` build resolves the app's module
-imports from the default module directory — no `-I` flag needed.
+imports from the default module directory - no `-I` flag needed.
 
 ## Routes
 
@@ -26,20 +26,28 @@ imports from the default module directory — no `-I` flag needed.
 | `GET /`                                 | service identity + endpoint list          |
 | `GET /health`                           | `{ "status": "ok" }`                       |
 | `GET /decks`                            | `{ "decks": [names…] }`                     |
-| `GET /decks/:name`                      | a deck's full record (all versions)       |
+| `GET /deck?name=<deck>`                 | a deck's full record (all versions), scoped-name safe (the CLI's `install`) |
+| `GET /decks/:name`                      | a deck's full record, bare names only     |
 | `GET /decks/:name/:version`             | one version's record                      |
 | `GET /resolve?name=&constraint=`        | best matching version + fetch URL (the CLI's `query`) |
-| `GET /resolve-graph?roots=<json>`       | the whole transitive graph, flattened + locked (the CLI's `install`) |
+| `GET /resolve-graph?roots=<json>`       | the whole transitive graph, flattened + locked (a convenience API) |
 
 `/resolve` returns `{ found, name, version, url, checksum, kind, description }`,
-where `kind` is `"tar.gz"` (a vendored scoped deck — the only registry delivery
+where `kind` is `"tar.gz"` (a vendored scoped deck - the only registry delivery
 form). A missing deck/version is `404`; an unresolvable `/resolve` is `404` with
-`{ "found": false, … }`. Scoped names in a path are URL-encoded
-(`/decks/%40jennifer%2Frouteros`).
+`{ "found": false, … }`.
+
+**A scoped deck must be addressed by query parameter, not by path.** A scoped
+name holds a `/`, and percent-encoding does not save it: the router decodes
+`%2F` before matching, so `GET /decks/%40jennifer%2Frouteros` matches the
+*two*-segment `/decks/:name/:version` route and answers
+`404 no such version: @jennifer@routeros`. Use `GET /deck?name=…` instead, which
+is what the CLI's resolver calls. The `/decks/:name` path route remains useful
+for bare names only.
 
 `/resolve-graph` takes `roots`, a URL-encoded **JSON object** of deck name →
 constraint (the consumer's `[decks]`), and returns the whole dependency graph
-resolved transitively — each chosen version contributes its own recorded
+resolved transitively - each chosen version contributes its own recorded
 requirements, and multiple constraints on a shared deck are unified to the
 highest version satisfying all of them:
 
@@ -50,6 +58,12 @@ highest version satisfying all of them:
 Each entry's `engines` is that version's `[engines]` allowlist (engine → range);
 the CLI uses it for the install-time graph engine gate and records it in
 `camcorder.lock` for the run-time check.
+
+`jvc install` no longer calls this endpoint - it resolves locally from `/deck`
+metadata (see [cli.md](cli.md)). The endpoint is kept as a convenience for other
+clients, and answers with the *same* resolver the CLI runs: `deckcatalog` feeds
+the store's decks into a `cli/catalog.j` and calls `cli/resolver.j`, seeding only
+the decks the resolver asks for.
 
 `resolved` holds one entry per deck in the graph (roots and every transitive
 dependency), in the order the CLI should install them. An unsatisfiable graph
@@ -82,7 +96,7 @@ Set `JVC_DB=server/decks.json` so it edits the same store the server reads.
 computes the sha256, and derives `--requires` from the deck's `[decks]` and
 `--engines` from its `[engines]`, then either writes the same store directly
 (`--db`) or prints the exact `deckadmin add` command. There is no HTTP write
-endpoint — the server stays read-only.
+endpoint - the server stays read-only.
 
 **Registry decks are scoped.** A registry deck is a scoped `@jennifer/routeros`
 deck, stored as `kind = "tar.gz"`, and may only be published under a
@@ -107,7 +121,7 @@ deckadmin add @jennifer/routeros 0.1.0 <url> sha256:<hex> "RouterOS client" \
 ### Publishing a scoped deck
 
 ```
-# The deck author's repo/tarball layout — only src/ is vendored on install:
+# The deck author's repo/tarball layout - only src/ is vendored on install:
 #   deck.toml   README.md   src/routeros.j   src/query/words.j
 
 # 1. register the scope (once)
@@ -142,7 +156,7 @@ The registry database lives in the named volume `jvcdata` (seeded from the
 image's `decks.json` on first start), so `deckadmin` edits survive restarts.
 The AUR `jennifer-git` package ships only the interpreter binary, so the image
 populates the interpreter's own module directory (`/usr/share/jennifer/modules`)
-with the standard library from the same upstream — the app's stdlib imports then
+with the standard library from the same upstream - the app's stdlib imports then
 resolve with no `-I` flag.
 
 ## Modules
@@ -154,6 +168,9 @@ resolve with no `-I` flag.
 | `server/apiview.j`    | HTTP responses as pure data (`Reply`)            |
 | `server/store.j`      | deck-registry storage over `flatdb` (decks + namespaces) |
 | `server/admin.j`      | maintenance logic (`add`/`remove`/`update`/`list`/`register-namespace`) |
-| `server/constraint.j` | version-constraint matching over `semver`        |
-| `server/resolver.j`   | transitive dependency graph resolver (`/resolve-graph`) |
+| `server/deckcatalog.j`| store -> `cli/catalog.j` adapter + the fetch loop behind `/resolve-graph` |
 | `server/decks.json`   | the flatdb registry database (seed + runtime)    |
+
+Resolution itself is not here: `server/deckcatalog.j` calls the CLI's
+`cli/resolver.j` and `cli/constraint.j` across the directory boundary, so there
+is exactly one implementation of the constraint grammar and the graph solver.

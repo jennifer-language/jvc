@@ -100,6 +100,19 @@ func parseRequires(spec as string) {
     return $out;
 }
 
+# parseList parses a comma-separated "--capabilities" spec ("net, exec") into a
+# list, dropping blanks. Order and duplicates are the caller's business.
+func parseList(spec as string) {
+    def out as list of string init [];
+    for (def part in strings.split($spec, ",")) {
+        def p as string init strings.trim($part);
+        if (not ($p == "")) {
+            $out[] = $p;
+        }
+    }
+    return $out;
+}
+
 # readResult / failResult / editResult build the three AdminResult shapes.
 func readResult(db as flatdb.DB, message as string) {
     return AdminResult{ db: $db, ok: true, changed: false, message: $message };
@@ -120,6 +133,7 @@ func helpText() {
         "\ncommands:\n" +
         "  add <deck> <version> <url> [checksum] [description] " +
         "[--requires \"dep constraint, ...\"] [--engines \"engine range, ...\"]\n" +
+        "                              [--capabilities \"net, exec\"]\n" +
         "  update <deck> <version> <url> [checksum] [description] " +
         "[--requires ...] [--engines ...]\n" +
         "  remove <deck> [version]\n" +
@@ -135,7 +149,9 @@ func helpText() {
 func cmdAdd(db as flatdb.DB, rawArgs as list of string, now as string) {
     def requires as map of string to string init parseRequires(flagValue($rawArgs, "--requires"));
     def engines as map of string to string init parseRequires(flagValue($rawArgs, "--engines"));
-    def args as list of string init stripFlag(stripFlag($rawArgs, "--requires"), "--engines");
+    def capabilities as list of string init parseList(flagValue($rawArgs, "--capabilities"));
+    def args as list of string init stripFlag(
+        stripFlag(stripFlag($rawArgs, "--requires"), "--engines"), "--capabilities");
     def name as string init argAt($args, 2);
     def version as string init argAt($args, 3);
     def url as string init argAt($args, 4);
@@ -170,6 +186,7 @@ func cmdAdd(db as flatdb.DB, rawArgs as list of string, now as string) {
         kind: $kind,
         requires: $requires,
         engines: $engines,
+        capabilities: $capabilities,
         description: $description,
         publishedAt: $now
     };

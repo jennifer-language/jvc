@@ -44,6 +44,16 @@ func apiIndex(ctx as web.Context) {
 }
 
 /**
+ * GET /.well-known/jennifer-registry - the discovery document a client reads to
+ * verify it speaks this registry's API version before calling anything else.
+ * @param ctx {web.Context} the request context
+ */
+func apiDiscovery(ctx as web.Context) {
+    def reply as view.Reply init view.discovery();
+    web.sendJson($ctx, $reply.status, $reply.body);
+}
+
+/**
  * GET /health - a liveness check.
  * @param ctx {web.Context} the request context
  */
@@ -69,6 +79,19 @@ func apiListDecks(ctx as web.Context) {
 func apiGetDeck(ctx as web.Context) {
     def db as flatdb.DB init store.open($dbPath);
     def reply as view.Reply init view.getDeck($db, web.param($ctx, "name"));
+    web.sendJson($ctx, $reply.status, $reply.body);
+}
+
+/**
+ * GET /deck?name=<deck> - one deck's full record, addressed by query parameter.
+ * This is the form the CLI's resolver uses: a scoped name (`@jennifer/routeros`)
+ * holds a `/`, which the `/decks/:name` path route would split into two
+ * segments, so a scoped deck is only reachable this way.
+ * @param ctx {web.Context} the request context
+ */
+func apiGetDeckByQuery(ctx as web.Context) {
+    def db as flatdb.DB init store.open($dbPath);
+    def reply as view.Reply init view.getDeck($db, web.query($ctx, "name"));
     web.sendJson($ctx, $reply.status, $reply.body);
 }
 
@@ -109,12 +132,24 @@ func apiResolveGraph(ctx as web.Context) {
 
 def app as web.App init web.new();
 $app = web.get($app, "/", "apiIndex");
+$app = web.get($app, "/.well-known/jennifer-registry", "apiDiscovery");
 $app = web.get($app, "/resolve-graph", "apiResolveGraph");
 $app = web.get($app, "/health", "apiHealth");
 $app = web.get($app, "/decks", "apiListDecks");
+$app = web.get($app, "/deck", "apiGetDeckByQuery");
 $app = web.get($app, "/decks/:name", "apiGetDeck");
 $app = web.get($app, "/decks/:name/:version", "apiGetVersion");
 $app = web.get($app, "/resolve", "apiResolve");
+
+# The discovery document advertises API v1 at /v1, so serve every endpoint there
+# too. The bare paths stay as v1 aliases for clients that predate discovery.
+$app = web.get($app, "/v1/health", "apiHealth");
+$app = web.get($app, "/v1/decks", "apiListDecks");
+$app = web.get($app, "/v1/deck", "apiGetDeckByQuery");
+$app = web.get($app, "/v1/decks/:name", "apiGetDeck");
+$app = web.get($app, "/v1/decks/:name/:version", "apiGetVersion");
+$app = web.get($app, "/v1/resolve", "apiResolve");
+$app = web.get($app, "/v1/resolve-graph", "apiResolveGraph");
 
 io.printf("jvc deck repository listening on http://localhost%s (db: %s)\n", $addr, $dbPath);
 web.run($app, $addr);

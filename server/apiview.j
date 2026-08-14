@@ -21,7 +21,7 @@ use json;
 use strings;
 import "flatdb.j" as flatdb;
 import "./store.j" as store;
-import "./resolver.j" as resolver;
+import "./deckcatalog.j" as deckcatalog;
 
 # ptrEscape encodes a name as one JSON Pointer token ("~"->"~0", "/"->"~1") so a
 # scoped root key like "@jennifer/routeros" reads as a single key.
@@ -33,6 +33,13 @@ func ptrEscape(token as string) {
 # The service name and version reported by the index endpoint.
 def const SERVICE_NAME as string init "jvc";
 def const SERVICE_VERSION as string init "0.1.0";
+
+# The registry specification version this server implements.
+def const SPEC_VERSION as string init "1.0";
+
+# The optional operations this registry offers. `deck` is mandatory; the write
+# operations are absent until the write API exists.
+def const FEATURES as list of string init ["deck", "decks", "resolve", "resolveGraph"];
 
 /**
  * An HTTP response as pure data: a status code and a JSON body.
@@ -68,15 +75,46 @@ export func index() {
     def endpoints as list of string init [
         "GET /health",
         "GET /decks",
+        "GET /deck?name=<deck>",
         "GET /decks/:name",
         "GET /decks/:name/:version",
-        "GET /resolve?name=<deck>&constraint=<range>"
+        "GET /resolve?name=<deck>&constraint=<range>",
+        "GET /resolve-graph?roots=<json>"
     ];
     def body as json.Value init json.map();
     $body = json.set($body, "/service", SERVICE_NAME);
     $body = json.set($body, "/version", SERVICE_VERSION);
     $body = json.set($body, "/description", "deck repository for jennifer-lang");
     $body = json.set($body, "/endpoints", stringList($endpoints));
+    return Reply{ status: 200, body: $body };
+}
+
+/**
+ * The discovery document (registry specification §4.1): which API versions this
+ * registry serves and which optional operations it offers, so a client can
+ * verify compatibility before it calls anything.
+ *
+ * Served at the fixed, unversioned `/.well-known/jennifer-registry`. That path
+ * is the one thing a client may hard-code; everything else hangs off the base
+ * path advertised here.
+ * @return {Reply} a 200 reply with the discovery document
+ */
+export func discovery() {
+    def body as json.Value init json.map();
+    $body = json.set($body, "/registry", SERVICE_NAME);
+    $body = json.set($body, "/specVersion", SPEC_VERSION);
+    def api as json.Value init json.list();
+    def v1 as json.Value init json.map();
+    $v1 = json.set($v1, "/version", 1);
+    $v1 = json.set($v1, "/path", "/v1");
+    $v1 = json.set($v1, "/status", "stable");
+    $api = json.append($api, "", $v1);
+    $body = json.set($body, "/api", $api);
+    $body = json.set($body, "/features", stringList(FEATURES));
+    def auth as json.Value init json.map();
+    $auth = json.set($auth, "/provider", "github");
+    $auth = json.set($auth, "/flow", "device");
+    $body = json.set($body, "/auth", $auth);
     return Reply{ status: 200, body: $body };
 }
 
@@ -193,7 +231,7 @@ export func resolveGraph(db as flatdb.DB, rootsJson as string) {
     } catch (err) {
         return errorReply(400, "invalid 'roots' JSON object");
     }
-    def g as resolver.GraphResult init resolver.resolveGraph($db, $roots);
+    def g as deckcatalog.GraphResult init deckcatalog.resolveGraph($db, $roots);
     def body as json.Value init json.map();
     if (not $g.ok) {
         $body = json.set($body, "/ok", false);
@@ -209,12 +247,16 @@ export func resolveGraph(db as flatdb.DB, rootsJson as string) {
         $elem = json.set($elem, "/url", $r.url);
         $elem = json.set($elem, "/checksum", $r.checksum);
         $elem = json.set($elem, "/kind", $r.kind);
-        def engines as map of string to string init store.versionEngines($db, $r.name, $r.version);
         def ej as json.Value init json.map();
-        for (def eng in $engines) {
-            $ej = json.set($ej, "/" + ptrEscape($eng), $engines[$eng]);
+        for (def eng in $r.engines) {
+            $ej = json.set($ej, "/" + ptrEscape($eng), $r.engines[$eng]);
         }
         $elem = json.set($elem, "/engines", $ej);
+        def cj as json.Value init json.list();
+        for (def cap in $r.capabilities) {
+            $cj = json.append($cj, "", $cap);
+        }
+        $elem = json.set($elem, "/capabilities", $cj);
         $elem = json.set($elem, "/description", $r.description);
         $arr = json.append($arr, "", $elem);
     }

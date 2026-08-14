@@ -27,8 +27,9 @@
 
 use json;
 use strings;
+use convert;
 import "flatdb.j" as flatdb;
-import "./constraint.j" as constraint;
+import "../cli/constraint.j" as constraint;
 
 # ptrEscape / ptrUnescape encode a name as one JSON Pointer reference token
 # (RFC 6901: "~" -> "~0", "/" -> "~1"), so a scoped deck name such as
@@ -53,6 +54,7 @@ func ptrUnescape(token as string) {
  * @field kind {string} the delivery kind, "file" (single .j) or "tar.gz" (vendored deck)
  * @field requires {map of string to string} this version's runtime deps (deck name -> constraint)
  * @field engines {map of string to string} the Jennifer engines that can run it (engine -> range)
+ * @field capabilities {list of string} host capabilities its code needs (net / exec / sql)
  * @field description {string} a one-line summary of this version ("" when absent)
  * @field publishedAt {string} when the version was published (Unix seconds as text)
  */
@@ -63,6 +65,7 @@ export def struct DeckVersion {
     kind as string,
     requires as map of string to string,
     engines as map of string to string,
+    capabilities as list of string,
     description as string,
     publishedAt as string
 };
@@ -267,6 +270,11 @@ export func putVersion(db as flatdb.DB, name as string, description as string, v
         $ejson = json.set($ejson, "/" + ptrEscape($eng), $ver.engines[$eng]);
     }
     $vjson = json.set($vjson, "/engines", $ejson);
+    def cjson as json.Value init json.list();
+    for (def cap in $ver.capabilities) {
+        $cjson = json.append($cjson, "", $cap);
+    }
+    $vjson = json.set($vjson, "/capabilities", $cjson);
     $vjson = json.set($vjson, "/description", $ver.description);
     $vjson = json.set($vjson, "/publishedAt", $ver.publishedAt);
     $out = flatdb.set($out, versionPtr($name, $ver.version), $vjson);
@@ -362,6 +370,28 @@ export func versionEngines(db as flatdb.DB, name as string, version as string) {
     }
     for (def key in flatdb.keys($db, $engPtr)) {
         $out[$key] = json.asString(flatdb.get($db, $engPtr + "/" + ptrEscape($key)));
+    }
+    return $out;
+}
+
+/**
+ * Return a published version's declared host capabilities (`net` / `exec` /
+ * `sql`). Empty when the version declares none, which means its code runs on any
+ * build including `jennifer-tiny`.
+ * @param db {flatdb.DB} the store to read
+ * @param name {string} the deck name
+ * @param version {string} the version string
+ * @return {list of string} the version's capability set
+ */
+export func versionCapabilities(db as flatdb.DB, name as string, version as string) {
+    def out as list of string init [];
+    def capPtr as string init versionPtr($name, $version) + "/capabilities";
+    if (not flatdb.has($db, $capPtr)) {
+        return $out;
+    }
+    def arr as json.Value init flatdb.get($db, $capPtr);
+    for (def i as int init 0; $i < json.length($arr, ""); $i = $i + 1) {
+        $out[] = json.asString($arr, "/" + convert.toString($i));
     }
     return $out;
 }

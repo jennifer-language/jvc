@@ -8,8 +8,10 @@
  * package metadata and version (the `[package]` table), the Jennifer engines
  * that can run it (the `[engines]` table), the runtime requirements (the
  * `[decks]` table), the development-only requirements (the `[dev-decks]`
- * table), the decks it conflicts with (the `[conflicts]` table), and what the
- * deck provides (the `[provides]` table). Two on-disk encodings
+ * table), the decks it conflicts with (the `[conflicts]` table), what the
+ * deck provides (the `[provides]` table), and where individual decks come from
+ * when not from the repository (the `[sources]` table, deck name -> git URL).
+ * Two on-disk encodings
  * are supported, chosen by file extension - `deck.toml` (TOML, Jennifer's
  * native config format) and `deck.json` - both decoded to and encoded from
  * the same `Manifest` value. A dependency or conflict binds a deck name to a
@@ -49,6 +51,9 @@ def const MANIFEST_JSON as string init "deck.json";
  * @field urls {map of string to string} project URLs; "deck" required, others optional
  * @field authors {list of string} the author names / emails (empty when absent)
  * @field keywords {list of string} search keywords (empty when absent)
+ * @field capabilities {list of string} host capabilities the deck's code needs (net / exec / sql)
+ * @field bin {string} the entry script this package exposes as a command ("" for none)
+ * @field binDir {string} where a project writes vendored commands ("" -> "bin")
  */
 export def struct Package {
     name as string,
@@ -57,7 +62,10 @@ export def struct Package {
     license as string,
     urls as map of string to string,
     authors as list of string,
-    keywords as list of string
+    keywords as list of string,
+    capabilities as list of string,
+    bin as string,
+    binDir as string
 };
 
 /**
@@ -84,6 +92,7 @@ export def struct Dependency {
  * @field devDecks {list of Dependency} the development-only requirements
  * @field conflicts {list of Dependency} the decks (and version ranges) this deck conflicts with
  * @field provides {list of Dependency} the capabilities this deck provides
+ * @field sources {list of Dependency} per-deck source overrides (deck -> git URL)
  */
 export def struct Manifest {
     pkg as Package,
@@ -91,7 +100,8 @@ export def struct Manifest {
     decks as list of Dependency,
     devDecks as list of Dependency,
     conflicts as list of Dependency,
-    provides as list of Dependency
+    provides as list of Dependency,
+    sources as list of Dependency
 };
 
 /**
@@ -111,7 +121,10 @@ export func empty(name as string, version as string) {
         license: "",
         urls: $noUrls,
         authors: $noStrings,
-        keywords: $noStrings
+        keywords: $noStrings,
+        capabilities: $noStrings,
+        bin: "",
+        binDir: ""
     };
     def noDeps as list of Dependency init [];
     return Manifest{
@@ -120,7 +133,8 @@ export func empty(name as string, version as string) {
         decks: $noDeps,
         devDecks: $noDeps,
         conflicts: $noDeps,
-        provides: $noDeps
+        provides: $noDeps,
+        sources: $noDeps
     };
 }
 
@@ -228,7 +242,10 @@ func parseToml(text as string) {
         license: tomlPkgStr($doc, "license"),
         urls: tomlUrls($doc),
         authors: tomlStrList($doc, "authors"),
-        keywords: tomlStrList($doc, "keywords")
+        keywords: tomlStrList($doc, "keywords"),
+        capabilities: tomlStrList($doc, "capabilities"),
+        bin: tomlPkgStr($doc, "bin"),
+        binDir: tomlPkgStr($doc, "bin-dir")
     };
     return Manifest{
         pkg: $pkg,
@@ -236,7 +253,8 @@ func parseToml(text as string) {
         decks: tomlDeps($doc, "/decks"),
         devDecks: tomlDeps($doc, "/dev-decks"),
         conflicts: tomlDeps($doc, "/conflicts"),
-        provides: tomlDeps($doc, "/provides")
+        provides: tomlDeps($doc, "/provides"),
+        sources: tomlDeps($doc, "/sources")
     };
 }
 
@@ -307,7 +325,10 @@ func parseYaml(text as string) {
         license: yamlPkgStr($doc, "license"),
         urls: yamlUrls($doc),
         authors: yamlStrList($doc, "authors"),
-        keywords: yamlStrList($doc, "keywords")
+        keywords: yamlStrList($doc, "keywords"),
+        capabilities: yamlStrList($doc, "capabilities"),
+        bin: yamlPkgStr($doc, "bin"),
+        binDir: yamlPkgStr($doc, "bin-dir")
     };
     return Manifest{
         pkg: $pkg,
@@ -315,7 +336,8 @@ func parseYaml(text as string) {
         decks: yamlDeps($doc, "/decks"),
         devDecks: yamlDeps($doc, "/dev-decks"),
         conflicts: yamlDeps($doc, "/conflicts"),
-        provides: yamlDeps($doc, "/provides")
+        provides: yamlDeps($doc, "/provides"),
+        sources: yamlDeps($doc, "/sources")
     };
 }
 
@@ -387,7 +409,10 @@ func parseJson(text as string) {
         license: jsonPkgStr($doc, "license"),
         urls: jsonUrls($doc),
         authors: jsonStrList($doc, "authors"),
-        keywords: jsonStrList($doc, "keywords")
+        keywords: jsonStrList($doc, "keywords"),
+        capabilities: jsonStrList($doc, "capabilities"),
+        bin: jsonPkgStr($doc, "bin"),
+        binDir: jsonPkgStr($doc, "bin-dir")
     };
     return Manifest{
         pkg: $pkg,
@@ -395,7 +420,8 @@ func parseJson(text as string) {
         decks: jsonDeps($doc, "/decks"),
         devDecks: jsonDeps($doc, "/dev-decks"),
         conflicts: jsonDeps($doc, "/conflicts"),
-        provides: jsonDeps($doc, "/provides")
+        provides: jsonDeps($doc, "/provides"),
+        sources: jsonDeps($doc, "/sources")
     };
 }
 
@@ -460,11 +486,15 @@ func encodeToml(m as Manifest) {
     $doc = tomlSetUrls($doc, "/package/urls", $m.pkg.urls);
     $doc = tomlSetStrList($doc, "/package/authors", $m.pkg.authors);
     $doc = tomlSetStrList($doc, "/package/keywords", $m.pkg.keywords);
+    $doc = tomlSetStrList($doc, "/package/capabilities", $m.pkg.capabilities);
+    $doc = toml.set($doc, "/package/bin", $m.pkg.bin);
+    $doc = toml.set($doc, "/package/bin-dir", $m.pkg.binDir);
     $doc = tomlSetDeps($doc, "/engines", $m.engines);
     $doc = tomlSetDeps($doc, "/decks", $m.decks);
     $doc = tomlSetDeps($doc, "/dev-decks", $m.devDecks);
     $doc = tomlSetDeps($doc, "/conflicts", $m.conflicts);
     $doc = tomlSetDeps($doc, "/provides", $m.provides);
+    $doc = tomlSetDeps($doc, "/sources", $m.sources);
     return toml.encodePretty($doc);
 }
 
@@ -508,11 +538,15 @@ func encodeYaml(m as Manifest) {
     $doc = yamlSetUrls($doc, "/package/urls", $m.pkg.urls);
     $doc = yamlSetStrList($doc, "/package/authors", $m.pkg.authors);
     $doc = yamlSetStrList($doc, "/package/keywords", $m.pkg.keywords);
+    $doc = yamlSetStrList($doc, "/package/capabilities", $m.pkg.capabilities);
+    $doc = yaml.set($doc, "/package/bin", $m.pkg.bin);
+    $doc = yaml.set($doc, "/package/bin-dir", $m.pkg.binDir);
     $doc = yamlSetDeps($doc, "/engines", $m.engines);
     $doc = yamlSetDeps($doc, "/decks", $m.decks);
     $doc = yamlSetDeps($doc, "/dev-decks", $m.devDecks);
     $doc = yamlSetDeps($doc, "/conflicts", $m.conflicts);
     $doc = yamlSetDeps($doc, "/provides", $m.provides);
+    $doc = yamlSetDeps($doc, "/sources", $m.sources);
     return yaml.encodePretty($doc);
 }
 
@@ -556,11 +590,15 @@ func encodeJson(m as Manifest) {
     $doc = jsonSetUrls($doc, "/package/urls", $m.pkg.urls);
     $doc = jsonSetStrList($doc, "/package/authors", $m.pkg.authors);
     $doc = jsonSetStrList($doc, "/package/keywords", $m.pkg.keywords);
+    $doc = jsonSetStrList($doc, "/package/capabilities", $m.pkg.capabilities);
+    $doc = json.set($doc, "/package/bin", $m.pkg.bin);
+    $doc = json.set($doc, "/package/bin-dir", $m.pkg.binDir);
     $doc = jsonSetDeps($doc, "/engines", $m.engines);
     $doc = jsonSetDeps($doc, "/decks", $m.decks);
     $doc = jsonSetDeps($doc, "/dev-decks", $m.devDecks);
     $doc = jsonSetDeps($doc, "/conflicts", $m.conflicts);
     $doc = jsonSetDeps($doc, "/provides", $m.provides);
+    $doc = jsonSetDeps($doc, "/sources", $m.sources);
     return json.encodePretty($doc);
 }
 
@@ -876,6 +914,46 @@ export func removeEngine(m as Manifest, name as string) {
     def out as Manifest init $m;
     $out.engines = depListRemove($m.engines, $name);
     return $out;
+}
+
+/**
+ * Return a new manifest sourcing a deck from a git URL (added or updated). The
+ * `[sources]` entry says only *where* the deck's versions come from; the version
+ * constraint stays in `[decks]`, so a deck can move between the repository and a
+ * git URL without its requirement changing.
+ * @param m {Manifest} the starting manifest
+ * @param name {string} the deck name (`@scope/deck`)
+ * @param url {string} the git URL to resolve that deck's versions from
+ * @return {Manifest} a new manifest with the source set
+ */
+export func addSource(m as Manifest, name as string, url as string) {
+    def out as Manifest init $m;
+    $out.sources = depListSet($m.sources, $name, $url);
+    return $out;
+}
+
+/**
+ * Return a new manifest with a deck's source override removed, so the deck
+ * resolves from the repository again.
+ * @param m {Manifest} the starting manifest
+ * @param name {string} the deck name to un-source
+ * @return {Manifest} a new manifest without that source
+ */
+export func removeSource(m as Manifest, name as string) {
+    def out as Manifest init $m;
+    $out.sources = depListRemove($m.sources, $name);
+    return $out;
+}
+
+/**
+ * Return the git URL a deck is sourced from, or "" when it resolves from the
+ * repository.
+ * @param m {Manifest} the manifest to inspect
+ * @param name {string} the deck name
+ * @return {string} the git URL, or "" when there is no source override
+ */
+export func getSource(m as Manifest, name as string) {
+    return depListGet($m.sources, $name);
 }
 
 /**

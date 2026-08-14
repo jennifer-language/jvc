@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+# Copyright (C) 2026 jvc contributors
+
 /**
  * Version-constraint matching for deck dependencies. A manifest pins
  * each deck with a small range grammar - "^1.2.0", "~0.4", ">=1.0.0", "1.2.3",
@@ -5,6 +8,9 @@
  * SemVer version and picks the best match from a set. The `semver` module owns
  * version values and their ordering; range matching is deliberately out of its
  * scope, so it lives here. Pure Jennifer over `strings` / `convert` + `semver`.
+ *
+ * Lives in `cli/` because the CLI owns resolution; the server's `store` imports
+ * it across the directory boundary for its own `/resolve` endpoint.
  * @module constraint
  * @example
  * import "./constraint.j" as constraint;

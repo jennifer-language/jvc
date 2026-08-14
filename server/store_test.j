@@ -26,6 +26,7 @@ func sampleVersion(version as string, url as string) {
         kind: "file",
         requires: {},
         engines: {},
+        capabilities: [],
         description: "v " + $version,
         publishedAt: "1700000000"
     };
@@ -146,6 +147,7 @@ func tarVersion(version as string, url as string) {
         kind: "tar.gz",
         requires: {},
         engines: {},
+        capabilities: [],
         description: "v " + $version,
         publishedAt: "1700000000"
     };
@@ -181,7 +183,7 @@ func testVersionEngines() {
     def db as flatdb.DB init emptyStore();
     def ver as DeckVersion init DeckVersion{
         version: "1.0.0", url: "u", checksum: "", kind: "tar.gz",
-        requires: {}, engines: {"jennifer": "^0.21.0"},
+        requires: {}, engines: {"jennifer": "^0.21.0"}, capabilities: [],
         description: "", publishedAt: "0"
     };
     $db = putVersion($db, "@a/b", "", $ver);

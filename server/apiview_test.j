@@ -29,6 +29,7 @@ func version(v as string, url as string) {
         kind: "file",
         requires: {},
         engines: {},
+        capabilities: [],
         description: "v " + $v,
         publishedAt: "1700000000"
     };
@@ -115,7 +116,8 @@ func testResolveMissingName() {
 func versionReq(v as string, url as string, requires as map of string to string) {
     return store.DeckVersion{
         version: $v, url: $url, checksum: "", kind: "file",
-        requires: $requires, engines: {}, description: "", publishedAt: "0"
+        requires: $requires, engines: {}, capabilities: [], description: "",
+        publishedAt: "0"
     };
 }
 
@@ -124,7 +126,7 @@ func testResolveGraphTransitive() {
     def none as map of string to string init {};
     $db = store.putVersion($db, "alpha", "", versionReq("1.0.0", "u", {"beta": "^1.0.0"}));
     $db = store.putVersion($db, "beta", "", versionReq("1.0.0", "u", $none));
-    def reply as Reply init resolveGraph($db, "{\"alpha\":\"^1.0.0\"}");
+    def reply as Reply init resolveGraph($db, '{"alpha":"^1.0.0"}');
     testing.assertEqual($reply.status, 200);
     testing.assertTrue(json.asBool($reply.body, "/ok"));
     testing.assertEqual(json.length($reply.body, "/resolved"), 2);
@@ -132,7 +134,7 @@ func testResolveGraphTransitive() {
 
 func testResolveGraphUnsatisfiable() {
     def db as flatdb.DB init emptyStore();
-    def reply as Reply init resolveGraph($db, "{\"ghost\":\"*\"}");
+    def reply as Reply init resolveGraph($db, '{"ghost":"*"}');
     testing.assertFalse(json.asBool($reply.body, "/ok"));
     testing.assertContains(json.asString($reply.body, "/error"), "no such deck");
 }

@@ -1,15 +1,15 @@
 # The deck manifest
 
 A deck describes itself in a `deck.toml` (or `deck.yaml` / `deck.yml` /
-`deck.json`) file — the jvc equivalent of a Python requirements file or a
+`deck.json`) file - the jvc equivalent of a Python requirements file or a
 `composer.json`. It has these
 parts: package metadata (including project URLs), the deck's own version, the
 Jennifer engine versions that can run it, its runtime requirements, its
 development-only requirements, the decks it conflicts with, and what it
 provides.
 
-> This page is the friendly guide. For the normative reference — field types,
-> requiredness, the name grammar, delivery, and the exact constraint grammar —
+> This page is the friendly guide. For the normative reference - field types,
+> requiredness, the name grammar, delivery, and the exact constraint grammar -
 > see [deck-spec.md](deck-spec.md).
 
 ## Format
@@ -22,6 +22,11 @@ description = "the jennifer deck manager - CLI and deck repository"
 license = "LGPL-3.0-only"
 authors = ["edv@gmi.eu"]
 keywords = ["package-manager", "decks", "jennifer"]
+
+# Host capabilities this deck's CODE needs: net / exec / sql. Empty means pure,
+# and the deck runs on jennifer-tiny too. Must match the
+# `# pragma-jennifer-capability` headers in src/ - jvc publish checks.
+capabilities = ["net"]
 
 # Project URLs by role. `deck` is mandatory (the deck's own manifest /
 # registry location); `homepage` and `manual` are optional.
@@ -53,6 +58,11 @@ jennifer = "^0.21.0"
 # What this deck provides: capability = concrete version.
 [provides]
 deckmanager = "0.1.0"
+
+# Where a deck comes from, when not the repository: deck = git URL. Optional;
+# the version constraint stays in [decks] above.
+[sources]
+"@acme/routeros" = "https://github.com/acme/deck-routeros.git"
 ```
 
 The same data is expressible as `deck.json`, where `name` / `version` may sit at
@@ -93,33 +103,34 @@ TOML, YAML, and JSON are equivalent and round-trip through jvc unchanged.
 
 ## Bare vs scoped dependencies
 
-A module name tells you who owns it — and only one kind is a registry
+A module name tells you who owns it - and only one kind is a registry
 dependency:
 
-- **Scoped** — `@scope/deck` (`@jennifer/routeros`): a **registry deck**, the
+- **Scoped** - `@scope/deck` (`@jennifer/routeros`): a **registry deck**, the
   only form jvc resolves, versions, and vendors. Delivered as a `.tar.gz`,
   installed into the **vendor tree**, imported as `import "@jennifer/routeros/";`
   (binds the `routeros.` namespace). `[decks]` / `[dev-decks]` entries **must be
   scoped**. Because the name contains a `/`, quote it in TOML:
   `"@jennifer/routeros" = "^0.1.0"`.
-- **Bare** — a Jennifer identifier (`ansi`, `http`, `semver`): **not a registry
-  dependency**. A bare name is either a **bundled** stdlib module — its version
+- **Bare** - a Jennifer identifier (`ansi`, `http`, `semver`): **not a registry
+  dependency**. A bare name is either a **bundled** stdlib module - its version
   is the engine's, so require it via `[engines]` (pick a `jennifer` that ships
-  it) — or a **local** module on the `-I` path or a `./relative` import, which
+  it) - or a **local** module on the `-I` path or a `./relative` import, which
   has no version and needs no entry. Putting a bare name in `[decks]` is an
   error (`jvc add`/`install` reject it and point you at `[engines]`).
 
 Why the split: a bare `import "x.j"` is resolved from the interpreter's bundled
 module path *and* the `-I` path, so it can't be unambiguously versioned or
 fetched and may even collide (`module x.j is ambiguous`). Scoped `@scope/deck`
-imports resolve to the vendor tree via the `@`-resolver — unambiguous and
+imports resolve to the vendor tree via the `@`-resolver - unambiguous and
 collision-free.
 
 ## Scoped decks: `/src`, vendoring, and imports
 
 A scoped deck ships as a release tarball, but jvc installs **only its `src/`
-subtree** — the rest of the tarball (manifest, tests, docs) is ignored, so the
-vendor tree stays clean. Files land in `vendor/<scope>/<deck>/` (no `@` on
+subtree**, and within it only the modules: `*_test.j` overlays are skipped too.
+Everything else (manifest, docs, `template/`) is ignored, so the vendor tree
+carries library code and nothing else. Files land in `vendor/<scope>/<deck>/` (no `@` on
 disk), and the entrypoint must be `src/<deck>.j`:
 
 ```
@@ -146,16 +157,22 @@ anything is unpacked. See [cli.md](cli.md) for `jvc install` and
   are hand-authored alternatives.
 - **`[package]` is lenient.** `name` / `version` / `description` are also read
   from the top level if no `[package]` table is present.
+- **A deck may come from git.** A `[sources]` entry points one deck at a git
+  remote instead of the repository; its versions are that repository's SemVer
+  tags, and the lockfile pins the commit rather than a checksum. See
+  [cli.md](cli.md) for the details and the `jvc source` verb.
 - **Resolution is transitive.** `jvc install` resolves not just the `[decks]`
-  here but the whole dependency graph — each dependency's own requirements too —
+  here but the whole dependency graph - each dependency's own requirements too -
   unifying constraints across shared decks. The resolved set is pinned in
-  **`camcorder.lock`** — the "recording" of exactly what got installed (version +
-  url + checksum + kind), one entry per deck in the graph.
+  **`camcorder.lock`** - the "recording" of exactly what got installed (version +
+  url + kind + integrity pin + engines + requires), one entry per deck in the
+  graph. A later `jvc install` reproduces that recording exactly; `jvc update`
+  is what moves it forward.
 
 ## Version constraints
 
-The `constraint` module (server side) evaluates a single constraint (no `||`
-or `,` compound ranges) against a concrete SemVer version:
+The `constraint` module evaluates a single constraint (no `||` or `,` compound
+ranges) against a concrete SemVer version:
 
 | Form              | Meaning                                              |
 | ----------------- | ---------------------------------------------------- |
@@ -171,5 +188,5 @@ or `,` compound ranges) against a concrete SemVer version:
 A prerelease version (e.g. `2.0.0-rc.1`) never satisfies a caret/tilde range;
 address it explicitly with an exact/comparator constraint.
 
-The provided grammar lives in `server/constraint.j`; the manifest reader/writer
-in `cli/manifest.j`; the name grammar in `cli/deckname.j`.
+The grammar lives in `cli/constraint.j`; the manifest reader/writer in
+`cli/manifest.j`; the name grammar in `cli/deckname.j`.
