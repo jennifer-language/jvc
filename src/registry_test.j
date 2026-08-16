@@ -63,21 +63,31 @@ func testDiscoveryUrlIsTheFixedWellKnownPath() {
         "http://localhost:8080/.well-known/jennifer-registry");
 }
 
-# discoveryDoc is a realistic document advertising one stable version.
+# discoveryDoc is a realistic document: one version, served at two base paths.
 func discoveryDoc() {
-    return '{"registry":"decks.example","specVersion":"1.0",' +
-        '"api":[{"version":1,"path":"/v1","status":"stable"}],' +
+    return '{"registry":"decks.example","spec":"1.1",' +
+        '"apis":[{"version":1,"basePath":"/v1","deprecated":false},' +
+        '{"version":1,"basePath":"/","deprecated":false}],' +
         '"features":["deck","decks","resolve"]}';
 }
 
 func testParseDiscovery() {
     def d as Discovery init parseDiscovery(discoveryDoc());
     testing.assertEqual($d.registry, "decks.example");
-    testing.assertEqual($d.specVersion, "1.0");
-    testing.assertEqual(len($d.api), 1);
-    testing.assertEqual($d.api[0].version, 1);
-    testing.assertEqual($d.api[0].path, "/v1");
-    testing.assertEqual($d.api[0].status, "stable");
+    testing.assertEqual($d.spec, "1.1");
+    testing.assertEqual(len($d.apis), 2);
+    testing.assertEqual($d.apis[0].version, 1);
+    testing.assertEqual($d.apis[0].basePath, "/v1");
+    testing.assertFalse($d.apis[0].deprecated);
+}
+
+# a version listed at several base paths is one version, and the canonical
+# (first) mount is the one to use
+func testNegotiateUsesTheFirstMountForAVersion() {
+    def n as Negotiated init negotiate(parseDiscovery(discoveryDoc()), [1]);
+    testing.assertTrue($n.ok);
+    testing.assertEqual($n.version, 1);
+    testing.assertEqual($n.basePath, "/v1");
 }
 
 func testHasFeature() {
@@ -90,16 +100,16 @@ func testHasFeature() {
 # to the document non-breaking
 func testParseDiscoveryIgnoresUnknownFields() {
     def d as Discovery init parseDiscovery(
-        '{"registry":"x","somethingNew":42,"api":[{"version":1,"path":"/v1"}]}');
+        '{"registry":"x","somethingNew":42,"apis":[{"version":1,"basePath":"/v1"}]}');
     testing.assertEqual($d.registry, "x");
-    testing.assertEqual(len($d.api), 1);
-    # an absent status defaults to stable
-    testing.assertEqual($d.api[0].status, "stable");
+    testing.assertEqual(len($d.apis), 1);
+    # an absent `deprecated` reads as false
+    testing.assertFalse($d.apis[0].deprecated);
 }
 
 func testNegotiatePicksTheHighestSharedVersion() {
     def d as Discovery init parseDiscovery(
-        '{"api":[{"version":1,"path":"/v1"},{"version":2,"path":"/v2"}]}');
+        '{"apis":[{"version":1,"basePath":"/v1"},{"version":2,"basePath":"/v2"}]}');
     def n as Negotiated init negotiate($d, [1, 2]);
     testing.assertTrue($n.ok);
     testing.assertEqual($n.version, 2);
@@ -108,7 +118,7 @@ func testNegotiatePicksTheHighestSharedVersion() {
 
 func testNegotiateFallsBackToAnOlderSharedVersion() {
     def d as Discovery init parseDiscovery(
-        '{"api":[{"version":1,"path":"/v1"},{"version":2,"path":"/v2"}]}');
+        '{"apis":[{"version":1,"basePath":"/v1"},{"version":2,"basePath":"/v2"}]}');
     def n as Negotiated init negotiate($d, [1]);
     testing.assertTrue($n.ok);
     testing.assertEqual($n.version, 1);
@@ -118,7 +128,7 @@ func testNegotiateFallsBackToAnOlderSharedVersion() {
 # no shared version must name both sides, not fail later as a puzzling 404
 func testNegotiateWithNoSharedVersionExplainsBothSides() {
     def d as Discovery init parseDiscovery(
-        '{"api":[{"version":2,"path":"/v2"},{"version":3,"path":"/v3"}]}');
+        '{"apis":[{"version":2,"basePath":"/v2"},{"version":3,"basePath":"/v3"}]}');
     def n as Negotiated init negotiate($d, [1]);
     testing.assertFalse($n.ok);
     testing.assertContains($n.error, "v2, v3");
@@ -128,7 +138,7 @@ func testNegotiateWithNoSharedVersionExplainsBothSides() {
 
 func testNegotiateWarnsOnADeprecatedVersion() {
     def d as Discovery init parseDiscovery(
-        '{"api":[{"version":1,"path":"/v1","status":"deprecated","sunset":"2027-01-01"}]}');
+        '{"apis":[{"version":1,"basePath":"/v1","deprecated":true,"sunset":"2027-01-01"}]}');
     def n as Negotiated init negotiate($d, [1]);
     testing.assertTrue($n.ok);
     testing.assertContains($n.warning, "deprecated");

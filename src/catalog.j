@@ -56,7 +56,8 @@ export def struct Candidate {
     description as string,
     requires as map of string to string,
     engines as map of string to string,
-    capabilities as list of string
+    capabilities as list of string,
+    yanked as bool
 };
 
 /**
@@ -100,7 +101,8 @@ export func candidate(name as string, version as string) {
         description: "",
         requires: $noReqs,
         engines: $noEngines,
-        capabilities: $noCaps
+        capabilities: $noCaps,
+            yanked: false
     };
 }
 
@@ -163,6 +165,25 @@ export func versions(cat as Catalog, name as string) {
     def out as list of string init [];
     for (def e in $cat.entries) {
         if ($e.name == $name) {
+            $out[] = $e.version;
+        }
+    }
+    return $out;
+}
+
+/**
+ * List the versions of one deck that a fresh resolution may choose, which is
+ * every known version except the ones the repository has yanked. A yanked
+ * version stays in the catalog because an existing lockfile may pin it, and a
+ * pinned install must keep working; only new choices avoid it.
+ * @param cat {Catalog} the catalog to read
+ * @param name {string} the deck name
+ * @return {list of string} the selectable versions, in catalog order
+ */
+export func selectableVersions(cat as Catalog, name as string) {
+    def out as list of string init [];
+    for (def e in $cat.entries) {
+        if ($e.name == $name and not $e.yanked) {
             $out[] = $e.version;
         }
     }

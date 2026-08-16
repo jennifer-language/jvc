@@ -200,7 +200,8 @@ export func resolveGraph(cat as catalog.Catalog, roots as map of string to strin
         }
         def next as map of string to string init {};
         for (def name in $cons) {
-            def pick as string init bestSatisfyingAll(catalog.versions($cat, $name), $cons[$name]);
+            def open as list of string init catalog.selectableVersions($cat, $name);
+            def pick as string init bestSatisfyingAll($open, $cons[$name]);
             if ($pick == "") {
                 return failed("no version of " + $name + " satisfies " +
                     joinConstraints($cons[$name]));

@@ -88,7 +88,7 @@ func fail(message as string) {
 func valuedFlag(token as string) {
     return $token == "--registry" or $token == "--manifest" or
         $token == "--from" or $token == "--version" or $token == "--source" or
-        $token == "--url" or $token == "--db" or $token == "--out" or
+        $token == "--url" or $token == "--out" or
         $token == "--prefix" or $token == "--scope";
 }
 
@@ -632,7 +632,12 @@ func lockedEntry(doc as json.Value, name as string) {
         description: "",
         requires: jsonStringMap($doc, $p + "/requires"),
         engines: jsonStringMap($doc, $p + "/engines"),
-        capabilities: jsonStringList($doc, $p + "/capabilities")
+        capabilities: jsonStringList($doc, $p + "/capabilities"),
+        # A lock entry is never yanked from the reader's point of view: the
+        # resolver only ever picked a live version, and a later withdrawal is
+        # not knowable offline. Reproducibility wins, so a pinned version
+        # installs whatever the repository has since decided about it.
+        yanked: false
     };
 }
 
@@ -1037,6 +1042,14 @@ export func runQuery(baseUrl as string, name as string, constraint as string) {
         return fail("usage: jvc query <deck> [constraint]");
     }
     def client as registry.Client init registry.newClient($baseUrl);
+    def api as registry.Negotiated init agreeApi($client);
+    if (not $api.ok) {
+        return fail($api.error);
+    }
+    if (not registry.offers($api, "resolve")) {
+        return fail("this registry does not offer server-side resolution " +
+            "(no `resolve` feature); `jvc install` resolves locally instead");
+    }
     def spec as string init $constraint;
     if ($spec == "") {
         $spec = "*";
@@ -1053,7 +1066,7 @@ export func runQuery(baseUrl as string, name as string, constraint as string) {
         engines: $noEngines
     };
     try {
-        $res = registry.resolve($client, $name, $spec);
+        $res = registry.resolve($client, $name, $spec, $api.basePath);
     } catch (err) {
         return fail("could not reach repository at " + $baseUrl);
     }
@@ -1353,6 +1366,10 @@ func resolveAndApply(dir as string, m as manifest.Manifest,
     if (not $api.ok) {
         return fail($api.error);
     }
+    if (not registry.offers($api, "deck")) {
+        return fail("this registry does not offer deck metadata " +
+            "(no `deck` feature), so nothing can be resolved from it");
+    }
     def graph as Resolved init resolveFailed("");
     try {
         $graph = resolveRoots($client, catalog.empty(), $roots, $m.sources, $api.basePath);
@@ -1427,6 +1444,10 @@ export func runUpdate(dir as string, baseUrl as string, includeDev as bool,
     def api as registry.Negotiated init agreeApi($client);
     if (not $api.ok) {
         return fail($api.error);
+    }
+    if (not registry.offers($api, "deck")) {
+        return fail("this registry does not offer deck metadata " +
+            "(no `deck` feature), so nothing can be resolved from it");
     }
     def graph as Resolved init resolveFailed("");
     try {
@@ -1600,6 +1621,10 @@ export func runNew(dir as string, name as string, deck as string,
     def api as registry.Negotiated init agreeApi($client);
     if (not $api.ok) {
         return fail($api.error);
+    }
+    if (not registry.offers($api, "deck")) {
+        return fail("this registry does not offer deck metadata " +
+            "(no `deck` feature), so nothing can be resolved from it");
     }
     def graph as Resolved init resolveFailed("");
     try {
@@ -1837,16 +1862,14 @@ export func runApp(args as list of string, pos as list of string) {
  * otherwise the tarball and the `deckadmin add` command to run are produced.
  * @param dir {string} the deck directory (holds deck.toml + src/)
  * @param url {string} the artifact URL the registry fetches from
- * @param dbPath {string} a registry document to register into ("" = prepare only)
  * @param outDir {string} where to write the tarball / plan
  * @param runChecks {bool} run the quality gate (false only for --no-verify)
  * @return {Outcome} the result to print
  */
-export func runPublish(dir as string, url as string, dbPath as string,
-    outDir as string, runChecks as bool) {
+export func runPublish(dir as string, url as string, outDir as string,
+    runChecks as bool) {
     def stamp as string init io.sprintf("%d", time.unix(time.now()));
-    def r as publish.Result init publish.publish($dir, $url, $dbPath, $outDir, $stamp,
-        $runChecks);
+    def r as publish.Result init publish.publish($dir, $url, $outDir, $stamp, $runChecks);
     return Outcome{ ok: $r.ok, message: $r.message };
 }
 
@@ -2077,7 +2100,7 @@ func helpText() {
         "      --runtests          also run each deck's own tests on this machine\n" +
         "  update [deck...]            advance to the newest allowed versions, relock\n" +
         "  new <name> --from <deck>    scaffold an app frame over an engine deck\n" +
-        "  publish [--url U] [--db F]  package src/ + register a release\n" +
+        "  publish [--url U]           package src/ + emit the release command\n" +
         "                              (lint + tests + docblocks must pass; --no-verify skips)\n" +
         "\napp commands (runnable programs, not decks):\n" +
         "  app install <git-url>       fetch an app and put its command on PATH\n" +
@@ -2163,8 +2186,8 @@ export func dispatch(args as list of string) {
         if ($out == "") {
             $out = "dist";
         }
-        return runPublish(".", flagValue($args, "--url"), flagValue($args, "--db"),
-            $out, not hasFlag($args, "--no-verify"));
+        return runPublish(".", flagValue($args, "--url"), $out,
+            not hasFlag($args, "--no-verify"));
     }
     if ($command == "version" or $command == "--version") {
         def argv0 as string init "";

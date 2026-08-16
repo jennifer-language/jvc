@@ -1,10 +1,12 @@
 # The jvc CLI
 
-The command-line tool (`cli/`) reads and edits a [deck
-manifest](manifest.md) and talks to a [deck repository](server.md).
+The command-line tool reads and edits a [deck
+manifest](manifest.md) and talks to a deck repository, whose contract the
+registry project owns (see [registry-specs.md](../registry-specs.md) for where
+to read it).
 
 ```
-jennifer run cli/jvc.j <command> [args]
+./jvc <command> [args]
 ```
 
 Run it from the project directory. jvc's own module imports (`flatdb`, `semver`,
@@ -28,7 +30,7 @@ flag is needed with a current `jennifer` build.
 | `install [--dev] [--runtests]`       | install exactly what `camcorder.lock` pins (resolving only if it is absent or stale) |
 | `update [deck...] [--dev]`           | advance to the newest allowed versions and rewrite the lockfile |
 | `new <name> --from <deck>`           | scaffold an app frame over an engine deck       |
-| `publish [--url U] [--db F] [--out D] [--no-verify]` | run the quality gate, package `src/` + `deck.toml` into a `.tar.gz`, and register (or prepare) a release |
+| `publish [--url U] [--out D] [--no-verify]` | run the quality gate, package `src/` + `deck.toml` into a `.tar.gz`, and print the `deckadmin add` command to register it |
 | `app install <git-url> [--scope S]`  | install a runnable app and put its command on PATH |
 | `app list`                           | show installed apps                             |
 | `app update [name...]`               | reinstall installed apps at the newest allowed version |
@@ -48,6 +50,30 @@ module is not a dependency.
 1. `--registry <url>`
 2. `$JVC_REGISTRY`
 3. `http://localhost:8080` (default)
+
+### What jvc and a repository agree on first
+
+Before its first API call, `query`, `install`, `update`, and `new` read the
+repository's discovery document at `/.well-known/jennifer-registry` and pick the
+highest API version both sides support, then use that version's `basePath`. A
+`404` there means an old repository, which jvc reads as API v1 at `/`.
+
+Two things follow that are worth knowing when a command refuses:
+
+- **No shared version, no guessing.** jvc names both sides' versions and stops,
+  rather than trying an endpoint the repository may not serve.
+- **An operation the repository does not advertise is refused by name.** A
+  repository lists what it offers in the discovery document's `features`, so
+  `jvc query` against one without `resolve` says so, and points at `install`,
+  which resolves locally instead of asking the server to.
+
+### Yanked versions
+
+A repository can withdraw a published version without deleting it. jvc will not
+*choose* a yanked version when it resolves, but it still *installs* one that
+`camcorder.lock` already pins - which is the point of yanking rather than
+deleting: existing builds keep reproducing, and new ones move on. To leave a
+yanked version behind, run `jvc update <deck>`.
 
 ## Git sources
 
@@ -195,7 +221,7 @@ tree on the vendor path so the deck's own dependencies resolve.
 2. **Use the lock, or resolve** - if `camcorder.lock` covers the manifest, take
    its exact set and skip to step 3. Otherwise solve the manifest's `[decks]` (+
    `[dev-decks]` with `--dev`) into a flattened, version-locked graph in
-   `cli/resolver.j`. Each resolved deck's own recorded requirements are pulled
+   `src/resolver.j`. Each resolved deck's own recorded requirements are pulled
    in, and multiple constraints on a shared deck are unified to the highest
    version satisfying all of them. Each deck's metadata comes from whichever
    source owns it: its `[sources]` git remote, else the repository
@@ -226,7 +252,7 @@ The manifest below requires only `@jennifer/routeros`; its dependency
 `@jennifer/net` is pulled in transitively:
 
 ```
-$ jennifer run cli/jvc.j install
+$ ./jvc install
 resolved (no camcorder.lock yet)
 installed 2 deck(s):
   ok    @jennifer/routeros 0.1.0 -> https://reg.example/routeros-0.1.0.tar.gz
@@ -450,7 +476,7 @@ elsewhere simply exposes no project command.
 ### jvc installs jvc
 
 jvc is itself an app - an unscoped name with a runnable entry script - and
-declares `bin = "cli/jvc.j"`, so `jvc app install <jvc-url>` installs it over a
+declares `bin = "jvc"`, so `jvc app install <jvc-url>` installs it over a
 copy bundled with the interpreter. Since PATH order decides which one runs,
 `jvc version` reports the copy that is running, the interpreter beneath it, and
 any second copy that is installed but shadowed:
@@ -458,7 +484,7 @@ any second copy that is installed but shadowed:
 ```
 $ jvc version
 jvc 0.1.0
-  running:     /usr/share/jennifer/jvc/cli/jvc.j
+  running:     /usr/share/jennifer/jvc/jvc
   interpreter: jennifer 0.25.0
 
 note: jvc 0.3.0 is also installed at ~/.local/bin/jvc but is not the copy running;
@@ -549,28 +575,31 @@ reported to the language team; it goes in once fixed.
 `jennifer` is taken from `PATH`.
 
 ```
-$ jennifer run cli/jvc.j publish --url https://…/routeros-0.1.0.tar.gz --db server/decks.json
-published @jennifer/routeros@0.1.0 to server/decks.json
+$ ./jvc publish --url https://…/routeros-0.1.0.tar.gz
+packaged @jennifer/routeros@0.1.0
   tarball:  dist/routeros-0.1.0.tar.gz
   checksum: sha256:63b7…c16b
-  stored @jennifer/routeros@0.1.0 (tar.gz)
+  checks:   passed
+
+to register it, host the tarball at your URL and run:
+  deckadmin add @jennifer/routeros 0.1.0 https://…/routeros-0.1.0.tar.gz sha256:63b7…c16b "…"
 ```
 
 ## Modules
 
 | File                | Role                                             |
 | ------------------- | ------------------------------------------------ |
-| `cli/jvc.j`         | entry point (thin adapter over `cli.j`)          |
-| `cli/cli.j`         | command logic (`init`/`add`/…/`install`, dispatch) |
-| `cli/manifest.j`    | `deck.toml` / `.yaml` / `.json` parse / encode / edit |
-| `cli/deckname.j`    | deck-name grammar (`@scope/deck`) + vendor paths |
-| `cli/catalog.j`     | the candidate versions a resolution chooses from |
-| `cli/resolver.j`    | transitive dependency graph resolver (pure)      |
-| `cli/constraint.j`  | version-constraint matching over `semver`        |
-| `cli/git.j`         | the `git` plumbing calls, as pure argv builders + one runner |
-| `cli/gitsource.j`   | a git remote as a deck source (tags -> candidates) |
-| `cli/scaffold.j`    | stamping an app frame out of an engine deck's `template/` |
-| `cli/app.j`         | installing runnable apps onto PATH (`jvc app`)    |
-| `cli/verify.j`      | the publish quality gate (lint + tests + docblocks) |
-| `cli/publish.j`     | `jvc publish` - package `src/` + register a release |
-| `cli/registry.j`    | repository client over `http`                    |
+| `jvc`         | entry point (thin adapter over `cli.j`)          |
+| `src/cli.j`         | command logic (`init`/`add`/…/`install`, dispatch) |
+| `src/manifest.j`    | `deck.toml` / `.yaml` / `.json` parse / encode / edit |
+| `src/deckname.j`    | deck-name grammar (`@scope/deck`) + vendor paths |
+| `src/catalog.j`     | the candidate versions a resolution chooses from |
+| `src/resolver.j`    | transitive dependency graph resolver (pure)      |
+| `src/constraint.j`  | version-constraint matching over `semver`        |
+| `src/git.j`         | the `git` plumbing calls, as pure argv builders + one runner |
+| `src/gitsource.j`   | a git remote as a deck source (tags -> candidates) |
+| `src/scaffold.j`    | stamping an app frame out of an engine deck's `template/` |
+| `src/app.j`         | installing runnable apps onto PATH (`jvc app`)    |
+| `src/verify.j`      | the publish quality gate (lint + tests + docblocks) |
+| `src/publish.j`     | `jvc publish` - package `src/` + register a release |
+| `src/registry.j`    | repository client over `http`                    |

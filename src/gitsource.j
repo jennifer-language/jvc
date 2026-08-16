@@ -178,7 +178,8 @@ func candidateAt(dir as string, url as string, name as string, tag as string) {
             description: $m.pkg.description,
             requires: $requires,
             engines: $engines,
-            capabilities: $m.pkg.capabilities
+            capabilities: $m.pkg.capabilities,
+            yanked: false
         }
     ];
     return Fetch{ ok: true, candidates: $one, error: "" };

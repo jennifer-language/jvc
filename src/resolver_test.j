@@ -25,6 +25,13 @@ func plain(cat as catalog.Catalog, name as string, version as string) {
     return put($cat, $name, $version, $none);
 }
 
+# yank adds one version of a deck that the repository has withdrawn.
+func yank(cat as catalog.Catalog, name as string, version as string) {
+    def c as catalog.Candidate init catalog.candidate($name, $version);
+    $c.yanked = true;
+    return catalog.add($cat, $c);
+}
+
 # findVer returns the resolved version of a deck, or "" when it is not in the set.
 func findVer(resolved as list of catalog.Candidate, name as string) {
     for (def r in $resolved) {
@@ -201,7 +208,8 @@ func testResolvedCarriesDeliveryFields() {
         description: "mikrotik",
         requires: $noReqs,
         engines: {"jennifer": ">=0.24.0"},
-        capabilities: []
+        capabilities: [],
+            yanked: false
     });
     def g as GraphResult init resolveGraph($cat, {"@jennifer/routeros": "^0.1.0"});
     testing.assertTrue($g.ok);
@@ -210,4 +218,33 @@ func testResolvedCarriesDeliveryFields() {
     testing.assertEqual($r.checksum, "sha256:abc");
     testing.assertEqual($r.kind, "tar.gz");
     testing.assertEqual($r.engines["jennifer"], ">=0.24.0");
+}
+
+# --- yanked versions ---------------------------------------------------------
+
+func testAYankedVersionIsNotChosen() {
+    def cat as catalog.Catalog init catalog.empty();
+    $cat = plain($cat, "ansi", "1.2.0");
+    $cat = yank($cat, "ansi", "1.3.0");
+    def g as GraphResult init resolveGraph($cat, {"ansi": "^1.2.0"});
+    testing.assertTrue($g.ok);
+    testing.assertEqual(findVer($g.resolved, "ansi"), "1.2.0");
+}
+
+func testYankingEveryVersionLeavesNothingToChoose() {
+    def cat as catalog.Catalog init catalog.empty();
+    $cat = yank($cat, "ansi", "1.2.0");
+    def g as GraphResult init resolveGraph($cat, {"ansi": "^1.2.0"});
+    testing.assertFalse($g.ok);
+    testing.assertContains($g.error, "no version of ansi satisfies");
+}
+
+func testAYankedVersionIsStillSkippedForATransitiveNeed() {
+    def cat as catalog.Catalog init catalog.empty();
+    $cat = put($cat, "app", "1.0.0", {"ansi": "^1.0.0"});
+    $cat = plain($cat, "ansi", "1.0.0");
+    $cat = yank($cat, "ansi", "1.9.0");
+    def g as GraphResult init resolveGraph($cat, {"app": "^1.0.0"});
+    testing.assertTrue($g.ok);
+    testing.assertEqual(findVer($g.resolved, "ansi"), "1.0.0");
 }

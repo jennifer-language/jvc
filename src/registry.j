@@ -52,16 +52,20 @@ export def struct Client {
 };
 
 /**
- * One API version a registry advertises.
+ * One API mount a registry advertises: a major version served at a base path.
+ *
+ * A version may appear more than once, once per base path it is served at (a v1
+ * registry typically advertises both `/v1` and the bare root). The registry
+ * lists the canonical path first.
  * @field version {int} the integer major version
- * @field path {string} the base path that version's endpoints hang off, e.g. "/v1"
- * @field status {string} "stable", "deprecated", or "sunset"
- * @field sunset {string} the date the version stops working ("" when open-ended)
+ * @field basePath {string} the base path that mount's endpoints hang off, e.g. "/v1"
+ * @field deprecated {bool} whether this mount is deprecated
+ * @field sunset {string} the date it stops working ("" unless deprecated)
  */
 export def struct ApiVersion {
     version as int,
-    path as string,
-    status as string,
+    basePath as string,
+    deprecated as bool,
     sunset as string
 };
 
@@ -69,14 +73,14 @@ export def struct ApiVersion {
  * A registry's discovery document: what it is, which API versions it serves, and
  * which optional operations it offers.
  * @field registry {string} a human-readable identifier for messages
- * @field specVersion {string} the registry specification version it implements
- * @field api {list of ApiVersion} every API version served
+ * @field spec {string} the registry specification version it implements
+ * @field apis {list of ApiVersion} every mount served, canonical path first
  * @field features {list of string} the optional operations offered (see `hasFeature`)
  */
 export def struct Discovery {
     registry as string,
-    specVersion as string,
-    api as list of ApiVersion,
+    spec as string,
+    apis as list of ApiVersion,
     features as list of string
 };
 
@@ -86,6 +90,7 @@ export def struct Discovery {
  * @field version {int} the negotiated major version (0 when none)
  * @field basePath {string} the path prefix to put in front of every request
  * @field warning {string} a deprecation notice to show the user ("" when none)
+ * @field features {list of string} the optional operations the registry offers
  * @field error {string} why negotiation failed ("" when ok)
  */
 export def struct Negotiated {
@@ -93,6 +98,7 @@ export def struct Negotiated {
     version as int,
     basePath as string,
     warning as string,
+    features as list of string,
     error as string
 };
 
@@ -190,6 +196,14 @@ export func resolveUrl(baseUrl as string, name as string, constraint as string) 
  */
 export func apiRoot(client as Client, basePath as string) {
     return $client.baseUrl + $basePath;
+}
+
+# boolOr reads a bool field at pointer, or false when it is absent.
+func boolOr(doc as json.Value, pointer as string) {
+    if (json.has($doc, $pointer)) {
+        return json.asBool($doc, $pointer);
+    }
+    return false;
 }
 
 # strOr reads a string field at pointer, or "" when it is absent.
@@ -301,7 +315,8 @@ export func parseDeckDoc(body as string) {
             description: strOr($doc, $p + "/description"),
             requires: readStringMap($doc, $p + "/requires"),
             engines: readStringMap($doc, $p + "/engines"),
-            capabilities: readStringList($doc, $p + "/capabilities")
+            capabilities: readStringList($doc, $p + "/capabilities"),
+            yanked: boolOr($doc, $p + "/yanked")
         };
     }
     return $out;
@@ -409,9 +424,10 @@ export func resolveGraph(client as Client, roots as map of string to string) {
  * @return {Resolution} the parsed resolution
  * @throws {Error} on a transport failure or an unparseable body
  */
-export func resolve(client as Client, name as string, constraint as string) {
+export func resolve(client as Client, name as string, constraint as string,
+    basePath as string) {
     def headers as map of string to string init {};
-    def url as string init resolveUrl($client.baseUrl, $name, $constraint);
+    def url as string init resolveUrl(apiRoot($client, $basePath), $name, $constraint);
     def resp as http.Response init http.get($url, $headers);
     return parseResolution($resp.body);
 }
@@ -449,30 +465,26 @@ export func discoveryUrl(baseUrl as string) {
  */
 export func parseDiscovery(body as string) {
     def doc as json.Value init json.decode($body);
-    def versions as list of ApiVersion init [];
-    if (json.has($doc, "/api")) {
-        for (def i as int init 0; $i < json.length($doc, "/api"); $i = $i + 1) {
-            def p as string init "/api/" + convert.toString($i);
-            def status as string init strOr($doc, $p + "/status");
-            if ($status == "") {
-                $status = "stable";
+    def mounts as list of ApiVersion init [];
+    if (json.has($doc, "/apis")) {
+        for (def i as int init 0; $i < json.length($doc, "/apis"); $i = $i + 1) {
+            def p as string init "/apis/" + convert.toString($i);
+            def deprecated as bool init false;
+            if (json.has($doc, $p + "/deprecated")) {
+                $deprecated = json.asBool($doc, $p + "/deprecated");
             }
-            def path as string init strOr($doc, $p + "/path");
-            if ($path == "") {
-                $path = "";
-            }
-            $versions[] = ApiVersion{
+            $mounts[] = ApiVersion{
                 version: json.asInt($doc, $p + "/version"),
-                path: trimTrailingSlash($path),
-                status: $status,
+                basePath: trimTrailingSlash(strOr($doc, $p + "/basePath")),
+                deprecated: $deprecated,
                 sunset: strOr($doc, $p + "/sunset")
             };
         }
     }
     return Discovery{
         registry: strOr($doc, "/registry"),
-        specVersion: strOr($doc, "/specVersion"),
-        api: $versions,
+        spec: strOr($doc, "/spec"),
+        apis: $mounts,
         features: readStringList($doc, "/features")
     };
 }
@@ -484,13 +496,13 @@ export func parseDiscovery(body as string) {
  * @return {Discovery} the assumed document
  */
 export func legacyDiscovery() {
-    def api as list of ApiVersion init [
-        ApiVersion{ version: 1, path: "", status: "stable", sunset: "" }
+    def mounts as list of ApiVersion init [
+        ApiVersion{ version: 1, basePath: "", deprecated: false, sunset: "" }
     ];
     return Discovery{
         registry: "",
-        specVersion: "",
-        api: $api,
+        spec: "",
+        apis: $mounts,
         features: ["deck", "decks", "resolve", "resolveGraph"]
     };
 }
@@ -506,10 +518,27 @@ export func hasFeature(d as Discovery, name as string) {
     return lists.contains($d.features, $name);
 }
 
-# describeVersions renders a registry's advertised versions for an error message.
-func describeVersions(api as list of ApiVersion) {
+/**
+ * Report whether a negotiated registry offers an operation, so a client can
+ * refuse by name rather than provoking a `404`.
+ * @param n {Negotiated} the negotiated connection
+ * @param name {string} the feature name, e.g. "resolve"
+ * @return {bool} true when the registry offers it
+ */
+export func offers(n as Negotiated, name as string) {
+    return lists.contains($n.features, $name);
+}
+
+# describeVersions renders a registry's advertised versions for an error message,
+# deduplicated: a version listed at several base paths is still one version.
+func describeVersions(apis as list of ApiVersion) {
+    def seen as list of int init [];
     def out as string init "";
-    for (def entry in $api) {
+    for (def entry in $apis) {
+        if (lists.contains($seen, $entry.version)) {
+            continue;
+        }
+        $seen[] = $entry.version;
         def one as string init "v" + convert.toString($entry.version);
         if ($out == "") {
             $out = $one;
@@ -536,15 +565,9 @@ func describeVersions(api as list of ApiVersion) {
  */
 export func negotiate(d as Discovery, supported as list of int) {
     def best as int init 0;
-    def bestPath as string init "";
-    def bestStatus as string init "";
-    def bestSunset as string init "";
-    for (def entry in $d.api) {
+    for (def entry in $d.apis) {
         if (lists.contains($supported, $entry.version) and $entry.version > $best) {
             $best = $entry.version;
-            $bestPath = $entry.path;
-            $bestStatus = $entry.status;
-            $bestSunset = $entry.sunset;
         }
     }
     if ($best == 0) {
@@ -562,25 +585,38 @@ export func negotiate(d as Discovery, supported as list of int) {
             version: 0,
             basePath: "",
             warning: "",
-            error: "this registry speaks API " + describeVersions($d.api) +
+            features: $d.features,
+            error: "this registry speaks API " + describeVersions($d.apis) +
                 "; this jvc supports " + $mine +
                 ". Upgrade jvc, or point at a registry that still serves " + $mine + "."
         };
     }
-    def warning as string init "";
-    if ($bestStatus == "deprecated" or $bestStatus == "sunset") {
-        $warning = "registry API v" + convert.toString($best) + " is " + $bestStatus;
-        if (not ($bestSunset == "")) {
-            $warning = $warning + " and stops working on " + $bestSunset;
+    # A version may be listed at several base paths. The registry lists the
+    # canonical one first, so take the first entry for the chosen version rather
+    # than treating the repetition as two different versions.
+    for (def entry in $d.apis) {
+        if (not ($entry.version == $best)) {
+            continue;
         }
+        def warning as string init "";
+        if ($entry.deprecated) {
+            $warning = "registry API v" + convert.toString($best) + " is deprecated";
+            if (not ($entry.sunset == "")) {
+                $warning = $warning + " and stops working on " + $entry.sunset;
+            }
+        }
+        return Negotiated{
+            ok: true,
+            version: $best,
+            basePath: $entry.basePath,
+            warning: $warning,
+            features: $d.features,
+            error: ""
+        };
     }
-    return Negotiated{
-        ok: true,
-        version: $best,
-        basePath: $bestPath,
-        warning: $warning,
-        error: ""
-    };
+    return Negotiated{ ok: false, version: 0, basePath: "", warning: "",
+        features: $d.features,
+        error: "no mount for API v" + convert.toString($best) };
 }
 
 /**

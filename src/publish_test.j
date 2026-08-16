@@ -99,7 +99,7 @@ func testCapabilitiesOfAPureDeck() {
 # publishing must refuse a deck whose code needs more than its manifest admits
 func testPublishRefusesAnUndeclaredCapability() {
     def dir as string init capDeck("undeclared", "", "# pragma-jennifer-capability: net\n");
-    def r as Result init publish($dir, "https://x/t.tar.gz", "", $dir + "/dist", "0", false);
+    def r as Result init publish($dir, "https://x/t.tar.gz", $dir + "/dist", "0", false);
     testing.assertFalse($r.ok);
     testing.assertContains($r.message, "src/ declares the capability pragma net");
     testing.assertContains($r.message, "capabilities");
@@ -109,14 +109,14 @@ func testPublishRefusesAnUndeclaredCapability() {
 func testPublishAcceptsADeclaredCapability() {
     def dir as string init capDeck("declared", 'capabilities = ["net"]' + "\n",
         "# pragma-jennifer-capability: net\n");
-    def r as Result init publish($dir, "https://x/t.tar.gz", "", $dir + "/dist", "0", false);
+    def r as Result init publish($dir, "https://x/t.tar.gz", $dir + "/dist", "0", false);
     testing.assertTrue($r.ok);
     fs.removeAll($dir);
 }
 
 func testPublishRefusesAnUnknownCapabilityName() {
     def dir as string init capDeck("unknown", 'capabilities = ["telepathy"]' + "\n", "");
-    def r as Result init publish($dir, "https://x/t.tar.gz", "", $dir + "/dist", "0", false);
+    def r as Result init publish($dir, "https://x/t.tar.gz", $dir + "/dist", "0", false);
     testing.assertFalse($r.ok);
     testing.assertContains($r.message, "not a Jennifer capability");
     fs.removeAll($dir);
@@ -141,7 +141,7 @@ func testPublishCommandFormat() {
 func testPublishPrepareWritesTarballAndCommand() {
     def dir as string init makeDeck("prep", "@jennifer/routeros", true);
     def out as string init $dir + "/dist";
-    def r as Result init publish($dir, "https://x/routeros-0.1.0.tar.gz", "", $out, "0", false);
+    def r as Result init publish($dir, "https://x/routeros-0.1.0.tar.gz", $out, "0", false);
     testing.assertTrue($r.ok);
     testing.assertTrue(fs.exists($out + "/routeros-0.1.0.tar.gz"));
     testing.assertTrue(fs.exists($out + "/publish.json"));
@@ -150,57 +150,22 @@ func testPublishPrepareWritesTarballAndCommand() {
     fs.removeAll($dir);
 }
 
-func testPublishToDbRegisters() {
-    def dir as string init makeDeck("db", "@jennifer/routeros", false);
-    def dbPath as string init os.tempDir() + "/jvc_pub_reg.json";
-    rm($dbPath);
-    # scope must be registered first (reuses the admin gate)
-    def db as flatdb.DB init store.open($dbPath);
-    $db = store.registerNamespace($db, "jennifer", "0");
-    store.save($db);
-    def r as Result init publish($dir, "https://x/routeros-0.1.0.tar.gz", $dbPath, $dir + "/dist", "0", false);
-    testing.assertTrue($r.ok);
-    def db2 as flatdb.DB init store.open($dbPath);
-    def res as store.Resolution init store.resolve($db2, "@jennifer/routeros", "^0.1.0");
-    testing.assertTrue($res.found);
-    testing.assertEqual($res.kind, "tar.gz");
-    testing.assertEqual($res.url, "https://x/routeros-0.1.0.tar.gz");
-    rm($dbPath);
-    fs.removeAll($dir);
-}
 
-func testPublishToDbNeedsUrl() {
-    def dir as string init makeDeck("nourl", "@acme/thing", false);
-    def r as Result init publish($dir, "", os.tempDir() + "/jvc_pub_x.json", $dir + "/dist", "0", false);
-    testing.assertFalse($r.ok);
-    testing.assertContains($r.message, "needs --url");
-    fs.removeAll($dir);
-}
 
 # a bare (unscoped) deck name is not a registry deck -> publish refuses
 func testPublishRejectsBareName() {
     def dir as string init makeDeck("bare", "ansi", false);
-    def r as Result init publish($dir, "https://x/ansi.tar.gz", "", $dir + "/dist", "0", false);
+    def r as Result init publish($dir, "https://x/ansi.tar.gz", $dir + "/dist", "0", false);
     testing.assertFalse($r.ok);
     testing.assertContains($r.message, "scoped");
     fs.removeAll($dir);
 }
 
-func testPublishScopedNeedsRegisteredNamespace() {
-    def dir as string init makeDeck("nons", "@ghost/thing", false);
-    def dbPath as string init os.tempDir() + "/jvc_pub_nons.json";
-    rm($dbPath);
-    def r as Result init publish($dir, "https://x/thing-0.1.0.tar.gz", $dbPath, $dir + "/dist", "0", false);
-    testing.assertFalse($r.ok);
-    testing.assertContains($r.message, "not registered");
-    rm($dbPath);
-    fs.removeAll($dir);
-}
 
 func testPublishRejectsMissingEntrypoint() {
     def dir as string init makeDeck("noentry", "@jennifer/routeros", false);
     fs.remove($dir + "/src/routeros.j");   # remove the entrypoint
-    def r as Result init publish($dir, "https://x/r.tgz", "", $dir + "/dist", "0", false);
+    def r as Result init publish($dir, "https://x/r.tgz", $dir + "/dist", "0", false);
     testing.assertFalse($r.ok);
     testing.assertContains($r.message, "entrypoint");
     fs.removeAll($dir);

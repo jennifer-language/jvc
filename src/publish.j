@@ -8,12 +8,14 @@
  *
  *   - **package** - validate the manifest, tar.gz the deck (`deck.toml` + the
  *     `src/` subtree - the only part `jvc install` vendors), and checksum it;
- *   - **register** - record the version in the registry. The repository exposes
- *     no HTTP write path (it is read-only by design; edits go through the
- *     `deckadmin` maintenance tool), so publish either writes directly to a
- *     registry document you point it at with `--db` (reusing the `admin` verbs,
- *     including the scope-registration gate) or, with no `--db`, prints the exact
- *     `deckadmin add` command for the repository operator to run.
+ *   - **hand off** - emit what the registry needs to record the version: a
+ *     `publish.json` beside the tarball, and the exact `deckadmin add` command
+ *     for the registry operator to run.
+ *
+ * Publishing deliberately does **not** write a registry's database itself. The
+ * registry is a separate program with its own storage; a CLI reaching into its
+ * files would couple the two and bypass every check the registry owns. Once the
+ * registry has an authenticated write API, `publish` gains a network path.
  *
  * The registry stores metadata and an external artifact URL; hosting the
  * `.tar.gz` itself is out of band, so `--url` names where the tarball will live.
@@ -34,9 +36,6 @@ import "./manifest.j" as manifest;
 import "./deckname.j" as deckname;
 import "./pragma.j" as pragma;
 import "./verify.j" as verify;
-import "../server/store.j" as store;
-import "../server/admin.j" as admin;
-import "flatdb.j" as flatdb;
 import "semver.j" as semver;
 
 /**
@@ -143,28 +142,6 @@ export func enginesSpecOf(m as manifest.Manifest) {
         }
     }
     return $out;
-}
-
-# deckadminArgv builds the argument vector `admin.run` consumes for an add.
-func deckadminArgv(name as string, version as string, url as string,
-    checksum as string, description as string, requiresSpec as string,
-    enginesSpec as string, capabilitiesSpec as string) {
-    def argv as list of string init [
-        "deckadmin", "add", $name, $version, $url, $checksum, $description
-    ];
-    if (not ($requiresSpec == "")) {
-        $argv[] = "--requires";
-        $argv[] = $requiresSpec;
-    }
-    if (not ($enginesSpec == "")) {
-        $argv[] = "--engines";
-        $argv[] = $enginesSpec;
-    }
-    if (not ($capabilitiesSpec == "")) {
-        $argv[] = "--capabilities";
-        $argv[] = $capabilitiesSpec;
-    }
-    return $argv;
 }
 
 /**
@@ -296,13 +273,12 @@ func writePlanJson(outDir as string, name as string, version as string,
  * (required to register); `now` is the publish timestamp.
  * @param dir {string} the deck's root directory (holds deck.toml + src/)
  * @param url {string} the artifact URL the registry will fetch from
- * @param dbPath {string} a registry document to register into ("" = emit command)
  * @param outDir {string} where to write the tarball / plan
  * @param now {string} the publish timestamp (Unix seconds as text)
  * @return {Result} the outcome
  */
-export func publish(dir as string, url as string, dbPath as string,
-    outDir as string, now as string, runChecks as bool) {
+export func publish(dir as string, url as string, outDir as string,
+    now as string, runChecks as bool) {
     def manifestPath as string init manifest.findManifest($dir);
     if ($manifestPath == "") {
         return fail("no deck manifest found in " + $dir + "; run 'jvc init' first");
@@ -340,30 +316,13 @@ export func publish(dir as string, url as string, dbPath as string,
     def enginesSpec as string init enginesSpecOf($m);
     def capabilitiesSpec as string init capabilitiesSpecOf($m);
 
-    if ($dbPath == "") {
-        if ($url == "") {
-            $url = "<host the tarball and put its URL here>";
-        }
-        writePlanJson($outDir, $name, $version, $url, $checksum, $requiresSpec);
-        def cmd as string init publishCommand($name, $version, $url, $checksum,
-            $m.pkg.description, $requiresSpec, $enginesSpec, $capabilitiesSpec);
-        return ok("packaged " + $name + "@" + $version + "\n  tarball:  " + $tarPath +
-            "\n  checksum: " + $checksum + $gate +
-            "\n\nto register it, host the tarball at your URL and run:\n  " + $cmd);
-    }
-
     if ($url == "") {
-        return fail("publishing to a registry needs --url <tarball-url>");
+        $url = "<host the tarball and put its URL here>";
     }
-    def argv as list of string init deckadminArgv($name, $version, $url, $checksum,
+    writePlanJson($outDir, $name, $version, $url, $checksum, $requiresSpec);
+    def cmd as string init publishCommand($name, $version, $url, $checksum,
         $m.pkg.description, $requiresSpec, $enginesSpec, $capabilitiesSpec);
-    def db as flatdb.DB init store.open($dbPath);
-    def r as admin.AdminResult init admin.run($db, $argv, $now);
-    if (not $r.ok) {
-        return fail($r.message);
-    }
-    store.save($r.db);
-    return ok("published " + $name + "@" + $version + " to " + $dbPath +
-        "\n  tarball:  " + $tarPath + "\n  checksum: " + $checksum +
-        $gate + "\n  " + $r.message);
+    return ok("packaged " + $name + "@" + $version + "\n  tarball:  " + $tarPath +
+        "\n  checksum: " + $checksum + $gate +
+        "\n\nto register it, host the tarball at your URL and run:\n  " + $cmd);
 }

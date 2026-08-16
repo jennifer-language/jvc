@@ -10,13 +10,13 @@ how a deck is named, delivered, and installed. [docs/manifest.md](manifest.md)
 is the friendly guide; this document is the normative reference. The key words
 **MUST**, **SHOULD**, and **MAY** are used in the RFC 2119 sense.
 
-The reference implementation is `cli/manifest.j` (read/write), `cli/deckname.j`
-(names), `cli/cli.j` (install), `cli/resolver.j` (resolution over a
-`cli/catalog.j`), `cli/constraint.j` (constraint grammar), `cli/pragma.j`
-(capability pragmas), `cli/gitsource.j`
-(git sources), `cli/scaffold.j` (frames), `cli/app.j` (app installs),
-`cli/publish.j` (packaging + registration), `cli/verify.j` (the publish gate),
-and `server/store.j` (registry).
+The reference implementation is `src/manifest.j` (read/write), `src/deckname.j`
+(names), `src/cli.j` (install), `src/resolver.j` (resolution over a
+`src/catalog.j`), `src/constraint.j` (constraint grammar), `src/pragma.j`
+(capability pragmas), `src/gitsource.j`
+(git sources), `src/scaffold.j` (frames), `src/app.j` (app installs),
+`src/publish.j` (packaging + registration), `src/verify.j` (the publish gate),
+and, in the registry project, its store.
 
 ## 1. Files and discovery
 
@@ -293,7 +293,7 @@ names (`[provides]`) and engine names (`[engines]`) follow the bare rule - they
 are not registry decks. A **scope** must be registered in the registry before a
 scoped deck may be published under it (§10.3). Tools **SHOULD** validate names on
 publish; the manifest parser accepts the key verbatim. The reference
-implementation is `cli/deckname.j`.
+implementation is `src/deckname.j`.
 
 ## 8. Versions
 
@@ -427,7 +427,7 @@ routeros.greet();                    # binds the `routeros.` namespace
 A **scope** (`@jennifer`) is registered in the registry before any scoped deck
 may be published under it. The registry keeps a namespace table; a publish of
 `@scope/deck` under an unregistered `scope` **MUST** be refused. See
-[server.md](server.md) for the `deckadmin register-namespace` / `namespaces`
+the registry project for the `deckadmin register-namespace` / `namespaces`
 verbs.
 
 ### 10.4 Transitive resolution
@@ -450,13 +450,13 @@ resolved in turn.
 - **Errors.** A missing deck, an unsatisfiable constraint set, or a graph that
   cannot converge is a resolution error; nothing is installed.
 
-The reference resolver is `cli/resolver.j`, which runs **in the CLI**: it is pure
-over a `cli/catalog.j` of candidate versions and never fetches, so a deck it does
+The reference resolver is `src/resolver.j`, which runs **in the CLI**: it is pure
+over a `src/catalog.j` of candidate versions and never fetches, so a deck it does
 not yet know is reported as *missing* and the caller tops the catalog up and
 resolves again. `jvc install` fills the catalog from the repository's deck
 metadata (`GET /deck?name=<deck>`); the repository runs the same resolver over
-its own store (`server/deckcatalog.j`) to answer `/resolve-graph`, which it keeps
-as a convenience API (see [server.md](server.md)).
+its own store to answer `/resolve-graph`, which it keeps
+as a convenience API (see the registry project).
 
 ### 10.5 Git sources
 
@@ -481,7 +481,7 @@ vendor tree (§10.1); only where its metadata and artifact come from differs.
 - **A remote with no version tags** yields no candidates, which surfaces as a
   missing deck against whatever requirement asked for it.
 
-The reference implementation is `cli/gitsource.j` over `cli/git.j`. This path
+The reference implementation is `src/gitsource.j` over `src/git.j`. This path
 needs `git` on `PATH` and the `exec` capability, so it is a default `jennifer`
 binary path; a registry deck never reaches it.
 
@@ -570,7 +570,7 @@ run. An empty `engines` object means no restriction.
 - On publish, the deck's `[decks]` and `[engines]` are recorded with the version
   in the registry (as `requires` and `engines`, §10). `jvc publish` derives both
   from the manifest; the low-level `deckadmin add` accepts them as `--requires`
-  and `--engines` (see [server.md](server.md)).
+  and `--engines` (see the registry project).
 
 ## 13. Complete example
 

@@ -144,7 +144,7 @@ routeros-0.1.0.tar.gz            jvc install →     vendor/
 
 The version's `sha256` checksum is verified against the downloaded bytes before
 anything is unpacked. See [cli.md](cli.md) for `jvc install` and
-[server.md](server.md) for publishing (`deckadmin`, namespaces).
+the registry project for publishing (`deckadmin`, namespaces).
 
 ## Rules
 
@@ -188,5 +188,5 @@ ranges) against a concrete SemVer version:
 A prerelease version (e.g. `2.0.0-rc.1`) never satisfies a caret/tilde range;
 address it explicitly with an exact/comparator constraint.
 
-The grammar lives in `cli/constraint.j`; the manifest reader/writer in
-`cli/manifest.j`; the name grammar in `cli/deckname.j`.
+The grammar lives in `src/constraint.j`; the manifest reader/writer in
+`src/manifest.j`; the name grammar in `src/deckname.j`.

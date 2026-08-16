@@ -378,7 +378,8 @@ func testWriteLock() {
         description: "",
         requires: $noReqs,
         engines: {"jennifer": "^0.21.0"},
-        capabilities: ["net"]
+        capabilities: ["net"],
+            yanked: false
     };
     def b as catalog.Candidate init catalog.Candidate{
         name: "csv",
@@ -391,7 +392,8 @@ func testWriteLock() {
         description: "",
         requires: $noReqs,
         engines: {},
-        capabilities: []
+        capabilities: [],
+            yanked: false
     };
     def path as string init writeLock($dir, [$a, $b]);
     def doc as json.Value init json.decode(fs.readString($path));
@@ -534,13 +536,15 @@ func testLockRoundTripsEveryField() {
         name: "@acme/alpha", version: "1.2.0", url: "https://x/a.tar.gz",
         checksum: "sha256:aa", kind: "tar.gz", ref: "", commit: "",
         description: "", requires: {"@acme/beta": "^1.0.0"},
-        engines: {"jennifer": ">=0.24.0"}, capabilities: ["net"]
+        engines: {"jennifer": ">=0.24.0"}, capabilities: ["net"],
+            yanked: false
     };
     def gitDeck as catalog.Candidate init catalog.Candidate{
         name: "@acme/beta", version: "1.0.0", url: "https://x/b.git",
         checksum: "", kind: "git", ref: "v1.0.0", commit: "abc123",
         description: "", requires: $noReqs, engines: $noReqs,
-        capabilities: $noCaps
+        capabilities: $noCaps,
+            yanked: false
     };
     def got as Locked init lockOf($dir, [$tarball, $gitDeck]);
     testing.assertTrue($got.present);

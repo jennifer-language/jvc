@@ -121,3 +121,15 @@ func testScopedNamesRoundTrip() {
     def reqs as map of string to string init requires($cat, "@jennifer/routeros", "0.1.0");
     testing.assertEqual($reqs["@jennifer/net"], "^1.0.0");
 }
+
+func testSelectableVersionsOmitsYankedOnes() {
+    def cat as Catalog init empty();
+    def live as Candidate init candidate("ansi", "1.0.0");
+    def dead as Candidate init candidate("ansi", "1.1.0");
+    $dead.yanked = true;
+    $cat = add(add($cat, $live), $dead);
+    testing.assertEqual(len(versions($cat, "ansi")), 2);
+    def sel as list of string init selectableVersions($cat, "ansi");
+    testing.assertEqual(len($sel), 1);
+    testing.assertEqual($sel[0], "1.0.0");
+}
