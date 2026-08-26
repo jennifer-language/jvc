@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 #
 # White-box tests for pragma.j: reading the interpreter's read-time guard
 # headers. Every case here was checked against the real interpreter first, so

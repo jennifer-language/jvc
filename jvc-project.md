@@ -1,4 +1,4 @@
-# jvc: package manager, deck ecosystem, and app scaffolding - requirements handoff
+# jvc - jennifer version control: package manager, deck ecosystem, and app scaffolding - requirements handoff
 
 This document is the Jennifer language team's handoff to the **jvc team**. It
 states what we need jvc to deliver, the ecosystem it serves, the fixed

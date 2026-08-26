@@ -1,6 +1,6 @@
-# jvc - the Jennifer deck manager
+# jvc - jennifer version control
 
-`jvc` is a package manager for the [Jennifer language](https://mplx.github.io/jennifer-lang/),
+`jvc` is a package manager for the [Jennifer language](https://jennifer-lang.dev/),
 written in Jennifer. It is the Jennifer counterpart to Python's requirements
 files or Composer's `composer.json` / Packagist.
 
@@ -41,45 +41,107 @@ app-jvc/
 
 **The registry lives in its own repository.** jvc is the client; the deck
 repository it talks to (the HTTP API, the `deckadmin` operator CLI, and its
-storage) was split out into `app-registry` on 2026-08-15. **That repository owns
-the contract**, in its `docs/specs-server.md` and `docs/specs-cli.md`; a running
-registry serves both under `/docs/`. jvc implements client spec 1.1;
-[registry-specs.md](registry-specs.md) records which parts, and points at the
-authority rather than restating it.
+storage) was split out into `app-registry`. **That repository owns
+the contract**.
 
-## Requirements
+## Shell completion
 
-- A current `jennifer` interpreter (with the `@scope/package` vendor resolver and
-  the `http` bytes body). jvc's module imports (`flatdb`, `semver`, `web`,
-  `http`) resolve from the interpreter's default module directory, so **no `-I`
-  flag is needed**. Run commands from the project directory.
+```sh
+source completions/jvc.bash      # bash
+source completions/jvc.fish      # fish
+```
+
+Or drop one where the shell looks by itself, as
+`~/.local/share/bash-completion/completions/jvc` or
+`~/.config/fish/completions/jvc.fish`.
+
+They complete verbs and per-verb flags, and read the project to complete
+arguments: `jvc remove` offers what the manifest requires, `jvc update` offers
+what `camcorder.lock` pins, `jvc registry` offers the scopes in play, and
+`jvc app uninstall` offers what is installed. Nothing there runs jvc, because a
+completion that starts an interpreter on every Tab stops being used.
 
 ## Quick start
 
 ```sh
 # In a project with a deck.toml
-./jvc list
-./jvc query "@jennifer/routeros" "^0.1.0"
-./jvc install
-
-# A registry is a separate program; see the app-registry repository to run one.
+jvc list                                  # what the manifest says
+jvc add "@jennifer/routeros" "^0.1.0"     # add a requirement
+jvc install                               # install what camcorder.lock pins
+jvc update                                # advance to the newest allowed
+jvc check                                 # can this interpreter run the deck?
 ```
 
-### Publishing and installing a scoped deck
+`install` uses the lockfile and resolves only when it is absent or stale, which
+is what makes `git clone` + `jvc install` reproduce a build. `update` always
+resolves and rewrites the lock.
+
+### Talking to a registry
 
 ```sh
-# deck author's repo layout - only deck.toml + src/ are packaged:
-#   deck.toml   src/routeros.j   README.md
+jvc login                    # GitHub device flow; prints a code to enter
+jvc whoami                   # what your stored token says, without a call
+jvc scopes                   # who owns what on that registry
+jvc claim mplx               # claim a scope matching your username
+jvc query "@mplx/clispinner" # resolve a deck against the registry
+```
 
-# register the scope once, then publish: jvc packages src/ into a tarball,
-# checksums it, derives [decks] as --requires, and registers the version.
-./jvc publish --url https://…/routeros-0.1.0.tar.gz
-# → writes dist/routeros-0.1.0.tar.gz, checksums it, and prints the exact
-#   `deckadmin add …` command for the registry operator to run
+The registry defaults to `https://registry.jennifer-lang.dev`, overridable with
+`--registry` or `$JVC_REGISTRY`. A project spanning several registries maps
+scopes to them in `[registries]`; see [docs/cli.md](docs/cli.md).
 
-# consumer's deck.toml:  [decks]  "@jennifer/routeros" = "^0.1.0"
-./jvc install          # → vendor/jennifer/routeros/routeros.j
-# app.j:  import "@jennifer/routeros/";  → routeros.greet()
+### Publishing a deck
+
+```sh
+# The author's repo: deck.toml + src/, tagged and pushed.
+git tag 0.1.0 && git push origin 0.1.0
+
+jvc publish                  # gate, then publish
+jvc publish --remote github  # when origin is not the forge the registry reads
+```
+
+`publish` runs the quality gate first (lint, every module's test overlay,
+docblocks), then tells the registry a **repository and a tag**. Nothing is
+uploaded and no `dist/` is built: the registry reads `deck.toml` from that
+commit itself, and the tag is resolved to a commit that becomes the pin.
+
+The repository comes from your `origin` remote unless `--remote` names another,
+which matters if you push to more than one forge: a project whose `origin` is a
+private GitLab will otherwise hand the registry a URL it cannot read.
+
+For a registry that accepts no publishes, `jvc pack` builds a release tarball
+instead, and `jvc yank` / `jvc unyank` withdraw and restore a published version.
+
+A deck that declares `[package] bin` ships a command as well as modules. `jvc
+install` writes it into the project's `bin/`; `jvc app install @scope/deck`
+installs the same published deck onto your `PATH` instead.
+
+**From CI, do not log in.** `jvc login` ends with a human typing a code into a
+browser, so it refuses where nothing can read one. A pipeline authorises a write
+either through **trusted publishing**, where the CI system mints a short-lived
+identity token for the job and the pipeline holds no credential at all, or
+through **`$JVC_TOKEN`** as the fallback. jvc tries them in that order and names
+the one it used in the publish report. See
+[docs/cli.md](docs/cli.md#publishing-from-a-pipeline).
+
+### Starting a deck from scratch
+
+```sh
+jvc init "@mplx/thing"       # write a deck.toml
+jvc engine jennifer ">=0.25.0"
+jvc provide spinner 0.1.0
+```
+
+`jvc help` lists every verb; `docs/cli.md` explains them. The manifest verbs
+(`init`, `add`, `remove`, `conflict`, `engine`, `provide`, `source`,
+`registry`) only edit `deck.toml`, so they need no network and no token.
+
+### Consuming it
+
+```sh
+# consumer's deck.toml:  [decks]  "@mplx/clispinner" = "^0.1.0"
+jvc install          # → vendor/mplx/clispinner/clispinner.j
+# app.j:  import "@mplx/clispinner/";  → clispinner.startSpinner(...)
 ```
 
 ## Documentation
@@ -88,11 +150,13 @@ authority rather than restating it.
   scoped decks, and the version-constraint grammar (guide).
 - **[docs/deck-spec.md](docs/deck-spec.md)** - the normative manifest +
   delivery specification.
-- **[docs/cli.md](docs/cli.md)** - the `jvc` command reference.
+- **[docs/cli.md](docs/cli.md)** - the `jvc` command reference: every verb and
+  flag, the registry mapping, publishing, and shell completion.
 - **the registry project** - the public deck registry design
   draft: every write is a CLI action, the web is read-only.
-- **[registry-specs.md](registry-specs.md)** - where the normative registry
-  specification lives, and how far jvc conforms to it.
+- **the [client specification](https://registry.jennifer-lang.dev/specs/specs-client.html)** -
+  the normative contract jvc implements, owned, versioned and served by the
+  registry project rather than copied here.
 
 ## Tests
 

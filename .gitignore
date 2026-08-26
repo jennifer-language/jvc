@@ -12,3 +12,9 @@ camcorder.lock
 # Editor / OS noise.
 *.swp
 .DS_Store
+
+# makepkg build artifacts, when building the PKGBUILD in place.
+/packaging/archlinux/src/
+/packaging/archlinux/pkg/
+/packaging/archlinux/*.pkg.tar.*
+/packaging/archlinux/*.log

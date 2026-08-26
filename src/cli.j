@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 
 /**
  * The jvc command-line logic: the verbs that read and edit a deck
@@ -34,7 +35,10 @@ use convert;
 import "./manifest.j" as manifest;
 import "./deckname.j" as deckname;
 import "./publish.j" as publish;
+import "./git.j" as git;
 import "./registry.j" as registry;
+import "./ciauth.j" as ciauth;
+import "./scopemap.j" as scopemap;
 import "./catalog.j" as catalog;
 import "./resolver.j" as resolver;
 import "./gitsource.j" as gitsource;
@@ -50,7 +54,7 @@ import "semver.j" as semver;
 def const VERSION as string init "0.1.0";
 
 # The registry used when neither --registry nor $JVC_REGISTRY is set.
-def const DEFAULT_REGISTRY as string init "http://localhost:8080";
+def const DEFAULT_REGISTRY as string init "https://registry.jennifer-lang.dev";
 
 # The manifest filename `jvc init` creates.
 def const INIT_MANIFEST as string init "deck.toml";
@@ -89,6 +93,8 @@ func valuedFlag(token as string) {
     return $token == "--registry" or $token == "--manifest" or
         $token == "--from" or $token == "--version" or $token == "--source" or
         $token == "--url" or $token == "--out" or
+        $token == "--repository" or $token == "--tag" or
+        $token == "--remote" or
         $token == "--prefix" or $token == "--scope";
 }
 
@@ -173,6 +179,1495 @@ func registryBase(args as list of string) {
         return $env;
     }
     return DEFAULT_REGISTRY;
+}
+
+/**
+ * Show who the stored token says you are, without contacting the registry.
+ *
+ * Purely local, and deliberately so: the question "what am I actually holding"
+ * has to be answerable when the registry is the thing misbehaving. The claims
+ * are shown **unverified**, since jvc has no signing key; they are what the
+ * registry asserted when it issued the token, which is exactly what is useful
+ * when a scope refuses you and it is not obvious why.
+ * @param base {string} the registry base URL
+ * @return {Outcome} the claims, or why there are none to show
+ */
+export func runWhoami(base as string) {
+    def cred as Credential init readCredential($base);
+    if ($cred.token == "") {
+        return fail(notLoggedIn($base));
+    }
+    def claims as registry.Claims init emptyClaims();
+    try {
+        $claims = registry.decodeClaims($cred.token);
+    } catch (err) {
+        return fail("the stored token could not be read: " + $err.message +
+            "\n  run `jvc logout` and log in again");
+    }
+    return ok(whoamiReport($base, $cred, $claims, time.unix(time.now())));
+}
+
+# notLoggedIn says what would authorise a write when no interactive login is
+# stored, because in a pipeline that is the normal state rather than a problem.
+func notLoggedIn(base as string) {
+    def out as string init "not logged in to " + $base;
+    if (not (strings.trim(os.getEnv(ciauth.ENV_TOKEN)) == "")) {
+        return $out + ", but $JVC_TOKEN is set and would authorise a write";
+    }
+    if (not (ciauth.identityProvider() == "")) {
+        return $out + ", but this is a " + ciauth.identityProvider() +
+            " job that can mint its own identity token for one";
+    }
+    return $out + "; run `jvc login`";
+}
+
+# emptyClaims is the zero value the try block above starts from.
+func emptyClaims() {
+    def none as list of string init [];
+    return registry.Claims{ subject: "", login: "", issuedAt: 0, expiresAt: 0,
+        orgs: $none, orgsAt: 0 };
+}
+
+/**
+ * Render the whoami report.
+ * @param base {string} the registry the token belongs to
+ * @param cred {Credential} the stored credential
+ * @param claims {registry.Claims} the token's claims
+ * @param now {int} the current time (Unix seconds), for the expiry line
+ * @return {string} the report
+ */
+export func whoamiReport(base as string, cred as Credential,
+    claims as registry.Claims, now as int) {
+    def out as string init $claims.login;
+    if ($out == "") {
+        $out = "(the token names no login)";
+    } else {
+        $out = "@" + $out;
+    }
+    $out = $out + " at " + $base;
+    if (not ($claims.subject == "")) {
+        $out = $out + "\n  account:  " + $claims.subject + " (the id a scope binds to)";
+    }
+    # The expiry and the refresh are reported together, because separately they
+    # invite the wrong conclusion: an "expired" line beside a "refresh held" line
+    # reads as a problem to fix, when in fact the next command renews it without
+    # anyone noticing. Nothing renews on a timer, so the line says *when* it
+    # happens rather than promising it already has.
+    $out = $out + "\n  token:    " +
+        expiryLine($claims.expiresAt, $now, not ($cred.refresh == ""));
+    if ($cred.refresh == "") {
+        $out = $out + "\n  refresh:  none held";
+    } else {
+        $out = $out + "\n  refresh:  held; spent when a command is refused, " +
+            "not on a timer";
+    }
+    if (len($claims.orgs) == 0) {
+        $out = $out + "\n  orgs:     none; only a scope matching your login is derivable";
+        return $out;
+    }
+    $out = $out + "\n  orgs:     " + strings.join($claims.orgs, ", ");
+    if (not ($claims.orgsAt == 0)) {
+        $out = $out + "\n            read at " + time.iso(time.fromUnix($claims.orgsAt)) +
+            ", and not refreshed by a token refresh";
+    }
+    return $out;
+}
+
+# expiryLine says whether a token is still usable, and what that means next.
+#
+# An expired token with a refresh behind it is not a thing the user has to act
+# on, so saying only "expired" overstates it: the next command that carries the
+# token renews it and carries on.
+func expiryLine(expiresAt as int, now as int, canRefresh as bool) {
+    if ($expiresAt == 0) {
+        return "no expiry in the token";
+    }
+    def stamp as string init time.iso(time.fromUnix($expiresAt));
+    if ($now >= $expiresAt) {
+        if ($canRefresh) {
+            # "will try to", not "renews": whether the stored refresh token is
+            # still good is only knowable by spending it, and a registry that
+            # rotates them will refuse one already used. Promising the renewal
+            # from local state alone is how this report came to contradict the
+            # command that then failed to authenticate.
+            return "expired at " + $stamp +
+                "; the next command will try to renew it without a login";
+        }
+        return "expired at " + $stamp + "; the next command needing it will " +
+            "ask you to log in";
+    }
+    # Integer operands still divide to a float, so the minutes are converted
+    # back rather than assumed.
+    def left as int init convert.toInt(($expiresAt - $now) / 60);
+    if ($left < 1) {
+        return "valid until " + $stamp + " (under a minute)";
+    }
+    return "valid until " + $stamp + " (" + convert.toString($left) + " min)";
+}
+
+/**
+ * Where a published app's code lives: the clone URL and the version chosen.
+ * @field url {string} the clone URL the registry recorded
+ * @field version {string} the version that satisfied the constraint
+ * @field error {string} why it could not be resolved ("" when it was)
+ */
+export def struct AppSource {
+    url as string,
+    version as string,
+    error as string
+};
+
+/**
+ * Resolve a published deck name to the repository an app install can fetch.
+ *
+ * Only a `git` deck can be installed as an app: a published tarball has no
+ * repository to check out, and the installer works from a git mirror so it can
+ * read the manifest at the chosen tag. Saying so plainly beats failing later
+ * with something about a missing clone.
+ * @param base {string} the registry base URL, for a scope the mapping does not cover
+ * @param name {string} the scoped deck name
+ * @param spec {string} the version constraint ("" for the newest)
+ * @return {AppSource} the resolved repository, or why it could not be
+ */
+export func resolveApp(base as string, name as string, spec as string) {
+    def m as manifest.Manifest init manifestOrEmpty(".");
+    def mapper as Mapper init newMapper($m.registries, $base);
+    def where as Mapped init mapFor($mapper, $name);
+    if (not ($where.error == "")) {
+        return AppSource{ url: "", version: "", error: $where.error };
+    }
+    def found as list of catalog.Candidate init [];
+    try {
+        $found = registry.fetchDeck(registry.newClient($where.url), $name,
+            $where.basePath);
+    } catch (err) {
+        return AppSource{ url: "", version: "",
+            error: "could not reach the repository at " + $where.url + ": " +
+                $err.message };
+    }
+    if (len($found) == 0) {
+        return AppSource{ url: "", version: "",
+            error: scopemap.missMessage($name, $where.url) };
+    }
+    return pickApp($found, $name, $spec, $where.url);
+}
+
+# pickApp chooses the version to install and checks it is installable as an app.
+func pickApp(found as list of catalog.Candidate, name as string, spec as string,
+    from as string) {
+    def want as string init $spec;
+    if ($want == "") {
+        $want = "*";
+    }
+    def versions as list of string init [];
+    for (def c in $found) {
+        if (not $c.yanked) {
+            $versions[] = $c.version;
+        }
+    }
+    def best as string init constraint.best($versions, $want);
+    if ($best == "") {
+        return AppSource{ url: "", version: "",
+            error: "no version of " + $name + " at " + $from + " satisfies " + $want };
+    }
+    for (def c in $found) {
+        if ($c.version == $best) {
+            if (not ($c.kind == "git")) {
+                return AppSource{ url: "", version: "",
+                    error: $name + " " + $best + " is published as a " + $c.kind +
+                        " archive, which has no repository to install an app from" };
+            }
+            return AppSource{ url: $c.url, version: $best, error: "" };
+        }
+    }
+    return AppSource{ url: "", version: "", error: "no such version: " + $best };
+}
+
+# manifestOrEmpty loads the project manifest when there is one, so an app
+# install run inside a project honours its [registries] mapping and one run
+# anywhere else still works.
+func manifestOrEmpty(dir as string) {
+    def loc as Located init locate($dir);
+    if (not ($loc.error == "") or $loc.path == "") {
+        return manifest.empty("", "");
+    }
+    return manifest.load($loc.path);
+}
+
+# --- publishing to a repository ---------------------------------------------
+
+/**
+ * Where a publish should read the code from: a clone URL and a tag.
+ * @field repository {string} the https clone URL
+ * @field tag {string} the tag to publish
+ * @field error {string} why neither could be worked out ("" when both were)
+ */
+export def struct Source {
+    repository as string,
+    tag as string,
+    error as string
+};
+
+/**
+ * Work out the repository and tag a publish should name.
+ *
+ * Both are taken from git rather than from the manifest, because the registry
+ * reads the code from the forge and it is the forge's view that has to be
+ * right. An explicit flag wins, since a project may push to a remote that is
+ * not the one it publishes from.
+ * @param dir {string} the project directory
+ * @param version {string} the manifest version, for the fallback tag
+ * @param repoFlag {string} `--repository`, or "" to read `origin`
+ * @param tagFlag {string} `--tag`, or "" to look for the version's tag
+ * @return {Source} the resolved source, or why it could not be
+ */
+export func publishSource(dir as string, version as string, repoFlag as string,
+    tagFlag as string, remote as string) {
+    def which as string init strings.trim($remote);
+    if ($which == "") {
+        $which = "origin";
+    }
+    def repo as string init strings.trim($repoFlag);
+    if ($repo == "") {
+        def got as git.Result init git.run(git.remoteUrlArgv($dir, $which));
+        if (not $got.ok) {
+            return Source{ repository: "", tag: "",
+                error: "no `" + $which + "` remote here, so there is nothing to " +
+                    "publish from" + otherRemotes($dir, $which) };
+        }
+        $repo = git.httpsRemote(strings.trim($got.output));
+    }
+    def tag as string init strings.trim($tagFlag);
+    if ($tag == "") {
+        $tag = tagForVersion($dir, $version);
+    }
+    if ($tag == "") {
+        # The suggested spelling follows whatever this repository already uses,
+        # since jvc reads `1.2.3` and `v1.2.3` alike and naming the other one
+        # would start a second convention beside the first.
+        def want as string init tagStyle($dir) + $version;
+        return Source{ repository: $repo, tag: "",
+            error: "no tag here matches " + $version + ". Tag the release and " +
+                "push it:\n  git tag " + $want + " && git push origin " + $want +
+                "\n  (or pass --tag)" };
+    }
+    # A tag the remote does not have is the failure worth catching here rather
+    # than at the registry: the registry reads the repository over the network,
+    # so a tag that exists only in this working tree is invisible to it, and the
+    # error it would give back names a fetch failure rather than the omission.
+    if (not remoteHasTag($dir, $which, $tag)) {
+        return Source{ repository: $repo, tag: $tag,
+            error: $tag + " is not on `" + $which + "`, so the repository " +
+                "cannot read it:\n  git push " + $which + " " + $tag };
+    }
+    return Source{ repository: $repo, tag: $tag, error: "" };
+}
+
+# otherRemotes names the remotes that do exist, when the one asked for does not.
+# A project pushing to two forges is exactly the case where the default is
+# wrong, and listing them costs nothing.
+func otherRemotes(dir as string, missing as string) {
+    def got as git.Result init git.run(git.remotesArgv($dir));
+    if (not $got.ok) {
+        return "; pass --repository <clone-url>";
+    }
+    def names as list of string init [];
+    for (def line in strings.split($got.output, "\n")) {
+        def name as string init strings.trim($line);
+        if (not ($name == "") and not ($name == $missing)) {
+            $names[] = $name;
+        }
+    }
+    if (len($names) == 0) {
+        return "; pass --repository <clone-url>";
+    }
+    return ".\n  This repository has: " + strings.join($names, ", ") +
+        "\n  Pick one with --remote, or pass --repository <clone-url>.";
+}
+
+# tagStyle reports the tag spelling this repository already uses.
+func tagStyle(dir as string) {
+    def got as git.Result init git.run(git.lsTagsArgv($dir));
+    if (not $got.ok) {
+        return "";
+    }
+    return git.tagPrefix(git.parseTags($got.output));
+}
+
+# remoteHasTag asks the remote whether it carries a tag. A git that cannot
+# reach the remote answers "yes" rather than blocking the publish on a check
+# that is only an early warning: the registry is the authority on what it can
+# read, and a network failure here says nothing about that.
+func remoteHasTag(dir as string, remote as string, tag as string) {
+    def got as git.Result init git.run(git.lsRemoteTagArgv($dir, $remote, $tag));
+    if (not $got.ok) {
+        return true;
+    }
+    return not (strings.trim($got.output) == "");
+}
+
+# tagForVersion finds the tag naming this version, accepting both the bare and
+# the `v`-prefixed spelling because projects disagree and the registry only
+# cares which tag it is told to read.
+func tagForVersion(dir as string, version as string) {
+    def got as git.Result init git.run(git.tagsAtArgv($dir, "HEAD"));
+    if (not $got.ok) {
+        return "";
+    }
+    for (def tag in git.parseTags($got.output)) {
+        if ($tag == $version or $tag == "v" + $version) {
+            return $tag;
+        }
+    }
+    return "";
+}
+
+/**
+ * Publish a version to a repository that accepts publishes.
+ *
+ * Nothing is uploaded: the registry is told a repository and a tag and reads
+ * the manifest from that commit itself, so what lands is what the forge holds.
+ * That is also why the local quality gate still runs first, since it is the
+ * only thing that checks the code before the forge is asked for it.
+ * @param dir {string} the project directory
+ * @param base {string} the registry base URL
+ * @param version {string} the manifest version
+ * @param src {Source} the repository and tag to publish
+ * @return {Outcome} what the registry recorded, or its refusal
+ */
+export func publishToRegistry(dir as string, base as string, version as string,
+    src as Source) {
+    def api as registry.Negotiated init scopeConnection($base, "publish");
+    if (not $api.ok) {
+        return fail($api.error);
+    }
+    if (not canAuthorise($base)) {
+        return fail(noAuthorityAdvice($base));
+    }
+    def client as registry.Client init registry.newClient($base);
+    def reply as registry.PublishReply init registry.PublishReply{
+        status: 0, name: "", version: "", commit: "", error: "" };
+    def by as string init "";
+    try {
+        def raw as Reply init withAuth($base, $api.auth, postJson, Request{
+            url: registry.publishUrl($client, $api.basePath),
+            body: registry.publishBody($src.repository, $src.tag)
+        });
+        $by = $raw.mechanism;
+        $reply = registry.parsePublishReply($raw.status,
+            registry.withResponder($raw.status, $raw.body, $raw.via));
+        if (not ($raw.refreshNote == "")) {
+            $reply.error = authOutcome($base, $raw.refreshNote, $raw.refreshFatal);
+        }
+    } catch (err) {
+        return fail("could not reach the repository at " + $base + ": " + $err.message);
+    }
+    if ($reply.status == 401) {
+        return fail(authRefusal($base, $reply.error));
+    }
+    if (not ($reply.error == "")) {
+        return fail($reply.error);
+    }
+    def report as string init "published " + $reply.name + "@" + $reply.version +
+        " to " + $base +
+        "\n  from:   " + $src.repository + " at " + $src.tag +
+        "\n  commit: " + $reply.commit + " (the pin, not the tag)";
+    # Name the mechanism, never the token. An operator reading a build log needs
+    # to see whether a standing secret was involved in this release.
+    if (not ($by == "")) {
+        $report = $report + "\n  auth:   " + $by;
+    }
+    return ok($report);
+}
+
+# canAuthorise reports whether anything here could authorise a write, without
+# spending a network call to find out. It keeps a request that is certain to be
+# refused off the wire, and it deliberately does not mint an identity token:
+# that costs a round trip to the CI system, and `withAuth` is about to do it.
+func canAuthorise(base as string) {
+    if (not (readCredential($base).token == "")) {
+        return true;
+    }
+    if (not (strings.trim(os.getEnv(ciauth.ENV_TOKEN)) == "")) {
+        return true;
+    }
+    return not (ciauth.identityProvider() == "");
+}
+
+# noAuthorityAdvice says what would authorise a write here. In a pipeline the
+# answer is never "run `jvc login`", so the advice changes with the setting
+# rather than sending a runner to a browser it does not have.
+func noAuthorityAdvice(base as string) {
+    if (not ciauth.isInteractive()) {
+        return "nothing here can authorise a write to " + $base + ".\n" +
+            "  This looks like a build, so there are two ways to authorise " +
+            "one:\n" +
+            "    trusted publishing - give the job `permissions: id-token: " +
+            "write` and it needs no secret at all\n" +
+            "    $JVC_TOKEN         - set it to a token minted for " + $base;
+    }
+    return reloginAdvice($base);
+}
+
+/**
+ * Withdraw a published version from new resolutions, or restore one.
+ *
+ * Yanking does not delete: the version stays fetchable so a lockfile that
+ * already pins it keeps installing, and only fresh resolutions skip it. That is
+ * the whole point of yanking rather than removing, and it is why this is
+ * reversible.
+ * @param base {string} the registry base URL
+ * @param name {string} the deck name
+ * @param version {string} the version to act on
+ * @param yanking {bool} true to withdraw, false to restore
+ * @return {Outcome} what the registry recorded, or its refusal
+ */
+export func runYank(base as string, name as string, version as string,
+    yanking as bool) {
+    def verb as string init "unyank";
+    if ($yanking) {
+        $verb = "yank";
+    }
+    if (strings.trim($name) == "" or strings.trim($version) == "") {
+        return fail("usage: jvc " + $verb + " <deck> <version>");
+    }
+    def api as registry.Negotiated init scopeConnection($base, "yank");
+    if (not $api.ok) {
+        return fail($api.error);
+    }
+    if (not canAuthorise($base)) {
+        return fail(noAuthorityAdvice($base));
+    }
+    def client as registry.Client init registry.newClient($base);
+    def reply as registry.YankReply init registry.YankReply{
+        status: 0, name: "", version: "", yanked: false, error: "" };
+    try {
+        def raw as Reply init withAuth($base, $api.auth, postJson, Request{
+            url: registry.yankUrl($client, $api.basePath, $yanking),
+            body: registry.yankBody($name, $version)
+        });
+        $reply = registry.parseYankReply($raw.status,
+            registry.withResponder($raw.status, $raw.body, $raw.via));
+        if (not ($raw.refreshNote == "")) {
+            $reply.error = authOutcome($base, $raw.refreshNote, $raw.refreshFatal);
+        }
+    } catch (err) {
+        return fail("could not reach the repository at " + $base + ": " + $err.message);
+    }
+    if ($reply.status == 401) {
+        return fail(authRefusal($base, $reply.error));
+    }
+    if (not ($reply.error == "")) {
+        return fail($reply.error);
+    }
+    if ($reply.yanked) {
+        return ok($reply.name + "@" + $reply.version + " is yanked: no new " +
+            "resolution will choose it, and a lockfile that pins it still installs");
+    }
+    return ok($reply.name + "@" + $reply.version + " is restored and selectable again");
+}
+
+# --- scopes -----------------------------------------------------------------
+
+# The marker a sub-dispatcher returns when the command was not one of its own.
+# A sentinel rather than a bool-plus-Outcome pair because the caller only needs
+# to know "keep looking", and `dispatch` is already at the linter's statement
+# ceiling without another two-line unpack per verb.
+def const UNHANDLED as string init "\u0000unhandled";
+
+# unhandled is the sentinel outcome meaning "not my command".
+func unhandled() {
+    return Outcome{ ok: false, message: UNHANDLED };
+}
+
+# dispatchScope handles the verbs that talk to a repository about scopes,
+# split out of `dispatch` to keep it inside the linter's statement limit.
+func dispatchScope(command as string, args as list of string,
+    pos as list of string) {
+    if ($command == "whoami") {
+        return runWhoami(registryBase($args));
+    }
+    if ($command == "yank") {
+        return runYank(registryBase($args), posAt($pos, 0), posAt($pos, 1), true);
+    }
+    if ($command == "unyank") {
+        return runYank(registryBase($args), posAt($pos, 0), posAt($pos, 1), false);
+    }
+    if ($command == "scopes") {
+        return runScopes(registryBase($args));
+    }
+    if ($command == "claim") {
+        return runClaim(registryBase($args), posAt($pos, 0));
+    }
+    if ($command == "owners") {
+        return runOwners(registryBase($args), posAt($pos, 0), posAt($pos, 1),
+            not hasFlag($args, "--remove"));
+    }
+    return unhandled();
+}
+
+# scopeConnection agrees a version with the registry and checks it offers the
+# feature a scope verb needs, so each verb refuses by name rather than by 404.
+func scopeConnection(base as string, feature as string) {
+    def client as registry.Client init registry.newClient($base);
+    def api as registry.Negotiated init agreeApi($client);
+    if (not $api.ok) {
+        return $api;
+    }
+    if (not registry.offers($api, $feature)) {
+        return registry.lacksFeature($base, $feature);
+    }
+    return $api;
+}
+
+/**
+ * List the scopes a registry knows, and who holds them.
+ * @param base {string} the registry base URL
+ * @return {Outcome} the listing, or why it could not be read
+ */
+export func runScopes(base as string) {
+    def api as registry.Negotiated init scopeConnection($base, "scopes");
+    if (not $api.ok) {
+        return fail($api.error);
+    }
+    def client as registry.Client init registry.newClient($base);
+    def found as list of registry.Scope init [];
+    try {
+        $found = registry.scopes($client, $api.basePath);
+    } catch (err) {
+        return fail("could not read the scopes: " + $err.message);
+    }
+    if (len($found) == 0) {
+        return ok("no scopes are registered at " + $base);
+    }
+    def out as string init convertCount(len($found)) + " scope(s) at " + $base + ":";
+    for (def one in $found) {
+        $out = $out + "\n  @" + $one.scope + "  " + $one.kind + "  " + $one.status;
+        if (not ($one.owner == "")) {
+            $out = $out + "  " + $one.owner;
+        }
+    }
+    return ok($out);
+}
+
+/**
+ * Claim a scope for the logged-in account.
+ *
+ * Which scopes a caller may claim is the registry's policy, not jvc's, so the
+ * refusal is passed through verbatim: it is the part that says whether to pick
+ * another name or to go and ask an operator.
+ * @param base {string} the registry base URL
+ * @param scope {string} the scope to claim, with or without the leading `@`
+ * @return {Outcome} what the registry decided
+ */
+export func runClaim(base as string, scope as string) {
+    if (strings.trim($scope) == "") {
+        return fail("usage: jvc claim <scope>");
+    }
+    def api as registry.Negotiated init scopeConnection($base, "claim");
+    if (not $api.ok) {
+        return fail($api.error);
+    }
+    if (not canAuthorise($base)) {
+        return fail(noAuthorityAdvice($base));
+    }
+    def client as registry.Client init registry.newClient($base);
+    def reply as registry.ScopeReply init emptyScopeReply();
+    try {
+        $reply = withScopeAuth($base, $api, Request{
+            url: registry.apiRoot($client, $api.basePath) + "/claim",
+            body: '{"scope":"' + deckname.fold($scope) + '"}'
+        });
+    } catch (err) {
+        return fail("could not reach the repository at " + $base + ": " + $err.message);
+    }
+    if ($reply.status == 401) {
+        return fail(authRefusal($base, $reply.error));
+    }
+    if (not ($reply.error == "")) {
+        return fail($reply.error);
+    }
+    return ok("@" + $reply.scope + " is now yours (" + $reply.owner + ")");
+}
+
+/**
+ * Add or remove a co-owner of a scope you can already write under.
+ * @param base {string} the registry base URL
+ * @param scope {string} the scope to change
+ * @param subject {string} the principal to add or remove
+ * @param add {bool} true to add, false to remove
+ * @return {Outcome} the scope's owners afterwards, or the refusal
+ */
+export func runOwners(base as string, scope as string, subject as string,
+    add as bool) {
+    if (strings.trim($scope) == "" or strings.trim($subject) == "") {
+        return fail("usage: jvc owners <scope> <subject> [--remove]");
+    }
+    def api as registry.Negotiated init scopeConnection($base, "owners");
+    if (not $api.ok) {
+        return fail($api.error);
+    }
+    if (not canAuthorise($base)) {
+        return fail(noAuthorityAdvice($base));
+    }
+    def client as registry.Client init registry.newClient($base);
+    def reply as registry.ScopeReply init emptyScopeReply();
+    try {
+        $reply = withScopeAuth($base, $api, Request{
+            url: registry.apiRoot($client, $api.basePath) + "/owners",
+            body: ownersBody($scope, $subject, $add)
+        });
+    } catch (err) {
+        return fail("could not reach the repository at " + $base + ": " + $err.message);
+    }
+    if ($reply.status == 401) {
+        return fail(authRefusal($base, $reply.error));
+    }
+    if (not ($reply.error == "")) {
+        return fail($reply.error);
+    }
+    return ok("@" + $reply.scope + " is owned by " +
+        strings.join($reply.owners, ", "));
+}
+
+# emptyScopeReply is the zero value the try blocks above start from.
+func emptyScopeReply() {
+    def none as list of string init [];
+    return registry.ScopeReply{ status: 0, scope: "", owner: "", owners: $none,
+        error: "" };
+}
+
+# ownersBody renders the /owners request body. `action` defaults to adding,
+# which is the safe direction to get wrong.
+func ownersBody(scope as string, subject as string, add as bool) {
+    def action as string init "remove";
+    if ($add) {
+        $action = "add";
+    }
+    return '{"scope":"' + deckname.fold($scope) + '","subject":"' + $subject +
+        '","action":"' + $action + '"}';
+}
+
+# withScopeAuth runs a scope write through the refresh-on-401 retry, adapting
+# between `Reply` (which carries only what the retry needs) and the parsed
+# scope reply the caller wants.
+func withScopeAuth(base as string, api as registry.Negotiated, req as Request) {
+    def raw as Reply init withAuth($base, $api.auth, postJson, $req);
+    def out as registry.ScopeReply init registry.parseScopeReply($raw.status,
+        registry.withResponder($raw.status, $raw.body, $raw.via));
+    if (not ($raw.refreshNote == "")) {
+        $out.error = authOutcome($base, $raw.refreshNote, $raw.refreshFatal);
+    }
+    return $out;
+}
+
+# --- which registry a deck comes from ---------------------------------------
+
+/**
+ * The registry a deck resolves at, once negotiated: where to talk to it and
+ * which base path its endpoints hang off.
+ * @field url {string} the registry base URL
+ * @field basePath {string} the negotiated API base path
+ * @field error {string} why the registry could not be agreed with ("" when ok)
+ */
+export def struct Mapped {
+    url as string,
+    basePath as string,
+    error as string
+};
+
+/**
+ * Everything needed to decide, per deck name, which registry to ask.
+ *
+ * It carries the negotiated base path for each registry it has already spoken
+ * to, because a project spanning two registries would otherwise re-fetch a
+ * discovery document for every missing deck. The mapping itself is pure and
+ * lives in `scopemap`; this is the part that has to touch the network.
+ * @field registries {list of manifest.Dependency} the `[registries]` table
+ * @field fallback {string} the registry for anything the table does not map
+ * @field agreed {map of string to string} registry URL -> negotiated base path
+ * @field failed {map of string to string} registry URL -> why negotiation failed
+ */
+export def struct Mapper {
+    registries as list of manifest.Dependency,
+    fallback as string,
+    agreed as map of string to string,
+    failed as map of string to string
+};
+
+/**
+ * Build a mapper from a manifest's `[registries]` table and the fallback the
+ * command line or environment named.
+ * @param registries {list of manifest.Dependency} the `[registries]` table
+ * @param fallback {string} the registry for unmapped scopes
+ * @return {Mapper} a mapper that has spoken to nothing yet
+ */
+export func newMapper(registries as list of manifest.Dependency,
+    fallback as string) {
+    def agreed as map of string to string init {};
+    def failed as map of string to string init {};
+    return Mapper{
+        registries: $registries,
+        fallback: $fallback,
+        agreed: $agreed,
+        failed: $failed
+    };
+}
+
+/**
+ * Resolve a deck name to its registry, negotiating with that registry the first
+ * time it is asked for.
+ *
+ * Mutating the mapper is the point: the caller threads one through the whole
+ * fetch loop so each registry is negotiated once, however many decks come from
+ * it.
+ * @param mapper {Mapper} the mapper, updated in place with what it learns
+ * @param name {string} the deck name
+ * @return {Mapped} where that deck comes from, or the negotiation failure
+ */
+export func mapFor(mapper as Mapper, name as string) {
+    def url as string init scopemap.registryFor($mapper.registries, $name,
+        $mapper.fallback);
+    if (maps.has($mapper.agreed, $url)) {
+        return Mapped{ url: $url, basePath: $mapper.agreed[$url], error: "" };
+    }
+    if (maps.has($mapper.failed, $url)) {
+        return Mapped{ url: $url, basePath: "", error: $mapper.failed[$url] };
+    }
+    def api as registry.Negotiated init agreeApi(registry.newClient($url));
+    if (not $api.ok) {
+        $mapper.failed[$url] = $api.error;
+        return Mapped{ url: $url, basePath: "", error: $api.error };
+    }
+    if (not registry.offers($api, "deck")) {
+        def why as string init $url + " does not offer deck metadata " +
+            "(no `deck` feature), so nothing can be resolved from it";
+        $mapper.failed[$url] = $why;
+        return Mapped{ url: $url, basePath: "", error: $why };
+    }
+    $mapper.agreed[$url] = $api.basePath;
+    return Mapped{ url: $url, basePath: $api.basePath, error: "" };
+}
+
+/**
+ * Render the lockfile-versus-mapping disagreement as something a user can act
+ * on: what disagrees, and the two ways out.
+ * @param conflicts {list of string} the complaints from `lockRegistryConflicts`
+ * @return {string} the report
+ */
+export func registryConflictReport(conflicts as list of string) {
+    def out as string init "the lockfile and this project's [registries] mapping disagree:";
+    for (def c in $conflicts) {
+        $out = $out + "\n  " + $c;
+    }
+    return $out + "\n\nInstalling either way would change what the lockfile means." +
+        "\nRun `jvc update` to re-resolve against the mapping, or put the mapping back.";
+}
+
+# noRegistries is the empty mapping, for a command running before there is a
+# project manifest to read one from (`jvc new` scaffolds the manifest it would
+# otherwise consult).
+func noRegistries() {
+    def none as list of manifest.Dependency init [];
+    return $none;
+}
+
+# stampRegistry records which registry a set of candidates came from, so the
+# lockfile can say so and a later install can check it still agrees.
+func stampRegistry(cands as list of catalog.Candidate, url as string) {
+    def out as list of catalog.Candidate init [];
+    for (def c in $cands) {
+        def one as catalog.Candidate init $c;
+        $one.registry = $url;
+        $out[] = $one;
+    }
+    return $out;
+}
+
+/**
+ * Check a locked set against the current mapping, and report every deck whose
+ * recorded registry the mapping no longer agrees with.
+ *
+ * A lockfile exists so the same input produces the same code. If the mapping
+ * moved a scope, the lock now names one registry and the project means another,
+ * and either answer silently chosen is wrong. Reporting the disagreement is the
+ * useful behaviour. An entry with no recorded registry predates the recording
+ * and is left alone; the next `jvc update` writes it in.
+ * @param locked {list of catalog.Candidate} the lockfile's entries
+ * @param registries {list of manifest.Dependency} the current `[registries]` table
+ * @param fallback {string} the registry for unmapped scopes
+ * @return {list of string} one complaint per disagreeing deck, empty when they agree
+ */
+export func lockRegistryConflicts(locked as list of catalog.Candidate,
+    registries as list of manifest.Dependency, fallback as string) {
+    def out as list of string init [];
+    for (def c in $locked) {
+        if ($c.kind == "git" or $c.registry == "") {
+            continue;
+        }
+        def now as string init scopemap.registryFor($registries, $c.name, $fallback);
+        if (not ($now == $c.registry)) {
+            $out[] = $c.name + " " + $c.version + " is locked to " + $c.registry +
+                " but this project now maps it to " + $now;
+        }
+    }
+    return $out;
+}
+
+# --- login ------------------------------------------------------------------
+
+# Where credentials live. One file, keyed by registry base URL, because a token
+# is only ever valid at the registry that issued it.
+def const TOKEN_FILE as string init "credentials.json";
+
+/**
+ * The path of the credentials file, honouring `$JVC_CREDENTIALS` and then the
+ * XDG config directory.
+ * @return {string} the absolute path jvc reads and writes tokens at
+ */
+export func credentialsPath() {
+    def override as string init os.getEnv("JVC_CREDENTIALS");
+    if (not ($override == "")) {
+        return $override;
+    }
+    def xdg as string init os.getEnv("XDG_CONFIG_HOME");
+    if (not ($xdg == "")) {
+        return path.join($xdg, "jvc", TOKEN_FILE);
+    }
+    return path.join(os.getEnv("HOME"), ".config", "jvc", TOKEN_FILE);
+}
+
+/**
+ * A stored credential for one registry.
+ * @field token {string} the bearer token ("" when none is held)
+ * @field refresh {string} the refresh token ("" when the registry issued none)
+ * @field login {string} the account display name, for `jvc login` to echo back
+ */
+export def struct Credential {
+    token as string,
+    refresh as string,
+    login as string
+};
+
+/**
+ * Read the credential held for one registry, or an empty one.
+ *
+ * Credentials are keyed by the registry's base URL so a token is never sent to
+ * a host other than the one that issued it, which the specification requires
+ * and which a single global token could not honour.
+ * @param base {string} the registry base URL
+ * @return {Credential} the stored credential, empty when there is none
+ */
+export func readCredential(base as string) {
+    def empty as Credential init Credential{ token: "", refresh: "", login: "" };
+    def file as string init credentialsPath();
+    if (not fs.exists($file)) {
+        return $empty;
+    }
+    def doc as json.Value init json.decode(fs.readString($file));
+    def key as string init "/" + deckname.ptrEscape($base);
+    if (not json.has($doc, $key)) {
+        return $empty;
+    }
+    return Credential{
+        token: jsonStr($doc, $key + "/token"),
+        refresh: jsonStr($doc, $key + "/refresh"),
+        login: jsonStr($doc, $key + "/login")
+    };
+}
+
+/**
+ * Store (or clear) the credential for one registry, owner-readable only.
+ *
+ * The file is chmod-ed every write rather than only at creation, because an
+ * existing file may predate that care. Only the registry's own token is ever
+ * written: the provider token that produced it never touches disk.
+ * @param base {string} the registry base URL
+ * @param cred {Credential} the credential to store; an empty token removes the entry
+ * @return {string} the path written
+ */
+export func writeCredential(base as string, cred as Credential) {
+    def file as string init credentialsPath();
+    def doc as json.Value init json.map();
+    if (fs.exists($file)) {
+        $doc = json.decode(fs.readString($file));
+    }
+    def key as string init "/" + deckname.ptrEscape($base);
+    if ($cred.token == "") {
+        if (json.has($doc, $key)) {
+            $doc = json.remove($doc, $key);
+        }
+    } else {
+        def entry as json.Value init json.map();
+        $entry = json.set($entry, "/token", $cred.token);
+        $entry = json.set($entry, "/refresh", $cred.refresh);
+        $entry = json.set($entry, "/login", $cred.login);
+        $doc = json.set($doc, $key, $entry);
+    }
+    fs.mkdirAll(path.dir($file));
+    fs.writeString($file, json.encodePretty($doc));
+    fs.chmod($file, 0o600);
+    return $file;
+}
+
+/**
+ * What an authenticated request came back with, in the two terms the retry
+ * cares about.
+ * @field status {int} the HTTP status code
+ * @field body {string} the response body
+ * @field via {string} who answered, when that was not the repository itself
+ * @field refreshNote {string} why a `401` could not be recovered from ("" when it was, or when none was tried)
+ * @field refreshFatal {bool} whether that failure was the token being refused, rather than the repository failing to answer
+ * @field mechanism {string} which of specification 5.5's mechanisms authorised
+ *     it ("" when none did)
+ */
+export def struct Reply {
+    status as int,
+    body as string,
+    via as string,
+    refreshNote as string,
+    refreshFatal as bool,
+    mechanism as string
+};
+
+# respondent names the intermediary that answered, when one did.
+#
+# A registry behind a CDN or a reverse proxy fails in two very different ways
+# that look identical from here: the registry refusing, and the proxy reporting
+# that the registry never answered. The `server` header tells them apart, and a
+# request id makes the proxy's own logs searchable, which is the only place the
+# reason for a `502` is written down.
+func respondent(resp as http.Response) {
+    def who as string init strings.lower(strings.trim(http.header($resp, "server")));
+    if ($who == "" or $who == "jennifer") {
+        return "";
+    }
+    def ray as string init strings.trim(http.header($resp, "cf-ray"));
+    if ($ray == "") {
+        return $who;
+    }
+    return $who + ", request " + $ray;
+}
+
+/**
+ * Exchange the stored refresh token for a fresh one, storing whatever comes
+ * back (a network call).
+ *
+ * A registry that rotates refresh tokens returns a new one each time, so the
+ * reply is stored wholesale rather than only its access token; keeping the old
+ * refresh token would work exactly once.
+ * @param base {string} the registry base URL
+ * @param auth {registry.Auth} the advertised auth block
+ * @return {Outcome} ok with the refreshed login, or why the refresh was refused
+ */
+export func refreshCredential(base as string, auth as registry.Auth) {
+    def cred as Credential init readCredential($base);
+    if ($cred.refresh == "") {
+        return fail("no refresh token held for " + $base);
+    }
+    if ($auth.refreshUrl == "") {
+        return fail($base + " advertises no refresh endpoint");
+    }
+    def reply as registry.TokenReply init registry.TokenReply{
+        done: false, pending: true, slowDown: false, token: "", refreshToken: "",
+        expiresIn: 0, login: "", accountId: 0, detail: "", error: "" };
+    try {
+        $reply = registry.refreshToken(registry.newClient($base), $auth,
+            $cred.refresh);
+    } catch (err) {
+        # Unreachable is not a rejection. The credential is kept, because a
+        # network that is down says nothing about whether the token is good, and
+        # discarding it here would turn a blip into a re-login.
+        return fail("could not reach " + $base + " to refresh: " + $err.message);
+    }
+    if (not $reply.done) {
+        # A server-side fault says nothing about the token, so it is kept: the
+        # registry may be back in a minute and the credential is still good.
+        if ($reply.pending) {
+            def why as string init $reply.detail;
+            if ($why == "") {
+                $why = "it returned a server error";
+            }
+            return fail($base + " could not answer the refresh: " + $why);
+        }
+        # A rejection is final, so the credential is discarded rather than kept
+        # to fail again. Holding a refresh token the registry has refused makes
+        # every later command repeat a doomed round trip, and makes `whoami`
+        # report a renewal that cannot happen.
+        forget($base);
+        return fail($base + " rejected the stored refresh token, so it has been " +
+            "discarded; run `jvc login`");
+    }
+    def next as Credential init Credential{
+        token: $reply.token,
+        refresh: keepRefresh($cred.refresh, $reply.refreshToken),
+        login: $reply.login
+    };
+    writeCredential($base, $next);
+    return ok("refreshed the token for " + $base);
+}
+
+# forget discards the credential held for a registry, for when it is known to be
+# worthless rather than merely old.
+func forget(base as string) {
+    def empty as Credential init Credential{ token: "", refresh: "", login: "" };
+    writeCredential($base, $empty);
+}
+
+# keepRefresh chooses which refresh token to store. A rotating registry sends a
+# new one every time and the old one dies with it; a non-rotating one sends
+# none, and dropping the existing one would make the next refresh impossible.
+func keepRefresh(current as string, issued as string) {
+    if ($issued == "") {
+        return $current;
+    }
+    return $issued;
+}
+
+/**
+ * One authenticated request: where to send it and what to send.
+ *
+ * The request travels as data rather than as a closure because a `func` value
+ * in Jennifer can only be a top-level function, so there is nothing to capture
+ * a URL and a body in. Passing both alongside the attempt keeps the retry
+ * generic and keeps it testable without a network.
+ * @field url {string} the absolute URL to post to
+ * @field body {string} the JSON body
+ */
+export def struct Request {
+    url as string,
+    body as string
+};
+
+/**
+ * Post a request with a bearer token. This is the `attempt` every real
+ * authenticated call hands to `withAuth`.
+ * @param req {Request} the request to send
+ * @param token {string} the bearer token
+ * @return {Reply} the status and body
+ */
+export func postJson(req as Request, token as string) {
+    def resp as http.Response init http.post($req.url, "application/json",
+        $req.body, registry.bearer($token));
+    return Reply{ status: $resp.status, body: $resp.body,
+        via: respondent($resp), refreshNote: "", refreshFatal: false,
+        mechanism: "" };
+}
+
+/**
+ * Where the authority for a write comes from, in the order client
+ * specification 5.5 sets out: trusted publishing, then `$JVC_TOKEN`, then a
+ * stored interactive login.
+ *
+ * The order is not a preference between equals. A trusted-publishing token is
+ * minted for one job and expires with it, so a pipeline using it holds no
+ * credential that can leak; `$JVC_TOKEN` is a standing secret somebody has to
+ * administer; a stored login is a human's own authority and has no business
+ * being the thing a build runs on. Each mechanism is skipped rather than tried
+ * when it does not apply, except that a CI identity that is present but broken
+ * stops the search: falling through from that to a standing secret would hide
+ * a misconfiguration behind a weaker credential.
+ * @param base {string} the registry base URL
+ * @param auth {registry.Auth} the advertised auth block
+ * @param requestUrl {string} the URL about to be called
+ * @return {ciauth.Grant} the authority, or an empty grant when there is none
+ */
+export func grantFor(base as string, auth as registry.Auth, requestUrl as string) {
+    if (isTrustedTarget($base, $auth, $requestUrl)) {
+        def minted as ciauth.Grant init ciauth.trustedGrant($auth.trustedAudience);
+        if ($minted.found or not ($minted.error == "")) {
+            return $minted;
+        }
+    }
+    def fromEnv as ciauth.Grant init ciauth.environmentGrant();
+    if ($fromEnv.found) {
+        return $fromEnv;
+    }
+    def cred as Credential init readCredential($base);
+    if ($cred.token == "") {
+        return ciauth.noGrant();
+    }
+    return ciauth.heldGrant($cred.token, ciauth.BY_STORED, true);
+}
+
+# isTrustedTarget reports whether this is the request the registry accepts an
+# identity token at.
+#
+# The endpoint is the registry's to name, and the reference registry names the
+# publish endpoint itself. A token minted for that audience is not sent anywhere
+# else: the audience is what stops it being replayed, and widening where it goes
+# would be jvc undoing that on the registry's behalf.
+func isTrustedTarget(base as string, auth as registry.Auth, requestUrl as string) {
+    if (not registry.offersTrustedPublishing($auth)) {
+        return false;
+    }
+    return registry.authUrl(registry.newClient($base), $auth.trustedUrl) ==
+        $requestUrl;
+}
+
+/**
+ * Run an authenticated request, refreshing once on a `401` rather than sending
+ * the user back through a full login.
+ *
+ * `attempt` is called as `attempt(req, token)` and returns the `Reply`. On a
+ * `401` the stored refresh token is exchanged and the request retried exactly
+ * once; only if the refresh is itself rejected does this give up and say to log
+ * in again. A single retry is deliberate: a second `401` after a fresh token
+ * means the token is not the problem.
+ * @param base {string} the registry base URL
+ * @param auth {registry.Auth} the advertised auth block
+ * @param attempt {func} takes a `Request` and a bearer token, returns a `Reply`
+ * @param req {Request} the request to run
+ * @return {Reply} the first reply, or the reply to the retry
+ */
+export func withAuth(base as string, auth as registry.Auth, attempt as func,
+    req as Request) {
+    def grant as ciauth.Grant init grantFor($base, $auth, $req.url);
+    if (not ($grant.error == "")) {
+        return brokenGrantReply($grant);
+    }
+    def reply as Reply init $attempt($req, $grant.token);
+    $reply.mechanism = $grant.mechanism;
+    if (not ($reply.status == 401)) {
+        return $reply;
+    }
+    # Only a stored login can be renewed here. An environment token is somebody
+    # else's to rotate, and a fresh identity token would have to come from the
+    # CI system rather than from the registry, so a `401` on either is final and
+    # saying so beats a refresh that cannot apply.
+    if (not $grant.refreshable) {
+        def unrenewable as Reply init $reply;
+        $unrenewable.refreshNote = staleGrantNote($grant);
+        $unrenewable.refreshFatal = true;
+        return $unrenewable;
+    }
+    def refreshed as Outcome init refreshCredential($base, $auth);
+    if (not $refreshed.ok) {
+        # Carry the reason out. Reporting only "not authenticated" here hides
+        # that a refresh was attempted at all, which leaves `whoami` saying a
+        # refresh is held and the command saying you are not logged in, with
+        # nothing to connect them.
+        def failed as Reply init $reply;
+        $failed.refreshNote = $refreshed.message;
+        # A refused token means log in again; a repository that could not answer
+        # means try again. Advising a login for the second is wrong, and it is
+        # what made an unchanged token and "run `jvc login`" appear together.
+        $failed.refreshFatal = readCredential($base).refresh == "";
+        return $failed;
+    }
+    def again as Reply init $attempt($req, readCredential($base).token);
+    $again.mechanism = $grant.mechanism;
+    if ($again.status == 401) {
+        def stale as Reply init $again;
+        $stale.refreshNote = "a freshly refreshed token was rejected too";
+        $stale.refreshFatal = true;
+        return $stale;
+    }
+    return $again;
+}
+
+# brokenGrantReply turns a CI identity that could not be obtained into the same
+# shape a `401` takes, so every caller reports it the one way.
+func brokenGrantReply(grant as ciauth.Grant) {
+    return Reply{ status: 401, body: "", via: "", refreshNote: $grant.error,
+        refreshFatal: true, mechanism: "" };
+}
+
+# staleGrantNote says why a rejected token will not be refreshed, naming the
+# mechanism rather than the token.
+func staleGrantNote(grant as ciauth.Grant) {
+    if ($grant.mechanism == ciauth.BY_ENVIRONMENT) {
+        return "$JVC_TOKEN was rejected; it is a standing secret this command " +
+            "cannot renew, so it has to be replaced where it is set";
+    }
+    if (not $grant.found) {
+        return "";
+    }
+    return "the identity token minted for this job was rejected; check that " +
+        "this repository, workflow and ref are a registered trusted publisher";
+}
+
+/**
+ * What to tell a user whose authenticated request came back `401` even after a
+ * refresh.
+ * @param base {string} the registry base URL
+ * @return {string} the message
+ */
+export func reloginAdvice(base as string) {
+    return "not authenticated at " + $base + "; run `jvc login`";
+}
+
+/**
+ * The message for a request the repository rejected as unauthenticated.
+ *
+ * Where a refresh was attempted and refused, that is the useful half: without
+ * it the command says "not authenticated" while `whoami` says a refresh token
+ * is held, and nothing on screen connects the two.
+ * @param base {string} the registry base URL
+ * @param detail {string} what the reply carried ("" when it carried nothing)
+ * @return {string} the message
+ */
+export func authFailure(base as string, detail as string) {
+    if (strings.trim($detail) == "") {
+        return reloginAdvice($base);
+    }
+    return reloginAdvice($base) + "\n  " + $detail;
+}
+
+# authRefusal reports a 401. When a refresh was attempted, the reply already
+# carries the full explanation and it is used as-is; otherwise there is nothing
+# to add beyond the advice.
+func authRefusal(base as string, detail as string) {
+    if (strings.startsWith(strings.trim($detail), "could not authenticate") or
+        strings.startsWith(strings.trim($detail), "not authenticated")) {
+        return $detail;
+    }
+    return authFailure($base, $detail);
+}
+
+/**
+ * The message for a request that could not be authenticated, told apart by
+ * whether the credential is the problem.
+ *
+ * Advising a login when the stored token was never refused is bad advice: it
+ * asks the user to replace something that is probably fine, to work around a
+ * repository that could not answer. The two cases need different words, which
+ * is exactly what an unchanged token sitting under "run `jvc login`" failed to
+ * give.
+ * @param base {string} the registry base URL
+ * @param detail {string} what the attempt reported ("" when nothing)
+ * @param fatal {bool} true when the credential itself was refused
+ * @return {string} the message
+ */
+export func authOutcome(base as string, detail as string, fatal as bool) {
+    if ($fatal or strings.trim($detail) == "") {
+        return authFailure($base, $detail);
+    }
+    return "could not authenticate at " + $base + " just now:\n  " + $detail +
+        "\n  Your stored token is untouched, so this is the repository's end; " +
+        "try again shortly.";
+}
+
+/**
+ * Explain why a registry cannot be logged into, or "" when it can.
+ *
+ * Two distinct answers the specification asks be kept apart: a registry that
+ * advertises no `auth` object accepts no logins at all, and one advertising a
+ * flow this client does not implement has to be refused by the flow's name
+ * rather than by a generic failure.
+ * @param auth {registry.Auth} the advertised auth block
+ * @return {string} the refusal, or "" when the device flow is on offer
+ */
+export func loginRefusal(auth as registry.Auth) {
+    if (not $auth.present) {
+        return "this registry accepts no logins (it advertises no auth block)";
+    }
+    if (not ($auth.flow == registry.FLOW_DEVICE)) {
+        return "this registry wants the `" + $auth.flow +
+            "` login flow, which this jvc does not implement (it implements `" +
+            registry.FLOW_DEVICE + "`)";
+    }
+    if ($auth.deviceUrl == "" or $auth.tokenUrl == "") {
+        return "this registry advertises the `" + registry.FLOW_DEVICE +
+            "` flow without the endpoints to run it";
+    }
+    return "";
+}
+
+/** The longest a poll will wait between attempts, however often it backs off. */
+export def const MAX_POLL_INTERVAL as int init 60;
+
+/**
+ * How many server-side faults in a row before a login gives up.
+ *
+ * A fault that repeats is not a blip. Waiting out the code's full lifetime on a
+ * registry that is answering, promptly and identically, with the same failure
+ * every time is indistinguishable from a hang: the user sees one line and then
+ * nothing for a quarter of an hour.
+ */
+export def const MAX_SERVER_FAULTS as int init 4;
+
+/**
+ * The next polling interval. The registry's own interval is the floor; being
+ * asked to slow down, or hitting a server-side fault, doubles the wait.
+ *
+ * The doubling is capped. Without a ceiling a run of faults walks the interval
+ * past the code's whole lifetime, so jvc would sleep through the window and
+ * report an expiry it never actually waited for.
+ * @param current {int} the interval just used, in seconds
+ * @param slowDown {bool} whether the last reply asked for more room
+ * @return {int} the interval to use next
+ */
+export func nextInterval(current as int, slowDown as bool) {
+    if (not $slowDown) {
+        return $current;
+    }
+    def next as int init $current * 2;
+    if ($next > MAX_POLL_INTERVAL) {
+        return MAX_POLL_INTERVAL;
+    }
+    return $next;
+}
+
+/**
+ * Log in to a registry with the device authorization flow.
+ *
+ * Prints the user code, then polls until the user approves, the device code
+ * expires, or the registry gives up. Polling waits the interval the registry
+ * asked for and backs off further on a `429`; both are the registry's call, not
+ * this client's.
+ * @param base {string} the registry base URL
+ * @return {Outcome} what happened, with the account name on success
+ */
+export func runLogin(base as string) {
+    def client as registry.Client init registry.newClient($base);
+    def api as registry.Negotiated init agreeApi($client);
+    if (not $api.ok) {
+        return fail($api.error);
+    }
+    def refusal as string init loginRefusal($api.auth);
+    if (not ($refusal == "")) {
+        return fail($refusal);
+    }
+    # A device grant ends with a human typing a code into a browser. Where there
+    # is no human, printing the code and then polling for ten minutes wastes the
+    # build and tells nobody anything; the reason is the useful output.
+    if (not ciauth.isInteractive()) {
+        return fail(noTerminalRefusal($base));
+    }
+    def start as registry.DeviceStart init registry.startDevice($client, $api.auth);
+    if ($start.deviceCode == "") {
+        return fail("the registry started no device authorization");
+    }
+    io.printf("open %s and enter code  %s\n",
+        $start.verificationUri, $start.userCode);
+
+    def waited as int init 0;
+    def interval as int init $start.interval;
+    if ($interval < 1) {
+        $interval = 5;
+    }
+    def faults as int init 0;
+    def lastDetail as string init "";
+    while ($waited < $start.expiresIn) {
+        time.sleep(time.fromSeconds($interval));
+        $waited = $waited + $interval;
+        def reply as registry.TokenReply init pollOnce($client, $api.auth,
+            $start.deviceCode);
+        if (not ($reply.error == "")) {
+            return fail($reply.error);
+        }
+        if ($reply.done) {
+            return finishLogin($base, $reply);
+        }
+        if ($reply.slowDown) {
+            $faults = $faults + 1;
+            if (not ($reply.detail == "")) {
+                $lastDetail = $reply.detail;
+            }
+            # Report each fault rather than only the first. A single line
+            # followed by minutes of silence reads as a hang, and the registry's
+            # own reason is the only thing that says which side is broken.
+            io.printf("waiting: %s\n", faultLine($reply.detail, $faults));
+            if ($faults >= MAX_SERVER_FAULTS) {
+                return fail(serverFaultReport($base, $lastDetail, $faults));
+            }
+        } else {
+            $faults = 0;
+        }
+        $interval = nextInterval($interval, $reply.slowDown);
+    }
+    return fail("the code expired before it was approved; run `jvc login` again");
+}
+
+# noTerminalRefusal explains why no device code was printed, and what to do
+# instead. Both alternatives authorise the write without a login, which is the
+# thing the caller actually wanted.
+func noTerminalRefusal(base as string) {
+    return "`jvc login` needs a terminal: it prints a code somebody has to " +
+        "type into a browser, and nobody is reading this.\n" +
+        "  To authorise a write from a build, do not log in at all:\n" +
+        "    trusted publishing - give the job `permissions: id-token: write` " +
+        "and publish with no secret\n" +
+        "    $JVC_TOKEN         - set it to a token minted for " + $base;
+}
+
+# pollOnce wraps the network call so a transport failure is an answer rather
+# than an uncaught throw out of the middle of a login.
+func pollOnce(client as registry.Client, auth as registry.Auth,
+    deviceCode as string) {
+    try {
+        return registry.pollToken($client, $auth, $deviceCode);
+    } catch (err) {
+        return registry.TokenReply{
+            done: false, pending: false, slowDown: false, token: "",
+            refreshToken: "", expiresIn: 0, login: "", accountId: 0,
+            detail: "", error: "lost contact with the repository: " + $err.message
+        };
+    }
+}
+
+# faultLine describes one server-side fault, preferring the registry's own words.
+func faultLine(detail as string, attempt as int) {
+    def what as string init $detail;
+    if ($what == "") {
+        $what = "the repository returned a server error";
+    }
+    return $what + " (attempt " + convert.toString($attempt) + ")";
+}
+
+/**
+ * The report for a login abandoned because the registry kept failing.
+ *
+ * It names the registry's own reason, because that is what distinguishes a
+ * problem the user can act on from one only the operator can.
+ * @param base {string} the registry base URL
+ * @param detail {string} the last explanation the registry gave ("" if none)
+ * @param faults {int} how many consecutive faults were seen
+ * @return {string} the failure message
+ */
+export func serverFaultReport(base as string, detail as string, faults as int) {
+    def out as string init $base + " failed to complete the login " +
+        convert.toString($faults) + " times in a row";
+    if (not ($detail == "")) {
+        $out = $out + ", saying: " + $detail;
+    }
+    return $out + "\n\nThe authorization itself succeeded; this is the " +
+        "repository failing to finish it, so retrying now will most likely " +
+        "fail the same way. This is one for whoever runs it.";
+}
+
+# finishLogin stores what a successful poll returned and reports it.
+func finishLogin(base as string, reply as registry.TokenReply) {
+    def cred as Credential init Credential{
+        token: $reply.token,
+        refresh: $reply.refreshToken,
+        login: $reply.login
+    };
+    writeCredential($base, $cred);
+    def who as string init $reply.login;
+    if ($who == "") {
+        $who = "(the registry named no account)";
+    } else {
+        $who = "@" + $who;
+    }
+    return ok("logged in as " + $who);
+}
+
+/**
+ * Discard the token held for a registry. Revoking the grant at the provider is
+ * the user's own business; this only forgets the local copy.
+ * @param base {string} the registry base URL
+ * @return {Outcome} what was discarded
+ */
+export func runLogout(base as string) {
+    def cred as Credential init readCredential($base);
+    if ($cred.token == "") {
+        return ok("no token held for " + $base);
+    }
+    def empty as Credential init Credential{ token: "", refresh: "", login: "" };
+    writeCredential($base, $empty);
+    return ok("discarded the token for " + $base);
 }
 
 # --- filesystem verbs (unit-testable) ---------------------------------------
@@ -459,6 +1954,91 @@ export func runSource(dir as string, name as string, url as string) {
 }
 
 /**
+ * Map a scope to a registry, or clear a mapping, in dir's manifest.
+ *
+ * With no URL the mapping is removed and that scope falls back to the catch-all
+ * (or to `--registry` / `$JVC_REGISTRY` when there is none). Setting a mapping
+ * that moves an already-locked scope is allowed but warned about, because it
+ * changes what the existing lockfile means and the next install will say so.
+ * @param dir {string} the directory holding the manifest
+ * @param pattern {string} the scope wildcard, or the catch-all star
+ * @param url {string} the registry base URL, or "" to clear the mapping
+ * @return {Outcome} what the mapping now says
+ */
+export func runRegistry(dir as string, pattern as string, url as string) {
+    if ($pattern == "") {
+        return fail("usage: jvc registry <scope|*> [url]\n" +
+            "  a scope key is a scope name with a star for the deck half");
+    }
+    def key as string init normalisePattern($pattern);
+    if (not scopemap.isPattern($key)) {
+        return fail("not a scope mapping key: " + $pattern +
+            "\n  map a whole scope (a scope name with a star for the deck " +
+            "half) or the bare star, never one deck: a scope resolves at " +
+            "exactly one registry, and mapping per deck brings back the " +
+            "ambiguity that guarantee removes");
+    }
+    def loc as Located init locate($dir);
+    if (not ($loc.error == "")) {
+        return fail($loc.error);
+    }
+    if ($loc.path == "") {
+        return noManifest($dir);
+    }
+    def m as manifest.Manifest init manifest.load($loc.path);
+    if ($url == "") {
+        if (not manifest.depListHas($m.registries, $key)) {
+            return fail($key + " has no [registries] entry to remove");
+        }
+        manifest.save(manifest.removeRegistry($m, $key), $loc.path);
+        return ok($key + " is no longer mapped");
+    }
+    def warning as string init shadowWarning($dir, $key, $url);
+    manifest.save(manifest.addRegistry($m, $key, $url), $loc.path);
+    return ok($key + " now resolves at " + $url + $warning);
+}
+
+# normalisePattern accepts the shorthands a user will actually type: a bare
+# scope (`@acme`, or `acme`) means that scope's wildcard.
+func normalisePattern(pattern as string) {
+    if ($pattern == scopemap.CATCH_ALL) {
+        return $pattern;
+    }
+    def out as string init deckname.fold($pattern);
+    if (not strings.startsWith($out, "@")) {
+        $out = "@" + $out;
+    }
+    if (strings.endsWith($out, "/" + scopemap.CATCH_ALL)) {
+        return $out;
+    }
+    if (strings.endsWith($out, "/")) {
+        return $out + scopemap.CATCH_ALL;
+    }
+    return $out + "/" + scopemap.CATCH_ALL;
+}
+
+# shadowWarning reports, at the moment a mapping is set, which already-locked
+# decks it moves. The install-time check is the hard stop; this is the earlier,
+# friendlier half, so the surprise lands where the change was made.
+func shadowWarning(dir as string, key as string, url as string) {
+    def locked as Locked init readLock($dir);
+    if (not $locked.present or not ($locked.error == "")) {
+        return "";
+    }
+    def where as map of string to string init {};
+    for (def c in $locked.decks) {
+        $where[$c.name] = $c.registry;
+    }
+    def moved as list of string init scopemap.shadowed($where, $key, $url);
+    if (len($moved) == 0) {
+        return "";
+    }
+    return "\n  warning: " + convertCount(len($moved)) +
+        " locked deck(s) now map elsewhere (" + strings.join($moved, ", ") +
+        ")\n  run `jvc update` to re-resolve, or `jvc install` will refuse the mismatch";
+}
+
+/**
  * Require a Jennifer engine version range for dir's deck (which interpreter
  * versions can run it). The engine name defaults to "jennifer" and the
  * constraint to "*".
@@ -536,6 +2116,12 @@ export func writeLock(dir as string, resolved as list of catalog.Candidate) {
             $cj = json.append($cj, "", $cap);
         }
         $entry = json.set($entry, "/capabilities", $cj);
+        # Which registry this came from. Without it the same lockfile resolves
+        # to different code on a machine whose mapping differs, which is the
+        # exact failure a lockfile exists to prevent.
+        if (not ($res.registry == "")) {
+            $entry = json.set($entry, "/registry", $res.registry);
+        }
         $doc = json.set($doc, "/decks/" + deckname.ptrEscape($res.name), $entry);
     }
     def path as string init $dir + "/" + LOCK_FILE;
@@ -637,7 +2223,8 @@ func lockedEntry(doc as json.Value, name as string) {
         # resolver only ever picked a live version, and a later withdrawal is
         # not knowable offline. Reproducibility wins, so a pinned version
         # installs whatever the repository has since decided about it.
-        yanked: false
+        yanked: false,
+        registry: jsonStr($doc, $p + "/registry")
     };
 }
 
@@ -803,6 +2390,13 @@ export func installArchive(dir as string, name as string, data as bytes,
         def dest as string init path.join($staging, $sub);
         fs.mkdirAll(path.dir($dest));
         fs.writeBytes($dest, $e.data);
+        # Carry the archive's permissions across. A deck may ship a command
+        # (`[package] bin`), and a command written without its executable bit is
+        # a command that cannot run: the link jvc then writes into the project's
+        # `bin/` fails with "permission denied" at the moment somebody tries to
+        # use it. Masked to the permission bits, so setuid and setgid in a
+        # downloaded archive are dropped rather than honoured.
+        fs.chmod($dest, $e.mode & 0o777);
         $count = $count + 1;
     }
     if ($count == 0) {
@@ -1122,9 +2716,15 @@ export func agreeApi(client as registry.Client) {
     try {
         $found = registry.discover($client);
     } catch (err) {
-        # A registry that cannot be reached at all is reported by the caller when
-        # the first real request fails; assume legacy and let that happen.
-        $found = registry.legacyDiscovery();
+        # Unreachable is not the same as old. A registry that serves no discovery
+        # document answers `404`, which `discover` already turns into the legacy
+        # assumption, so reaching this handler means the host did not answer at
+        # all. Assuming legacy here turned a network failure into a confident
+        # claim about the registry's capabilities: because the legacy document
+        # carries no auth block, an unreachable address reported itself as "this
+        # registry accepts no logins", which reads like a server misconfiguration
+        # and sends the user looking in entirely the wrong place.
+        return registry.unreachable($client.baseUrl, $err.message);
     }
     return registry.negotiate($found, registry.supportedVersions());
 }
@@ -1132,16 +2732,26 @@ export func agreeApi(client as registry.Client) {
 # fetchInto reads every version of one deck from whichever source owns it: the
 # `[sources]` git URL when the manifest gives the deck one, else the repository.
 # Returns the candidates to add, or the reason that source could not supply them.
-func fetchInto(client as registry.Client, sources as list of manifest.Dependency,
-    name as string, basePath as string) {
+func fetchInto(mapper as Mapper, sources as list of manifest.Dependency,
+    name as string) {
     def url as string init manifest.depListGet($sources, $name);
     if ($url == "") {
-        def found as list of catalog.Candidate init
-            registry.fetchDeck($client, $name, $basePath);
-        if (len($found) == 0) {
-            return resolveFailed("no such deck in the repository: " + $name);
+        # Only now is a registry needed, which is why the mapping is consulted
+        # here and not before: a git-sourced deck resolves without one, and
+        # negotiating for it would fail a project that has no registry at all.
+        def reg as Mapped init mapFor($mapper, $name);
+        if (not ($reg.error == "")) {
+            return resolveFailed($reg.error);
         }
-        return Resolved{ ok: true, decks: $found, error: "" };
+        def client as registry.Client init registry.newClient($reg.url);
+        def found as list of catalog.Candidate init
+            registry.fetchDeck($client, $name, $reg.basePath);
+        if (len($found) == 0) {
+            # Reported against the mapped registry, and there is no second one
+            # to try: that is what makes dependency confusion impossible here.
+            return resolveFailed(scopemap.missMessage($name, $reg.url));
+        }
+        return Resolved{ ok: true, decks: stampRegistry($found, $reg.url), error: "" };
     }
     def got as gitsource.Fetch init gitsource.candidates(gitsource.cacheRoot(), $url, $name);
     if (not $got.ok) {
@@ -1174,9 +2784,8 @@ func fetchInto(client as registry.Client, sources as list of manifest.Dependency
  * @param basePath {string} the negotiated registry API base path
  * @return {Resolved} the locked set, or the reason it could not be resolved
  */
-export func resolveRoots(client as registry.Client, seed as catalog.Catalog,
-    roots as map of string to string, sources as list of manifest.Dependency,
-    basePath as string) {
+export func resolveRoots(mapper as Mapper, seed as catalog.Catalog,
+    roots as map of string to string, sources as list of manifest.Dependency) {
     def cat as catalog.Catalog init $seed;
     for (def round as int init 0; $round < MAX_FETCH_ROUNDS; $round = $round + 1) {
         def g as resolver.GraphResult init resolver.resolveGraph($cat, $roots);
@@ -1187,7 +2796,11 @@ export func resolveRoots(client as registry.Client, seed as catalog.Catalog,
             return resolveFailed($g.error);
         }
         for (def name in $g.missing) {
-            def got as Resolved init fetchInto($client, $sources, $name, $basePath);
+            # Every name, direct or transitive, goes through the consuming
+            # project's own mapping. A deck's `requires` names no registry
+            # precisely so that a dependency cannot choose where it is fetched
+            # from, which is what makes an internal fork of a public scope work.
+            def got as Resolved init fetchInto($mapper, $sources, $name);
             if (not $got.ok) {
                 return $got;
             }
@@ -1260,7 +2873,7 @@ func applySet(dir as string, m as manifest.Manifest,
     # install-time gate against the *installing* interpreter; the authoritative
     # per-import check is the core resolver's job, from the lockfile's engines.
     def graphEng as Outcome init checkGraphEngines($resolved, runningEngine(),
-        runningVersionCore());
+        runningVersion());
     if (not $graphEng.ok) {
         return fail("a dependency does not support this engine:\n  " + $graphEng.message);
     }
@@ -1327,7 +2940,7 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool,
     }
     def m as manifest.Manifest init manifest.load($loc.path);
     def engineCheck as Outcome init engineSatisfied($m.engines, runningEngine(),
-        runningVersionCore());
+        runningVersion());
     if (not $engineCheck.ok) {
         return $engineCheck;
     }
@@ -1341,6 +2954,15 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool,
         return fail($locked.error);
     }
     if ($locked.present) {
+        # A mapping that disagrees with the lock is a hard stop, checked before
+        # staleness: re-resolving would quietly fetch the same names from a
+        # different registry, and silently picking either side is the one
+        # outcome the specification rules out.
+        def conflicts as list of string init lockRegistryConflicts($locked.decks,
+            $m.registries, $baseUrl);
+        if (len($conflicts) > 0) {
+            return fail(registryConflictReport($conflicts));
+        }
         def stale as string init lockStaleReason($roots, $locked.decks);
         if ($stale == "") {
             return applySet($dir, $m, $locked.decks,
@@ -1361,18 +2983,10 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool,
 func resolveAndApply(dir as string, m as manifest.Manifest,
     roots as map of string to string, baseUrl as string, why as string,
     runTests as bool) {
-    def client as registry.Client init registry.newClient($baseUrl);
-    def api as registry.Negotiated init agreeApi($client);
-    if (not $api.ok) {
-        return fail($api.error);
-    }
-    if (not registry.offers($api, "deck")) {
-        return fail("this registry does not offer deck metadata " +
-            "(no `deck` feature), so nothing can be resolved from it");
-    }
+    def mapper as Mapper init newMapper($m.registries, $baseUrl);
     def graph as Resolved init resolveFailed("");
     try {
-        $graph = resolveRoots($client, catalog.empty(), $roots, $m.sources, $api.basePath);
+        $graph = resolveRoots($mapper, catalog.empty(), $roots, $m.sources);
     } catch (err) {
         return fail("could not reach repository at " + $baseUrl);
     }
@@ -1410,7 +3024,7 @@ export func runUpdate(dir as string, baseUrl as string, includeDev as bool,
     }
     def m as manifest.Manifest init manifest.load($loc.path);
     def engineCheck as Outcome init engineSatisfied($m.engines, runningEngine(),
-        runningVersionCore());
+        runningVersion());
     if (not $engineCheck.ok) {
         return $engineCheck;
     }
@@ -1440,18 +3054,10 @@ export func runUpdate(dir as string, baseUrl as string, includeDev as bool,
         }
     }
     def before as list of catalog.Candidate init $locked.decks;
-    def client as registry.Client init registry.newClient($baseUrl);
-    def api as registry.Negotiated init agreeApi($client);
-    if (not $api.ok) {
-        return fail($api.error);
-    }
-    if (not registry.offers($api, "deck")) {
-        return fail("this registry does not offer deck metadata " +
-            "(no `deck` feature), so nothing can be resolved from it");
-    }
+    def mapper as Mapper init newMapper($m.registries, $baseUrl);
     def graph as Resolved init resolveFailed("");
     try {
-        $graph = resolveRoots($client, catalog.empty(), $roots, $m.sources, $api.basePath);
+        $graph = resolveRoots($mapper, catalog.empty(), $roots, $m.sources);
     } catch (err) {
         return fail("could not reach repository at " + $baseUrl);
     }
@@ -1617,18 +3223,10 @@ export func runNew(dir as string, name as string, deck as string,
     if (not ($sourceUrl == "")) {
         $sources = manifest.depListSet($sources, $deck, $sourceUrl);
     }
-    def client as registry.Client init registry.newClient($baseUrl);
-    def api as registry.Negotiated init agreeApi($client);
-    if (not $api.ok) {
-        return fail($api.error);
-    }
-    if (not registry.offers($api, "deck")) {
-        return fail("this registry does not offer deck metadata " +
-            "(no `deck` feature), so nothing can be resolved from it");
-    }
+    def mapper as Mapper init newMapper(noRegistries(), $baseUrl);
     def graph as Resolved init resolveFailed("");
     try {
-        $graph = resolveRoots($client, catalog.empty(), $roots, $sources, $api.basePath);
+        $graph = resolveRoots($mapper, catalog.empty(), $roots, $sources);
     } catch (err) {
         return fail("could not reach repository at " + $baseUrl);
     }
@@ -1693,7 +3291,8 @@ func fromApp(r as app.Outcome) {
 # appUsage is the help shown for a malformed `jvc app` invocation.
 func appUsage() {
     return "usage: jvc app <install|list|update|uninstall> [args]\n" +
-        "  install <git-url> [--version R] [--scope S]   fetch an app and put it on PATH\n" +
+        "  install <git-url|@scope/deck> [--version R] [--scope S]\n" +
+        "                                                fetch an app and put it on PATH\n" +
         "      --scope project     into ./bin, pinned to this project\n" +
         "      --scope user        just this user (the default)\n" +
         "      --scope system      every user, under " + app.systemPrefix() + "\n" +
@@ -1732,6 +3331,23 @@ export func runAppInstall(url as string, spec as string, scope as string,
     if ($url == "") {
         return fail(appUsage());
     }
+    # A scoped name is a published deck, not a clone URL. Resolving it here
+    # keeps `app install` one verb: the difference between a deck you found in
+    # a registry and one you found on a forge is where its address came from,
+    # not what installing it means.
+    def source as string init $url;
+    def want as string init $spec;
+    if (deckname.isScoped($url)) {
+        def found as AppSource init resolveApp($baseUrl, $url, $spec);
+        if (not ($found.error == "")) {
+            return fail($found.error);
+        }
+        $source = $found.url;
+        # Pin the exact version the registry chose. Re-deriving it from the
+        # remote's tags would let the two disagree, and the registry's answer is
+        # the one that honoured the constraint and skipped anything yanked.
+        $want = "=" + $found.version;
+    }
     def loc as app.Locations init app.locations($scope, ".");
     # Probe before fetching anything: a system-wide install that cannot write its
     # command should say so up front, not after a clone.
@@ -1741,7 +3357,7 @@ export func runAppInstall(url as string, spec as string, scope as string,
             "    sudo jvc app install " + $url + " --system\n" +
             "    jvc app install " + $url);
     }
-    def inst as app.Installation init app.install($loc, $url, $spec,
+    def inst as app.Installation init app.install($loc, $source, $want,
         gitsource.cacheRoot());
     if (not $inst.ok) {
         return fail($inst.message);
@@ -1866,11 +3482,106 @@ export func runApp(args as list of string, pos as list of string) {
  * @param runChecks {bool} run the quality gate (false only for --no-verify)
  * @return {Outcome} the result to print
  */
-export func runPublish(dir as string, url as string, outDir as string,
-    runChecks as bool) {
+export func runPublish(dir as string, runChecks as bool, base as string,
+    repoFlag as string, tagFlag as string, remote as string) {
+    # The gate first, and on its own: it is the only step that inspects the code.
+    def gate as publish.Result init publish.check($dir, $runChecks);
+    if (not $gate.ok) {
+        return Outcome{ ok: false, message: $gate.message };
+    }
+    def loc as Located init locate($dir);
+    def m as manifest.Manifest init manifest.load($loc.path);
+    def head as string init "checked " + $m.pkg.name + "@" + $m.pkg.version +
+        $gate.message + "\n\n";
+    # `publish` writes nothing, anywhere. A repository that accepts publishes is
+    # told a repository and a tag and reads the code from the forge itself, so
+    # there is no artifact to build; a repository that does not is a job for
+    # `jvc pack`, which exists to build one. Keeping the two apart is what makes
+    # each verb's output mean one thing.
+    if (not offersPublish($base)) {
+        return fail($head + $base + " accepts no publishes.\n" +
+            "  `jvc pack` builds a release to hand to its operator.");
+    }
+    if (not canAuthorise($base)) {
+        if (ciauth.isInteractive()) {
+            return fail($head + $base + " accepts publishes; `jvc login` to use it");
+        }
+        return fail($head + noAuthorityAdvice($base));
+    }
+    def src as Source init publishSource($dir, $m.pkg.version, $repoFlag,
+        $tagFlag, $remote);
+    if (not ($src.error == "")) {
+        return fail($head + $src.error);
+    }
+    def sent as Outcome init publishToRegistry($dir, $base, $m.pkg.version, $src);
+    return Outcome{ ok: $sent.ok, message: $head + $sent.message };
+}
+
+/**
+ * Build a release artifact: run the gate, then package `src/` and the manifest
+ * into a checksummed tarball under `outDir`.
+ *
+ * Separate from `publish` because it answers a different question. Publishing
+ * sends a repository and a tag to a registry that reads the code itself;
+ * packing produces a file, for hosting yourself, for a mirror, or for handing
+ * to the operator of a repository that accepts no publishes.
+ * @param dir {string} the deck's root directory
+ * @param url {string} the URL the artifact will be hosted at ("" for a placeholder)
+ * @param outDir {string} where to write the tarball and plan
+ * @param runChecks {bool} whether to run the quality gate
+ * @param showOperator {bool} also print the repository operator's registration line
+ * @return {Outcome} what was built
+ */
+export func runPack(dir as string, url as string, outDir as string,
+    runChecks as bool, showOperator as bool) {
+    def gate as publish.Result init publish.check($dir, $runChecks);
+    if (not $gate.ok) {
+        return Outcome{ ok: false, message: $gate.message };
+    }
     def stamp as string init io.sprintf("%d", time.unix(time.now()));
-    def r as publish.Result init publish.publish($dir, $url, $outDir, $stamp, $runChecks);
-    return Outcome{ ok: $r.ok, message: $r.message };
+    def r as publish.Result init publish.pack($dir, $url, $outDir, $stamp,
+        $gate.message);
+    if (not $r.ok) {
+        return Outcome{ ok: false, message: $r.message };
+    }
+    return Outcome{ ok: true, message: packagedAdvice($r, $showOperator) };
+}
+
+/**
+ * Add the closing advice to a packaged release: what to do next, given that the
+ * repository would not take it.
+ *
+ * `deckadmin` is the **repository operator's** tool. It edits the store on the
+ * server's own filesystem, so printing it to whoever ran `jvc publish` hands
+ * them a command they almost certainly cannot run, and reads as an instruction
+ * when it is really a message for somebody else. What that person needs is the
+ * facts to pass on; the command itself is shown only when asked for, by the
+ * operator who can actually use it.
+ * @param r {publish.Result} the packaging result
+ * @param showCommand {bool} whether the reader is the repository's operator
+ * @return {string} the report to print
+ */
+export func packagedAdvice(r as publish.Result, showCommand as bool) {
+    if ($showCommand and not ($r.operatorCommand == "")) {
+        return $r.message +
+            "\n\nto register it, host the tarball at your URL and run, " +
+            "on the repository's own host:\n  " + $r.operatorCommand;
+    }
+    return $r.message + "\n\nThis repository accepts no publishes, so " +
+        "registering the release is its operator's to do. Send them the " +
+        "deck name, the version, and the tag you published from; " +
+        "`--operator-command` prints the line they would run.";
+}
+
+# offersPublish reports whether a repository accepts publishes at all, quietly:
+# a repository that is unreachable or that offers no publish endpoint is not an
+# error here, it just means the operator path stands.
+func offersPublish(base as string) {
+    def api as registry.Negotiated init agreeApi(registry.newClient($base));
+    if (not $api.ok) {
+        return false;
+    }
+    return registry.offers($api, "publish");
 }
 
 # --- engine + conflict enforcement ------------------------------------------
@@ -1884,35 +3595,51 @@ func runningEngine() {
     return "jennifer";
 }
 
-# runningVersionCore is the running interpreter's release core (major.minor.patch,
-# dropping any -dev prerelease / build metadata) so a development build like
-# "0.17.0-dev+72.abc" is gated as "0.17.0" against a caret / tilde range.
-func runningVersionCore() {
+# runningVersion is the interpreter's version as it describes itself, prerelease
+# and all. The prerelease is *not* stripped: whether a build is a development
+# one is exactly what decides the engine floor, so dropping it would throw the
+# deciding fact away before the check runs.
+func runningVersion() {
     def raw as string init meta.VERSION;
     if (strings.startsWith($raw, "v")) {
         $raw = strings.substring($raw, 1, len($raw));
     }
-    if (not semver.isValid($raw)) {
-        return $raw;
+    return $raw;
+}
+
+/**
+ * Report whether an interpreter version names a development build.
+ *
+ * A `-dev` build bypasses a version floor, which is the interpreter's own rule
+ * for `# pragma-jennifer-version` and so must be jvc's for `[engines]` too: a
+ * gate stricter than the thing it stands in for would refuse decks the
+ * interpreter would happily load. It is also the only workable answer while the
+ * language is pre-1.0, since a development build of the next release is exactly
+ * where a deck needing that release gets tried first.
+ * @param version {string} the interpreter version, e.g. "0.24.0-dev+28.7c98d39"
+ * @return {bool} true when it carries a prerelease tag
+ */
+export func isDevVersion(version as string) {
+    if (not semver.isValid($version)) {
+        # Unparseable is not a release tag either, so it cannot be compared.
+        return true;
     }
-    def v as semver.Version init semver.parse($raw);
-    def core as semver.Version init semver.Version{
-        major: $v.major,
-        minor: $v.minor,
-        patch: $v.patch,
-        prerelease: "",
-        build: ""
-    };
-    return semver.toString($core);
+    return not (semver.parse($version).prerelease == "");
 }
 
 /**
  * Check a running engine against a deck's `[engines]` allowlist. An empty
  * allowlist imposes no restriction. Otherwise the engine must be listed and its
  * version must satisfy that entry's range (the entries are alternatives - OR).
+ *
+ * **A development build bypasses the version range**, matching the interpreter's
+ * own `# pragma-jennifer-version` rule, where any `-dev` build passes and only a
+ * release tag is compared. The allowlist itself still applies: a `-dev` build of
+ * `jennifer-tiny` is still not `jennifer`, because that is a question of which
+ * engine is running, not of how new it is.
  * @param engines {list of Dependency} the manifest's engine allowlist
  * @param engineName {string} the running engine ("jennifer" / "jennifer-tiny")
- * @param engineVersion {string} the running interpreter version (release core)
+ * @param engineVersion {string} the running interpreter version, prerelease included
  * @return {Outcome} ok when the engine may run the deck, else a failure
  */
 export func engineSatisfied(engines as list of manifest.Dependency,
@@ -1925,6 +3652,10 @@ export func engineSatisfied(engines as list of manifest.Dependency,
             " is not in the deck's [engines] allowlist");
     }
     def spec as string init manifest.depListGet($engines, $engineName);
+    if (isDevVersion($engineVersion)) {
+        return ok("engine " + $engineName + " " + $engineVersion +
+            " is a development build, which bypasses the " + $spec + " floor");
+    }
     if (not constraint.satisfies($engineVersion, $spec)) {
         return fail("engine " + $engineName + " " + $engineVersion + " does not satisfy " + $spec);
     }
@@ -2022,7 +3753,7 @@ export func runCheck(dir as string) {
         return noManifest($dir);
     }
     def m as manifest.Manifest init manifest.load($loc.path);
-    return engineSatisfied($m.engines, runningEngine(), runningVersionCore());
+    return engineSatisfied($m.engines, runningEngine(), runningVersion());
 }
 
 # --- version and provenance -------------------------------------------------
@@ -2100,8 +3831,11 @@ func helpText() {
         "      --runtests          also run each deck's own tests on this machine\n" +
         "  update [deck...]            advance to the newest allowed versions, relock\n" +
         "  new <name> --from <deck>    scaffold an app frame over an engine deck\n" +
-        "  publish [--url U]           package src/ + emit the release command\n" +
+        "  publish [--remote N] [--repository R] [--tag T]\n" +
+        "                              run the gate, then publish to the repository\n" +
+        "                              (reads the `origin` remote unless --remote says otherwise)\n" +
         "                              (lint + tests + docblocks must pass; --no-verify skips)\n" +
+        "  pack [--out D] [--url U]    build a release tarball instead of publishing\n" +
         "\napp commands (runnable programs, not decks):\n" +
         "  app install <git-url>       fetch an app and put its command on PATH\n" +
         "      --scope project|user|system|<dir>   where to install it\n" +
@@ -2110,6 +3844,15 @@ func helpText() {
         "  app uninstall <name>        remove an app and its command\n" +
 
         "\nother:\n" +
+        "  registry <scope|*> [url]    map a scope to a repository (no url clears)\n" +
+        "  yank <deck> <version>       withdraw a version from new resolutions\n" +
+        "  unyank <deck> <version>     restore a withdrawn version\n" +
+        "  whoami                      show who your stored token says you are\n" +
+        "  scopes                      list the scopes a repository knows\n" +
+        "  claim <scope>               claim a scope for your account\n" +
+        "  owners <scope> <subject>    add a co-owner (--remove to drop one)\n" +
+        "  login                       log in to the repository (device flow)\n" +
+        "  logout                      discard the token held for it\n" +
         "  version                     print the jvc version\n" +
         "  help                        show this message\n" +
         "\noptions:\n" +
@@ -2161,6 +3904,19 @@ export func dispatch(args as list of string) {
     if ($command == "source") {
         return runSource(".", posAt($pos, 0), posAt($pos, 1));
     }
+    if ($command == "registry") {
+        return runRegistry(".", posAt($pos, 0), posAt($pos, 1));
+    }
+    def scoped as Outcome init dispatchScope($command, $args, $pos);
+    if (not ($scoped.message == UNHANDLED)) {
+        return $scoped;
+    }
+    if ($command == "login") {
+        return runLogin(registryBase($args));
+    }
+    if ($command == "logout") {
+        return runLogout(registryBase($args));
+    }
     if ($command == "query" or $command == "search") {
         return runQuery(registryBase($args), posAt($pos, 0), posAt($pos, 1));
     }
@@ -2182,12 +3938,18 @@ export func dispatch(args as list of string) {
             registryBase($args));
     }
     if ($command == "publish") {
+        return runPublish(".", not hasFlag($args, "--no-verify"),
+            registryBase($args), flagValue($args, "--repository"),
+            flagValue($args, "--tag"), flagValue($args, "--remote"));
+    }
+    if ($command == "pack") {
         def out as string init flagValue($args, "--out");
         if ($out == "") {
             $out = "dist";
         }
-        return runPublish(".", flagValue($args, "--url"), $out,
-            not hasFlag($args, "--no-verify"));
+        return runPack(".", flagValue($args, "--url"), $out,
+            not hasFlag($args, "--no-verify"),
+            hasFlag($args, "--operator-command"));
     }
     if ($command == "version" or $command == "--version") {
         def argv0 as string init "";

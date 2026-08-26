@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 #
 # White-box tests for cli.j: the filesystem verbs, the lockfile writer, the
 # argument helpers, and dispatch. The network verbs (query / install) are not
@@ -54,7 +55,8 @@ func testRegistryBaseFlagWins() {
 func testRegistryBaseDefault() {
     os.setEnv("JVC_REGISTRY", "");
     def args as list of string init ["jvc", "query", "x"];
-    testing.assertEqual(registryBase($args), "http://localhost:8080");
+    testing.assertEqual(registryBase($args), DEFAULT_REGISTRY);
+    testing.assertContains(DEFAULT_REGISTRY, "registry.jennifer-lang.dev");
 }
 
 func testBaseName() {
@@ -243,7 +245,7 @@ func testRunListShowsSources() {
 
 # offline is a client pointing nowhere: any fetch attempt would fail loudly.
 func offline() {
-    return registry.newClient("http://127.0.0.1:1");
+    return newMapper(noRegistries(), "http://127.0.0.1:1");
 }
 
 # noSources is an empty [sources] table (every deck comes from the repository).
@@ -265,7 +267,7 @@ func seeded() {
 
 func testResolveRootsResolvesTransitively() {
     def r as Resolved init resolveRoots(offline(), seeded(),
-        {"@acme/alpha": "^1.0.0"}, noSources(), "");
+        {"@acme/alpha": "^1.0.0"}, noSources());
     testing.assertTrue($r.ok);
     testing.assertEqual(len($r.decks), 2);
     testing.assertEqual($r.decks[0].name, "@acme/alpha");
@@ -279,25 +281,28 @@ func testResolveRootsRoutesAGitSourcedDeckToGit() {
     def sources as list of manifest.Dependency init
         manifest.depListSet(noSources(), "@acme/gamma", "/no/such/repo.git");
     def r as Resolved init resolveRoots(offline(), seeded(),
-        {"@acme/gamma": "^1.0.0"}, $sources, "");
+        {"@acme/gamma": "^1.0.0"}, $sources);
     testing.assertFalse($r.ok);
     testing.assertContains($r.error, "cannot reach /no/such/repo.git");
 }
 
-# a deck with no [sources] entry still goes to the repository, where an
-# unreachable server is a transport throw that runInstall turns into its own
-# "could not reach repository" message
+# A deck with no [sources] entry goes to the repository, and an unreachable one
+# now comes back as a named failure rather than a throw: the message says which
+# address did not answer and why, which a bare transport throw did not.
 func testResolveRootsRoutesAnUnsourcedDeckToTheRepository() {
-    testing.assertThrows("resolveUnsourced", "runtime");
+    def r as Resolved init resolveUnsourced();
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.error, "could not reach the repository");
+    testing.assertContains($r.error, "127.0.0.1:1");
 }
 
 func resolveUnsourced() {
-    return resolveRoots(offline(), seeded(), {"@acme/gamma": "^1.0.0"}, noSources(), "");
+    return resolveRoots(offline(), seeded(), {"@acme/gamma": "^1.0.0"}, noSources());
 }
 
 func testResolveRootsReportsUnsatisfiable() {
     def r as Resolved init resolveRoots(offline(), seeded(),
-        {"@acme/beta": ">=9.0.0"}, noSources(), "");
+        {"@acme/beta": ">=9.0.0"}, noSources());
     testing.assertFalse($r.ok);
     testing.assertContains($r.error, "no version of @acme/beta");
 }
@@ -379,7 +384,8 @@ func testWriteLock() {
         requires: $noReqs,
         engines: {"jennifer": "^0.21.0"},
         capabilities: ["net"],
-            yanked: false
+            yanked: false,
+            registry: ""
     };
     def b as catalog.Candidate init catalog.Candidate{
         name: "csv",
@@ -393,7 +399,8 @@ func testWriteLock() {
         requires: $noReqs,
         engines: {},
         capabilities: [],
-            yanked: false
+            yanked: false,
+            registry: ""
     };
     def path as string init writeLock($dir, [$a, $b]);
     def doc as json.Value init json.decode(fs.readString($path));
@@ -537,14 +544,16 @@ func testLockRoundTripsEveryField() {
         checksum: "sha256:aa", kind: "tar.gz", ref: "", commit: "",
         description: "", requires: {"@acme/beta": "^1.0.0"},
         engines: {"jennifer": ">=0.24.0"}, capabilities: ["net"],
-            yanked: false
+            yanked: false,
+            registry: ""
     };
     def gitDeck as catalog.Candidate init catalog.Candidate{
         name: "@acme/beta", version: "1.0.0", url: "https://x/b.git",
         checksum: "", kind: "git", ref: "v1.0.0", commit: "abc123",
         description: "", requires: $noReqs, engines: $noReqs,
         capabilities: $noCaps,
-            yanked: false
+            yanked: false,
+            registry: ""
     };
     def got as Locked init lockOf($dir, [$tarball, $gitDeck]);
     testing.assertTrue($got.present);
@@ -629,7 +638,7 @@ func testInstallUsesTheLockWithoutResolving() {
     def out as Outcome init runInstall($dir, "http://127.0.0.1:1", false, false);
     # it got as far as fetching (which fails with no artifact URL), never resolving
     testing.assertContains($out.message, "@acme/alpha");
-    testing.assertFalse(strings.contains($out.message, "could not reach repository"));
+    testing.assertFalse(strings.contains($out.message, "could not reach the repository"));
     fs.removeAll($dir);
 }
 
@@ -642,7 +651,7 @@ func testInstallReresolvesWhenTheLockIsStale() {
     writeLock($dir, [catalog.candidate("@acme/alpha", "1.2.0")]);
     def out as Outcome init runInstall($dir, "http://127.0.0.1:1", false, false);
     testing.assertFalse($out.ok);
-    testing.assertContains($out.message, "could not reach repository");
+    testing.assertContains($out.message, "could not reach the repository");
     fs.removeAll($dir);
 }
 
@@ -669,7 +678,7 @@ func testUpdateAlwaysResolves() {
     def none as list of string init [];
     def out as Outcome init runUpdate($dir, "http://127.0.0.1:1", false, $none, false);
     testing.assertFalse($out.ok);
-    testing.assertContains($out.message, "could not reach repository");
+    testing.assertContains($out.message, "could not reach the repository");
     fs.removeAll($dir);
 }
 
@@ -916,4 +925,1044 @@ func testDispatchUnknown() {
     def outcome as Outcome init dispatch(["jvc", "bogus"]);
     testing.assertFalse($outcome.ok);
     testing.assertContains($outcome.message, "unknown command");
+}
+
+# --- login ------------------------------------------------------------------
+
+# deviceAuth builds an advertised auth block offering the device flow.
+func deviceAuth() {
+    def auth as registry.Auth init registry.noAuth();
+    $auth.present = true;
+    $auth.provider = "github";
+    $auth.flow = registry.FLOW_DEVICE;
+    $auth.deviceUrl = "/v1/auth/device";
+    $auth.tokenUrl = "/v1/auth/token";
+    return $auth;
+}
+
+func testAnAbsentAuthBlockIsReportedAsAcceptingNoLogins() {
+    testing.assertContains(loginRefusal(registry.noAuth()), "accepts no logins");
+}
+
+func testAnUnknownFlowIsRefusedByName() {
+    # The spec asks for the flow's own name, so a user can tell an unsupported
+    # flow apart from a broken registry.
+    def a as registry.Auth init deviceAuth();
+    $a.flow = "authcode";
+    def why as string init loginRefusal($a);
+    testing.assertContains($why, "authcode");
+    testing.assertContains($why, "device");
+}
+
+func testAFlowWithoutEndpointsIsRefused() {
+    def a as registry.Auth init deviceAuth();
+    $a.deviceUrl = "";
+    testing.assertContains(loginRefusal($a), "without the endpoints");
+}
+
+func testTheDeviceFlowIsAccepted() {
+    testing.assertEqual(loginRefusal(deviceAuth()), "");
+}
+
+func testCredentialsRoundTripPerRegistry() {
+    # Keyed by registry, because a token must never be sent to another host.
+    def dir as string init fs.makeTempDir("", "jvc-cred");
+    def file as string init $dir + "/credentials.json";
+    os.setEnv("JVC_CREDENTIALS", $file);
+    writeCredential("http://a.example",
+        Credential{ token: "ta", refresh: "ra", login: "alice" });
+    writeCredential("http://b.example",
+        Credential{ token: "tb", refresh: "", login: "bob" });
+    testing.assertEqual(readCredential("http://a.example").token, "ta");
+    testing.assertEqual(readCredential("http://a.example").login, "alice");
+    testing.assertEqual(readCredential("http://b.example").token, "tb");
+    testing.assertEqual(readCredential("http://c.example").token, "");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testLogoutForgetsOnlyThatRegistry() {
+    def dir as string init fs.makeTempDir("", "jvc-cred");
+    os.setEnv("JVC_CREDENTIALS", $dir + "/credentials.json");
+    writeCredential("http://a.example",
+        Credential{ token: "ta", refresh: "", login: "alice" });
+    writeCredential("http://b.example",
+        Credential{ token: "tb", refresh: "", login: "bob" });
+    testing.assertContains(runLogout("http://a.example").message, "discarded");
+    testing.assertEqual(readCredential("http://a.example").token, "");
+    testing.assertEqual(readCredential("http://b.example").token, "tb");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testLogoutWithoutATokenSaysSo() {
+    def dir as string init fs.makeTempDir("", "jvc-cred");
+    os.setEnv("JVC_CREDENTIALS", $dir + "/credentials.json");
+    def out as Outcome init runLogout("http://nowhere.example");
+    testing.assertTrue($out.ok);
+    testing.assertContains($out.message, "no token held");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testTheCredentialFileIsOwnerOnly() {
+    def dir as string init fs.makeTempDir("", "jvc-cred");
+    def file as string init $dir + "/credentials.json";
+    os.setEnv("JVC_CREDENTIALS", $file);
+    writeCredential("http://a.example",
+        Credential{ token: "ta", refresh: "", login: "alice" });
+    testing.assertEqual(fs.stat($file).mode & 0o777, 0o600);
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+# --- which registry a deck comes from ----------------------------------------
+
+# mapped builds a [registries] table from pattern / url pairs.
+func mapped(pairs as map of string to string) {
+    def out as list of manifest.Dependency init [];
+    for (def k in $pairs) {
+        $out = manifest.depListSet($out, $k, $pairs[$k]);
+    }
+    return $out;
+}
+
+# lockedAt builds a locked candidate recorded as having come from a registry.
+func lockedAt(name as string, version as string, url as string) {
+    def c as catalog.Candidate init catalog.candidate($name, $version);
+    $c.registry = $url;
+    return $c;
+}
+
+func testTheMapperRoutesByScope() {
+    def mp as Mapper init newMapper(mapped({
+        "@acme/*": "http://internal.example",
+        "*": "http://public.example"
+    }), "http://fallback.example");
+    # Routing is decided before any network call, so only the URL is asserted.
+    testing.assertEqual(scopemap.registryFor($mp.registries, "@acme/tool",
+        $mp.fallback), "http://internal.example");
+    testing.assertEqual(scopemap.registryFor($mp.registries, "@other/tool",
+        $mp.fallback), "http://public.example");
+}
+
+func testTheMapperFallsBackWhenNothingIsMapped() {
+    def mp as Mapper init newMapper(noRegistries(), "http://fallback.example");
+    testing.assertEqual(scopemap.registryFor($mp.registries, "@acme/tool",
+        $mp.fallback), "http://fallback.example");
+}
+
+func testAMovedScopeConflictsWithTheLock() {
+    def locked as list of catalog.Candidate init [
+        lockedAt("@acme/tool", "1.0.0", "http://public.example")
+    ];
+    def conflicts as list of string init lockRegistryConflicts($locked,
+        mapped({"@acme/*": "http://internal.example"}), "http://fallback.example");
+    testing.assertEqual(len($conflicts), 1);
+    testing.assertContains($conflicts[0], "http://public.example");
+    testing.assertContains($conflicts[0], "http://internal.example");
+}
+
+func testAnAgreeingMappingIsNoConflict() {
+    def locked as list of catalog.Candidate init [
+        lockedAt("@acme/tool", "1.0.0", "http://internal.example")
+    ];
+    testing.assertEqual(len(lockRegistryConflicts($locked,
+        mapped({"@acme/*": "http://internal.example"}), "http://x")), 0);
+}
+
+func testAnOlderLockWithoutARecordedRegistryIsAccepted() {
+    # Lockfiles written before the registry was recorded must keep installing;
+    # the next update writes it in.
+    def locked as list of catalog.Candidate init [
+        lockedAt("@acme/tool", "1.0.0", "")
+    ];
+    testing.assertEqual(len(lockRegistryConflicts($locked,
+        mapped({"@acme/*": "http://internal.example"}), "http://x")), 0);
+}
+
+func testAGitSourcedLockEntryIsNotCheckedAgainstTheMapping() {
+    # A git deck is pinned by its commit, not by a registry, so the mapping has
+    # nothing to say about it.
+    def c as catalog.Candidate init lockedAt("@acme/tool", "1.0.0", "");
+    $c.kind = "git";
+    testing.assertEqual(len(lockRegistryConflicts([$c],
+        mapped({"@acme/*": "http://internal.example"}), "http://x")), 0);
+}
+
+func testTheConflictReportSaysHowToResolveIt() {
+    def r as string init registryConflictReport(["@acme/tool moved"]);
+    testing.assertContains($r, "jvc update");
+    testing.assertContains($r, "@acme/tool moved");
+}
+
+func testTheLockRecordsWhichRegistryADeckCameFrom() {
+    def dir as string init fs.makeTempDir("", "jvc-lockreg");
+    def c as catalog.Candidate init lockedAt("@acme/tool", "1.0.0",
+        "http://internal.example");
+    writeLock($dir, [$c]);
+    def back as Locked init readLock($dir);
+    testing.assertEqual($back.decks[0].registry, "http://internal.example");
+    fs.removeAll($dir);
+}
+
+# --- the registry verb -------------------------------------------------------
+
+func testRegistryVerbNeedsAPattern() {
+    testing.assertFalse(runRegistry(".", "", "").ok);
+}
+
+func testRegistryVerbRefusesADeckLevelMapping() {
+    def dir as string init fs.makeTempDir("", "jvc-regverb");
+    manifest.save(manifest.empty("@acme/app", "0.1.0"), $dir + "/deck.toml");
+    def out as Outcome init runRegistry($dir, "@acme/tool", "http://x.example");
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "exactly one registry");
+    fs.removeAll($dir);
+}
+
+func testRegistryVerbSetsAndClears() {
+    def dir as string init fs.makeTempDir("", "jvc-regverb");
+    def path as string init $dir + "/deck.toml";
+    manifest.save(manifest.empty("@acme/app", "0.1.0"), $path);
+    testing.assertTrue(runRegistry($dir, "@acme", "http://internal.example").ok);
+    def m as manifest.Manifest init manifest.load($path);
+    testing.assertEqual(manifest.depListGet($m.registries, "@acme/*"),
+        "http://internal.example");
+    testing.assertTrue(runRegistry($dir, "@acme", "").ok);
+    testing.assertFalse(manifest.depListHas(
+        manifest.load($path).registries, "@acme/*"));
+    fs.removeAll($dir);
+}
+
+func testRegistryVerbAcceptsTheCatchAll() {
+    def dir as string init fs.makeTempDir("", "jvc-regverb");
+    def path as string init $dir + "/deck.toml";
+    manifest.save(manifest.empty("@acme/app", "0.1.0"), $path);
+    testing.assertTrue(runRegistry($dir, "*", "http://public.example").ok);
+    testing.assertEqual(
+        manifest.depListGet(manifest.load($path).registries, "*"),
+        "http://public.example");
+    fs.removeAll($dir);
+}
+
+func testRegistryVerbWarnsWhenItMovesALockedScope() {
+    def dir as string init fs.makeTempDir("", "jvc-regverb");
+    manifest.save(manifest.empty("@acme/app", "0.1.0"), $dir + "/deck.toml");
+    writeLock($dir, [lockedAt("@acme/tool", "1.0.0", "http://public.example")]);
+    def out as Outcome init runRegistry($dir, "@acme", "http://internal.example");
+    testing.assertTrue($out.ok);
+    testing.assertContains($out.message, "warning");
+    testing.assertContains($out.message, "@acme/tool");
+    fs.removeAll($dir);
+}
+
+func testRegistryVerbIsQuietWhenNothingMoves() {
+    def dir as string init fs.makeTempDir("", "jvc-regverb");
+    manifest.save(manifest.empty("@acme/app", "0.1.0"), $dir + "/deck.toml");
+    writeLock($dir, [lockedAt("@other/thing", "1.0.0", "http://public.example")]);
+    def out as Outcome init runRegistry($dir, "@acme", "http://internal.example");
+    testing.assertTrue($out.ok);
+    testing.assertFalse(strings.contains($out.message, "warning"));
+    fs.removeAll($dir);
+}
+
+# --- refreshing a token on a 401 ---------------------------------------------
+
+# authWithRefresh is an advertised auth block offering a refresh endpoint.
+func authWithRefresh() {
+    def a as registry.Auth init deviceAuth();
+    $a.refreshUrl = "/v1/auth/refresh";
+    return $a;
+}
+
+# credDir points the credential store at a throwaway file and returns it.
+func credDir(label as string) {
+    def dir as string init fs.makeTempDir("", "jvc-" + $label);
+    os.setEnv("JVC_CREDENTIALS", $dir + "/credentials.json");
+    # $JVC_TOKEN outranks a stored login (5.5), so one left set in the
+    # developer's own environment would decide these tests.
+    os.setEnv(ciauth.ENV_TOKEN, "");
+    os.setEnv("ACTIONS_ID_TOKEN_REQUEST_URL", "");
+    os.setEnv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "");
+    return $dir;
+}
+
+# The attempt functions below stand in for an authenticated request. jvc has no
+# authenticated endpoint yet, so the retry is exercised through its seam rather
+# than over the network.
+
+# okAlways succeeds whatever token it is given.
+func okAlways(req as Request, token as string) {
+    return Reply{ status: 200, body: $token, via: "", refreshNote: "",
+        refreshFatal: false, mechanism: "" };
+}
+
+# needsFreshToken rejects the stale token and accepts anything else, which is
+# what a registry does once a refresh has been issued.
+func needsFreshToken(req as Request, token as string) {
+    if ($token == "stale") {
+        return Reply{ status: 401, body: "expired", via: "", refreshNote: "",
+            refreshFatal: false, mechanism: "" };
+    }
+    return Reply{ status: 200, body: $token, via: "", refreshNote: "",
+        refreshFatal: false, mechanism: "" };
+}
+
+# alwaysUnauthorized never accepts, so a second 401 proves the retry is capped.
+func alwaysUnauthorized(req as Request, token as string) {
+    return Reply{ status: 401, body: "no", via: "", refreshNote: "",
+        refreshFatal: false, mechanism: "" };
+}
+
+# probeRequest is a stand-in request for the retry tests.
+func probeRequest() {
+    return Request{ url: "http://r.example/v1/claim", body: '{"scope":"x"}' };
+}
+
+# --- 5.5: authorising a write with nobody at a browser -----------------------
+
+# trustedPublishingAuth advertises the endpoint and audience a registry offering
+# trusted publishing serves.
+func trustedPublishingAuth() {
+    def auth as registry.Auth init deviceAuth();
+    $auth.trustedUrl = "/v1/publish";
+    $auth.trustedAudience = "r.example";
+    return $auth;
+}
+
+# inGithubJob points the identity request at a port nothing answers on, so the
+# mint fails fast rather than reaching the network.
+func inGithubJob() {
+    os.setEnv("ACTIONS_ID_TOKEN_REQUEST_URL", "http://127.0.0.1:1/?api-version=2.0");
+    os.setEnv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "request-token");
+}
+
+func testAStoredLoginAuthorisesWhenNothingElseIsSet() {
+    def dir as string init credDir("stored");
+    writeCredential("http://r.example",
+        Credential{ token: "stored-token", refresh: "r", login: "alice" });
+    def g as ciauth.Grant init grantFor("http://r.example", deviceAuth(),
+        "http://r.example/v1/claim");
+    testing.assertEqual($g.token, "stored-token");
+    testing.assertEqual($g.mechanism, ciauth.BY_STORED);
+    testing.assertTrue($g.refreshable);
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+# The order is the specification's: an environment token is the pipeline's own
+# authority and outranks whoever happens to be logged in on the machine.
+func testTheEnvironmentTokenOutranksAStoredLogin() {
+    def dir as string init credDir("envwins");
+    writeCredential("http://r.example",
+        Credential{ token: "stored-token", refresh: "r", login: "alice" });
+    os.setEnv(ciauth.ENV_TOKEN, "ci-token");
+    def g as ciauth.Grant init grantFor("http://r.example", deviceAuth(),
+        "http://r.example/v1/claim");
+    testing.assertEqual($g.token, "ci-token");
+    testing.assertFalse($g.refreshable);
+    os.setEnv(ciauth.ENV_TOKEN, "");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testNothingSetMeansNoGrant() {
+    def dir as string init credDir("nogrant");
+    def g as ciauth.Grant init grantFor("http://r.example", deviceAuth(),
+        "http://r.example/v1/claim");
+    testing.assertFalse($g.found);
+    testing.assertEqual($g.error, "");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+# An identity token is minted for one audience and one endpoint. Sending it
+# anywhere else is what the audience exists to prevent, so a request to another
+# endpoint falls through to the ordinary mechanisms untouched.
+func testTrustedPublishingIsOnlyTriedAtTheAdvertisedEndpoint() {
+    def dir as string init credDir("elsewhere");
+    inGithubJob();
+    writeCredential("http://r.example",
+        Credential{ token: "stored-token", refresh: "r", login: "alice" });
+    def g as ciauth.Grant init grantFor("http://r.example", trustedPublishingAuth(),
+        "http://r.example/v1/yank");
+    testing.assertEqual($g.mechanism, ciauth.BY_STORED);
+    testing.assertEqual($g.error, "");
+    os.setEnv("ACTIONS_ID_TOKEN_REQUEST_URL", "");
+    os.setEnv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testTheAdvertisedEndpointIsRecognised() {
+    testing.assertTrue(isTrustedTarget("http://r.example", trustedPublishingAuth(),
+        "http://r.example/v1/publish"));
+    testing.assertFalse(isTrustedTarget("http://r.example", deviceAuth(),
+        "http://r.example/v1/publish"));
+}
+
+# A CI identity that is present but broken stops the search rather than quietly
+# falling back to a weaker credential.
+func testABrokenIdentityIsReportedRatherThanFallenBackFrom() {
+    def dir as string init credDir("brokenid");
+    inGithubJob();
+    writeCredential("http://r.example",
+        Credential{ token: "stored-token", refresh: "r", login: "alice" });
+    def g as ciauth.Grant init grantFor("http://r.example", trustedPublishingAuth(),
+        "http://r.example/v1/publish");
+    testing.assertFalse($g.found);
+    testing.assertContains($g.error, "identity provider");
+    os.setEnv("ACTIONS_ID_TOKEN_REQUEST_URL", "");
+    os.setEnv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+# There is nothing to refresh about an environment variable, so a 401 on one is
+# final and says so instead of pretending a renewal was tried.
+func testAnEnvironmentTokenIsNotRefreshedOnAFourOhOne() {
+    def dir as string init credDir("envnorefresh");
+    os.setEnv(ciauth.ENV_TOKEN, "ci-token");
+    def reply as Reply init withAuth("http://r.example", authWithRefresh(),
+        alwaysUnauthorized, probeRequest());
+    testing.assertEqual($reply.status, 401);
+    testing.assertTrue($reply.refreshFatal);
+    testing.assertContains($reply.refreshNote, "JVC_TOKEN");
+    testing.assertContains($reply.refreshNote, "cannot renew");
+    os.setEnv(ciauth.ENV_TOKEN, "");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testTheMechanismIsCarriedOutOfWithAuth() {
+    def dir as string init credDir("mechanism");
+    os.setEnv(ciauth.ENV_TOKEN, "ci-token");
+    def reply as Reply init withAuth("http://r.example", authWithRefresh(),
+        okAlways, probeRequest());
+    testing.assertEqual($reply.mechanism, ciauth.BY_ENVIRONMENT);
+    os.setEnv(ciauth.ENV_TOKEN, "");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+# Telling a runner to open a browser is the one answer that cannot work.
+func testTheAdviceInAPipelineIsNotToLogIn() {
+    os.setEnv("CI", "true");
+    def advice as string init noAuthorityAdvice("http://r.example");
+    testing.assertContains($advice, "trusted publishing");
+    testing.assertContains($advice, "JVC_TOKEN");
+    testing.assertFalse(strings.indexOf($advice, "jvc login") >= 0);
+    os.setEnv("CI", "");
+}
+
+func testTheAdviceAtATerminalIsToLogIn() {
+    os.setEnv("CI", "");
+    testing.assertContains(reloginAdvice("http://r.example"), "jvc login");
+}
+
+func testLoginWithoutATerminalRefusesWithBothAlternatives() {
+    def refusal as string init noTerminalRefusal("http://r.example");
+    testing.assertContains($refusal, "needs a terminal");
+    testing.assertContains($refusal, "id-token: write");
+    testing.assertContains($refusal, "JVC_TOKEN");
+}
+
+func testWhoamiNamesTheEnvironmentTokenWhenThereIsOne() {
+    os.setEnv(ciauth.ENV_TOKEN, "ci-token");
+    testing.assertContains(notLoggedIn("http://r.example"), "JVC_TOKEN is set");
+    os.setEnv(ciauth.ENV_TOKEN, "");
+}
+
+func testWhoamiNamesTheCiIdentityWhenThereIsOne() {
+    os.setEnv(ciauth.ENV_TOKEN, "");
+    inGithubJob();
+    testing.assertContains(notLoggedIn("http://r.example"), "github-actions");
+    os.setEnv("ACTIONS_ID_TOKEN_REQUEST_URL", "");
+    os.setEnv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "");
+}
+
+func testAnEnvironmentTokenIsNeverWrittenToTheCredentialFile() {
+    def dir as string init credDir("neverwritten");
+    os.setEnv(ciauth.ENV_TOKEN, "ci-token");
+    def g as ciauth.Grant init grantFor("http://r.example", deviceAuth(),
+        "http://r.example/v1/claim");
+    testing.assertEqual($g.token, "ci-token");
+    testing.assertEqual(readCredential("http://r.example").token, "");
+    testing.assertFalse(fs.exists(credentialsPath()));
+    os.setEnv(ciauth.ENV_TOKEN, "");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testAnAcceptedRequestIsNotRetried() {
+    def dir as string init credDir("noretry");
+    writeCredential("http://r.example",
+        Credential{ token: "good", refresh: "r", login: "alice" });
+    def reply as Reply init withAuth("http://r.example", authWithRefresh(), okAlways, probeRequest());
+    testing.assertEqual($reply.status, 200);
+    testing.assertEqual($reply.body, "good");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testAFourOhOneWithoutARefreshTokenIsNotRetried() {
+    # Nothing to refresh with, so the 401 stands and the caller says to log in.
+    def dir as string init credDir("norefresh");
+    writeCredential("http://r.example",
+        Credential{ token: "stale", refresh: "", login: "alice" });
+    def reply as Reply init withAuth("http://r.example", authWithRefresh(),
+        needsFreshToken, probeRequest());
+    testing.assertEqual($reply.status, 401);
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testARegistryWithNoRefreshEndpointCannotRefresh() {
+    def dir as string init credDir("noendpoint");
+    writeCredential("http://r.example",
+        Credential{ token: "stale", refresh: "r", login: "alice" });
+    def out as Outcome init refreshCredential("http://r.example", deviceAuth());
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "no refresh endpoint");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testRefreshingWithoutATokenFails() {
+    def dir as string init credDir("notoken");
+    def out as Outcome init refreshCredential("http://r.example", authWithRefresh());
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "no refresh token");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testASecondFourOhOneIsNotRetriedAgain() {
+    # The retry is capped at one: a 401 after a fresh token means the token was
+    # never the problem, and retrying would loop.
+    def dir as string init credDir("capped");
+    writeCredential("http://r.example",
+        Credential{ token: "stale", refresh: "", login: "alice" });
+    def reply as Reply init withAuth("http://r.example", authWithRefresh(),
+        alwaysUnauthorized, probeRequest());
+    testing.assertEqual($reply.status, 401);
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testARotatedRefreshTokenReplacesTheStoredOne() {
+    # A rotating registry issues a new refresh token each time and kills the
+    # old one, so keeping the old would work exactly once.
+    testing.assertEqual(keepRefresh("old", "new"), "new");
+}
+
+func testANonRotatingRegistryLeavesTheRefreshTokenInPlace() {
+    # It issues none, and dropping the one held would make the next refresh
+    # impossible.
+    testing.assertEqual(keepRefresh("old", ""), "old");
+}
+
+func testReloginAdviceNamesTheRegistry() {
+    testing.assertContains(reloginAdvice("http://r.example"), "http://r.example");
+    testing.assertContains(reloginAdvice("http://r.example"), "jvc login");
+}
+
+# --- a development build bypasses the engine floor ---------------------------
+
+func testIsDevVersionSpotsAPrerelease() {
+    testing.assertTrue(isDevVersion("0.24.0-dev+28.7c98d39"));
+    testing.assertTrue(isDevVersion("1.0.0-rc.1"));
+    testing.assertFalse(isDevVersion("0.24.0"));
+    testing.assertFalse(isDevVersion("1.2.3+build.5"));
+}
+
+func testAnUnparseableVersionIsTreatedAsDev() {
+    # It is not a release tag either, so there is nothing to compare against and
+    # refusing would be a guess.
+    testing.assertTrue(isDevVersion("not-a-version"));
+    testing.assertTrue(isDevVersion(""));
+}
+
+func testADevBuildBypassesAFloorItCouldNotMeet() {
+    # The case that started this: 0.24.0-dev refused a deck needing >=0.25.0,
+    # while the interpreter itself would have loaded that deck's source without
+    # complaint. A gate stricter than the thing it stands in for is a bug.
+    def engines as list of manifest.Dependency init
+        manifest.depListSet([], "jennifer", ">=0.25.0");
+    def out as Outcome init engineSatisfied($engines, "jennifer", "0.24.0-dev+28");
+    testing.assertTrue($out.ok);
+    testing.assertContains($out.message, "development build");
+    testing.assertContains($out.message, ">=0.25.0");
+}
+
+func testAReleaseBuildIsStillGated() {
+    def engines as list of manifest.Dependency init
+        manifest.depListSet([], "jennifer", ">=0.25.0");
+    def out as Outcome init engineSatisfied($engines, "jennifer", "0.24.0");
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "does not satisfy");
+}
+
+func testADevBuildIsStillHeldToTheAllowlist() {
+    # Bypassing the floor is about how new a build is, not about which engine is
+    # running: a development build of jennifer-tiny is still not jennifer.
+    def engines as list of manifest.Dependency init
+        manifest.depListSet([], "jennifer", ">=0.1.0");
+    def out as Outcome init engineSatisfied($engines, "jennifer-tiny", "0.24.0-dev+28");
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "allowlist");
+}
+
+func testTheGraphGateBypassesForADevBuildToo() {
+    def c as catalog.Candidate init catalog.candidate("@acme/tool", "1.0.0");
+    $c.engines = {"jennifer": ">=9.9.9"};
+    testing.assertTrue(checkGraphEngines([$c], "jennifer", "0.24.0-dev+28").ok);
+    testing.assertFalse(checkGraphEngines([$c], "jennifer", "0.24.0").ok);
+}
+
+
+# --- polling backs off, but not past the window ------------------------------
+
+func testTheIntervalHoldsSteadyWhenNotAskedToSlowDown() {
+    testing.assertEqual(nextInterval(5, false), 5);
+}
+
+func testTheIntervalDoublesWhenAskedToSlowDown() {
+    testing.assertEqual(nextInterval(5, true), 10);
+    testing.assertEqual(nextInterval(10, true), 20);
+}
+
+func testTheIntervalIsCapped() {
+    # A run of server faults would otherwise walk the wait past the code's whole
+    # lifetime, so jvc would sleep through the window and report an expiry it
+    # never waited for.
+    testing.assertEqual(nextInterval(40, true), MAX_POLL_INTERVAL);
+    testing.assertEqual(nextInterval(MAX_POLL_INTERVAL, true), MAX_POLL_INTERVAL);
+    testing.assertTrue(MAX_POLL_INTERVAL < 900);
+}
+
+# --- a login is abandoned when the registry keeps failing --------------------
+
+func testTheFaultReportCarriesTheRegistrysOwnReason() {
+    # The reason is the whole point: it is what says whether the user or the
+    # operator has to act, and without it the only way to find out was to go and
+    # read the server's log.
+    def r as string init serverFaultReport("http://r.example",
+        "the provider could not be reached: response body exceeds 65536 bytes", 4);
+    testing.assertContains($r, "http://r.example");
+    testing.assertContains($r, "65536");
+    testing.assertContains($r, "4 times in a row");
+    testing.assertContains($r, "authorization itself succeeded");
+}
+
+func testTheFaultReportCopesWithASilentRegistry() {
+    def r as string init serverFaultReport("http://r.example", "", 4);
+    testing.assertContains($r, "4 times in a row");
+    testing.assertFalse(strings.contains($r, "saying:"));
+}
+
+func testTheFaultCeilingIsWellInsideACodesLifetime() {
+    # Four faults at a capped 60s each is minutes, not the quarter hour a device
+    # code lives: giving up has to happen while the user is still watching.
+    testing.assertTrue(MAX_SERVER_FAULTS * MAX_POLL_INTERVAL < 900);
+    testing.assertTrue(MAX_SERVER_FAULTS >= 2);
+}
+
+func testAFaultLineNamesTheAttempt() {
+    testing.assertContains(faultLine("upstream is down", 2), "upstream is down");
+    testing.assertContains(faultLine("upstream is down", 2), "attempt 2");
+    testing.assertContains(faultLine("", 1), "server error");
+}
+
+# --- the scope verbs ---------------------------------------------------------
+
+func testClaimNeedsAScope() {
+    testing.assertFalse(runClaim("http://r.example", "").ok);
+    testing.assertContains(runClaim("http://r.example", "  ").message, "usage:");
+}
+
+func testOwnersNeedsBothArguments() {
+    testing.assertContains(runOwners("http://r.example", "mplx", "", true).message,
+        "usage:");
+    testing.assertContains(runOwners("http://r.example", "", "42", true).message,
+        "usage:");
+}
+
+func testTheOwnersBodyDefaultsToAdding() {
+    # Adding is the safe direction to get wrong, so it is the default.
+    testing.assertContains(ownersBody("mplx", "42", true), '"action":"add"');
+    testing.assertContains(ownersBody("mplx", "42", false), '"action":"remove"');
+}
+
+func testTheOwnersBodyFoldsTheScope() {
+    testing.assertContains(ownersBody("@MPLX", "42", true), '"scope":"@mplx"');
+}
+
+func testAnUnknownCommandStillReachesTheFallthrough() {
+    # dispatchScope returns a sentinel for commands that are not its own, so a
+    # verb it does not handle must fall through to the usual "unknown command"
+    # rather than being swallowed as a failure.
+    def out as Outcome init dispatch(["jvc", "not-a-verb"]);
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "unknown command");
+    testing.assertFalse(strings.contains($out.message, UNHANDLED));
+}
+
+func testTheScopeDispatcherPassesOnForeignVerbs() {
+    def none as list of string init [];
+    testing.assertEqual(dispatchScope("install", ["jvc", "install"], $none).message,
+        UNHANDLED);
+}
+
+# --- whoami ------------------------------------------------------------------
+
+func testWhoamiWithoutATokenSaysToLogIn() {
+    def dir as string init credDir("whoami-none");
+    def out as Outcome init runWhoami("http://r.example");
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "jvc login");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testWhoamiReportsTheAccountTheScopeBindsTo() {
+    def cred as Credential init Credential{ token: "t", refresh: "r", login: "mplx" };
+    def claims as registry.Claims init registry.Claims{
+        subject: "1986588", login: "mplx", issuedAt: 100, expiresAt: 3700,
+        orgs: ["viverto (305727207)"], orgsAt: 100 };
+    def r as string init whoamiReport("http://r.example", $cred, $claims, 100);
+    testing.assertContains($r, "@mplx");
+    testing.assertContains($r, "1986588");
+    testing.assertContains($r, "viverto");
+    testing.assertContains($r, "valid until");
+}
+
+func testWhoamiSaysWhenATokenHasExpired() {
+    def cred as Credential init Credential{ token: "t", refresh: "", login: "x" };
+    def claims as registry.Claims init registry.Claims{
+        subject: "1", login: "x", issuedAt: 0, expiresAt: 500, orgs: [], orgsAt: 0 };
+    def r as string init whoamiReport("http://r.example", $cred, $claims, 900);
+    testing.assertContains($r, "expired at");
+    # No refresh token held, so the way out is a full login and it should say so.
+    testing.assertContains($r, "log in");
+    testing.assertFalse(strings.contains($r, "will try to renew it"));
+}
+
+func testWhoamiDistinguishesNoOrgsFromSome() {
+    # The distinction that matters when a claim is refused: with no orgs, only a
+    # scope matching the login is derivable at all.
+    def cred as Credential init Credential{ token: "t", refresh: "r", login: "x" };
+    def none as registry.Claims init registry.Claims{
+        subject: "1", login: "x", issuedAt: 0, expiresAt: 0, orgs: [], orgsAt: 0 };
+    testing.assertContains(whoamiReport("http://r.example", $cred, $none, 0),
+        "none; only a scope matching your login");
+}
+
+func testTheRefreshLineDoesNotPromiseAutomaticRenewal() {
+    # It renews nothing on its own: the refresh token is spent only when a
+    # command carrying the token is refused. Saying "is renewed" read as though
+    # the expiry healed itself, which it never does.
+    def cred as Credential init Credential{ token: "t", refresh: "r", login: "x" };
+    def claims as registry.Claims init registry.Claims{
+        subject: "1", login: "x", issuedAt: 0, expiresAt: 500, orgs: [], orgsAt: 0 };
+    def r as string init whoamiReport("http://r.example", $cred, $claims, 100);
+    testing.assertContains($r, "spent when a command is refused");
+    testing.assertFalse(strings.contains($r, "is renewed"));
+}
+
+func testTheExpiryLineHandlesATokenWithNoExpiry() {
+    testing.assertContains(expiryLine(0, 100, true), "no expiry");
+}
+
+# --- who the deckadmin line is actually for ----------------------------------
+
+func testPackagedAdviceDoesNotHandAnOperatorCommandToAnEndUser() {
+    # `deckadmin` edits the repository's store on the repository's own host, so
+    # printing it to whoever ran `jvc publish` gives them a command they cannot
+    # run and reads as an instruction meant for them.
+    def r as publish.Result init publish.Result{ ok: true, message: "packaged x",
+        operatorCommand: "deckadmin add @a/b 1.0.0 ..." };
+    def out as string init packagedAdvice($r, false);
+    testing.assertFalse(strings.contains($out, "deckadmin"));
+    testing.assertContains($out, "operator's to do");
+    testing.assertContains($out, "--operator-command");
+}
+
+func testTheOperatorCommandIsShownWhenAskedFor() {
+    def r as publish.Result init publish.Result{ ok: true, message: "packaged x",
+        operatorCommand: "deckadmin add @a/b 1.0.0 ..." };
+    def out as string init packagedAdvice($r, true);
+    testing.assertContains($out, "deckadmin add @a/b 1.0.0");
+    testing.assertContains($out, "on the repository's own host");
+}
+
+func testAGateFailureNeverReachesPackaging() {
+    # Packing writes into the project, so a deck that fails its own gate must
+    # not leave a tarball behind as if it had been released.
+    def dir as string init fs.makeTempDir("", "jvc-gatefail");
+    manifest.save(manifest.empty("@acme/broken", "0.1.0"), $dir + "/deck.toml");
+    def out as Outcome init runPack($dir, "", $dir + "/dist", true, false);
+    testing.assertFalse($out.ok);
+    testing.assertFalse(fs.exists($dir + "/dist"));
+    fs.removeAll($dir);
+}
+
+func testPublishWritesNothingEvenWhenItCannotPublish() {
+    # `publish` produces no artifact on any path: a repository that takes no
+    # publishes is a job for `jvc pack`, and saying so beats leaving a tarball
+    # the user did not ask for.
+    def dir as string init fs.makeTempDir("", "jvc-nopub");
+    def m as manifest.Manifest init manifest.empty("@acme/thing", "0.1.0");
+    $m.pkg.urls["deck"] = "https://example.com/thing";
+    manifest.save($m, $dir + "/deck.toml");
+    fs.mkdirAll($dir + "/src");
+    fs.writeString($dir + "/src/thing.j", strings.join([
+        'export func hi() {', '    return 1;', '}'], "\n"));
+    def out as Outcome init runPublish($dir, false, "http://127.0.0.1:1", "", "", "");
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "jvc pack");
+    testing.assertFalse(fs.exists($dir + "/dist"));
+    fs.removeAll($dir);
+}
+
+func testTheMissingTagAdviceSaysToPushIt() {
+    # A tag that exists only locally is invisible to a registry, which reads the
+    # repository over the network, so "tag the release" alone sets the user up
+    # for a second failure.
+    #
+    # The suggested spelling is the bare version, not `v`-prefixed: with no tag
+    # history to follow, the form matching the manifest is the least surprising,
+    # and this assertion pinned the prefixed spelling until a user pointed out
+    # that their repository had never used it.
+    def dir as string init fs.makeTempDir("", "jvc-notag");
+    def src as Source init publishSource($dir, "0.1.0", "https://x/y.git", "", "");
+    testing.assertContains($src.error, "no tag here matches 0.1.0");
+    testing.assertContains($src.error, "git push origin 0.1.0");
+    testing.assertFalse(strings.contains($src.error, "v0.1.0"));
+    fs.removeAll($dir);
+}
+
+func testAnExpiryUnderAMinuteIsNotShownAsZero() {
+    testing.assertContains(expiryLine(100, 90, true), "under a minute");
+    testing.assertContains(expiryLine(200, 90, true), "1 min");
+}
+
+func testAnExpiredTokenWithARefreshSaysItWillRenewItself() {
+    # The case that misled a user: `whoami` reported "expired", so they expected
+    # the next publish to refuse. It did not, and was right not to, because the
+    # refresh renewed the token mid-command. The report has to carry that
+    # consequence or the two lines invite the wrong conclusion.
+    def cred as Credential init Credential{ token: "t", refresh: "r", login: "x" };
+    def claims as registry.Claims init registry.Claims{
+        subject: "1", login: "x", issuedAt: 0, expiresAt: 500, orgs: [], orgsAt: 0 };
+    def r as string init whoamiReport("http://r.example", $cred, $claims, 900);
+    testing.assertContains($r, "expired at");
+    testing.assertContains($r, "will try to renew it");
+    testing.assertFalse(strings.contains($r, "ask you to log in"));
+}
+
+# --- which remote a publish reads from ---------------------------------------
+
+func testAMissingRemoteListsTheOnesThatExist() {
+    # A project pushing to two forges is exactly where the `origin` default is
+    # wrong, so the refusal names the alternatives rather than only complaining.
+    def dir as string init fs.makeTempDir("", "jvc-remotes");
+    git.run(["git", "-C", $dir, "init", "-q"]);
+    git.run(["git", "-C", $dir, "remote", "add", "github",
+        "git@github.com:mplx/d.git"]);
+    git.run(["git", "-C", $dir, "remote", "add", "codeberg",
+        "https://codeberg.org/mplx/d.git"]);
+    def src as Source init publishSource($dir, "0.1.0", "", "", "");
+    testing.assertContains($src.error, "no `origin` remote");
+    testing.assertContains($src.error, "github");
+    testing.assertContains($src.error, "codeberg");
+    testing.assertContains($src.error, "--remote");
+    fs.removeAll($dir);
+}
+
+func testAChosenRemoteIsUsedInsteadOfOrigin() {
+    def dir as string init fs.makeTempDir("", "jvc-pickremote");
+    git.run(["git", "-C", $dir, "init", "-q"]);
+    git.run(["git", "-C", $dir, "remote", "add", "origin",
+        "git@gitlab.example:group/d.git"]);
+    git.run(["git", "-C", $dir, "remote", "add", "github",
+        "git@github.com:mplx/d.git"]);
+    # No tag, so it stops there, but the URL it resolved is in the report.
+    def picked as Source init publishSource($dir, "0.1.0", "", "", "github");
+    testing.assertEqual($picked.repository, "https://github.com/mplx/d.git");
+    def dflt as Source init publishSource($dir, "0.1.0", "", "", "");
+    testing.assertEqual($dflt.repository, "https://gitlab.example/group/d.git");
+    fs.removeAll($dir);
+}
+
+func testTheHostOfARemoteIsReadable() {
+    testing.assertEqual(git.hostOfRemote("git@github.com:mplx/d.git"), "github.com");
+    testing.assertEqual(git.hostOfRemote("https://gitlab.mplx.eu/g/d.git"),
+        "gitlab.mplx.eu");
+    testing.assertEqual(git.hostOfRemote("not a url"), "");
+}
+
+func testYankNeedsBothADeckAndAVersion() {
+    testing.assertContains(runYank("http://r.example", "@a/b", "", true).message,
+        "usage: jvc yank");
+    testing.assertContains(runYank("http://r.example", "", "1.0.0", true).message,
+        "usage: jvc yank");
+}
+
+func testUnyankNamesItselfInItsUsage() {
+    # The two verbs share an implementation, so the usage line has to follow the
+    # verb the user actually typed.
+    testing.assertContains(runYank("http://r.example", "", "", false).message,
+        "usage: jvc unyank");
+}
+
+func testVendoringPreservesTheExecutableBit() {
+    # A deck may ship a command (`[package] bin`). Writing it without its
+    # executable bit produces a link in the project's bin/ that fails with
+    # "permission denied" the first time anyone runs it, which is a long way
+    # from where the mistake was made.
+    def dir as string init fs.makeTempDir("", "jvc-mode");
+    def files as list of archive.Entry init [
+        entryWithMode("src/tool.j", strings.join([
+            'export func hi() {', '    return 1;', '}'], "\n"), 0o644),
+        entryWithMode("src/tool", '#!/usr/bin/env -S jennifer run', 0o755)
+    ];
+    def data as bytes init archive.pack($files, "tar.gz");
+    def vr as VendorResult init installArchive($dir, "@acme/tool", $data, "",
+        "tar.gz");
+    testing.assertTrue($vr.ok);
+    def base as string init $dir + "/vendor/acme/tool/";
+    testing.assertEqual(fs.stat($base + "tool").mode & 0o111, 0o111);
+    testing.assertEqual(fs.stat($base + "tool.j").mode & 0o111, 0);
+    fs.removeAll($dir);
+}
+
+# entryWithMode builds one archive entry with an explicit permission set.
+func entryWithMode(name as string, body as string, mode as int) {
+    return archive.Entry{ name: $name, data: convert.bytesFromString($body, "utf-8"),
+        mode: $mode, mtime: 0 };
+}
+
+# --- installing an app by registry name --------------------------------------
+
+# published builds candidates as a registry would return them.
+func published(name as string, version as string, kind as string, url as string) {
+    def c as catalog.Candidate init catalog.candidate($name, $version);
+    $c.kind = $kind;
+    $c.url = $url;
+    return $c;
+}
+
+func testAnAppPicksTheHighestSatisfyingVersion() {
+    def found as list of catalog.Candidate init [
+        published("@acme/tool", "1.0.0", "git", "https://x/t.git"),
+        published("@acme/tool", "1.4.0", "git", "https://x/t.git"),
+        published("@acme/tool", "2.0.0", "git", "https://x/t.git")
+    ];
+    def s as AppSource init pickApp($found, "@acme/tool", "^1.0.0", "http://r");
+    testing.assertEqual($s.version, "1.4.0");
+    testing.assertEqual($s.url, "https://x/t.git");
+    testing.assertEqual($s.error, "");
+}
+
+func testAYankedVersionIsNotInstalledAsAnApp() {
+    # The same rule as resolution: withdrawn versions are not chosen afresh.
+    def live as catalog.Candidate init published("@acme/tool", "1.0.0", "git", "https://x/t.git");
+    def dead as catalog.Candidate init published("@acme/tool", "2.0.0", "git", "https://x/t.git");
+    $dead.yanked = true;
+    def s as AppSource init pickApp([$live, $dead], "@acme/tool", "*", "http://r");
+    testing.assertEqual($s.version, "1.0.0");
+}
+
+func testATarballDeckCannotBeInstalledAsAnApp() {
+    # There is no repository to check out, and the installer reads the manifest
+    # at a tag from a git mirror.
+    def found as list of catalog.Candidate init [
+        published("@acme/tool", "1.0.0", "tar.gz", "https://x/t.tar.gz")
+    ];
+    def s as AppSource init pickApp($found, "@acme/tool", "*", "http://r");
+    testing.assertContains($s.error, "no repository to install an app from");
+}
+
+func testAnUnsatisfiableConstraintNamesTheRegistry() {
+    def found as list of catalog.Candidate init [
+        published("@acme/tool", "1.0.0", "git", "https://x/t.git")
+    ];
+    def s as AppSource init pickApp($found, "@acme/tool", "^9.0.0", "http://r.example");
+    testing.assertContains($s.error, "http://r.example");
+    testing.assertContains($s.error, "^9.0.0");
+}
+
+func testARefusedRefreshIsReportedNotSwallowed() {
+    # The contradiction this fixes: `whoami` says a refresh token is held and
+    # will renew automatically, while the command says only "not authenticated".
+    # The refresh was tried and refused, and that is the half worth saying.
+    def msg as string init authFailure("http://r.example",
+        "http://r.example rejected the stored refresh token; run `jvc login` again");
+    testing.assertContains($msg, "not authenticated");
+    testing.assertContains($msg, "rejected the stored refresh token");
+}
+
+func testAuthFailureWithNothingToAddStaysShort() {
+    testing.assertEqual(authFailure("http://r.example", ""),
+        reloginAdvice("http://r.example"));
+    testing.assertEqual(authFailure("http://r.example", "   "),
+        reloginAdvice("http://r.example"));
+}
+
+func testARefusedRefreshCarriesOutOfWithAuth() {
+    def dir as string init credDir("refusednote");
+    # A refresh token the stub registry will not accept, and no refresh endpoint
+    # advertised, so refreshCredential refuses locally and says why.
+    writeCredential("http://r.example",
+        Credential{ token: "stale", refresh: "r", login: "x" });
+    def reply as Reply init withAuth("http://r.example", deviceAuth(),
+        needsFreshToken, probeRequest());
+    testing.assertEqual($reply.status, 401);
+    testing.assertContains($reply.refreshNote, "no refresh endpoint");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testARejectedRefreshTokenIsDiscarded() {
+    # Keeping a refresh token the registry has refused makes every later command
+    # repeat a doomed round trip, and makes `whoami` promise a renewal that
+    # cannot happen. A rejection is final, so the credential goes.
+    def dir as string init credDir("discard");
+    writeCredential("http://127.0.0.1:1",
+        Credential{ token: "stale", refresh: "spent", login: "x" });
+    # Unreachable, so refreshCredential cannot even ask: the token must survive.
+    def out as Outcome init refreshCredential("http://127.0.0.1:1", authWithRefresh());
+    testing.assertFalse($out.ok);
+    testing.assertFalse(readCredential("http://127.0.0.1:1").refresh == "");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testATransientFailureKeepsTheCredential() {
+    # A 5xx says nothing about the token; the registry may be back in a minute.
+    def r as registry.TokenReply init registry.parseTokenReply(503, "");
+    testing.assertTrue($r.pending);
+    testing.assertFalse($r.done);
+}
+
+func testATransientRefreshFailureDoesNotAdviseALogin() {
+    # The token was never refused, so telling the user to replace it is wrong
+    # advice: the repository is the thing that failed.
+    def msg as string init authOutcome("http://r.example",
+        "http://r.example could not answer the refresh: it returned a server error",
+        false);
+    testing.assertContains($msg, "could not authenticate");
+    testing.assertContains($msg, "untouched");
+    testing.assertContains($msg, "try again");
+    testing.assertFalse(strings.contains($msg, "jvc login"));
+}
+
+func testARefusedTokenDoesAdviseALogin() {
+    def msg as string init authOutcome("http://r.example",
+        "http://r.example rejected the stored refresh token, so it has been discarded",
+        true);
+    testing.assertContains($msg, "jvc login");
+    testing.assertContains($msg, "rejected the stored refresh token");
 }

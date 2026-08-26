@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 #
 # White-box tests for resolver.j: the transitive dependency graph resolver.
 # Run with:
@@ -209,7 +210,8 @@ func testResolvedCarriesDeliveryFields() {
         requires: $noReqs,
         engines: {"jennifer": ">=0.24.0"},
         capabilities: [],
-            yanked: false
+            yanked: false,
+            registry: ""
     });
     def g as GraphResult init resolveGraph($cat, {"@jennifer/routeros": "^0.1.0"});
     testing.assertTrue($g.ok);

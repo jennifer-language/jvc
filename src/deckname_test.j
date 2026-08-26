@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 #
 # White-box tests for deckname.j: the identifier and scoped-name grammar and the
 # vendor-path / entrypoint decomposition. Run with:
@@ -86,4 +87,25 @@ func testVendorSubdir() {
 func testEntryFile() {
     testing.assertEqual(entryFile("@jennifer/routeros"), "routeros.j");
     testing.assertEqual(entryFile("ansi"), "ansi.j");
+}
+
+# --- lowercase folding -------------------------------------------------------
+
+func testFoldLowercasesAName() {
+    testing.assertEqual(fold("@Acme/Tool"), "@acme/tool");
+    testing.assertEqual(fold("@acme/tool"), "@acme/tool");
+}
+
+func testTheVendorPathIsAlwaysFolded() {
+    # The one that matters: vendor/Acme and vendor/acme are the same directory
+    # on macOS and Windows and two on Linux, so an unfolded path makes a
+    # lockfile mean different things on different machines.
+    testing.assertEqual(vendorSubdir("@Acme/Tool"), "acme/tool");
+    testing.assertEqual(vendorSubdir("@acme/tool"), "acme/tool");
+    testing.assertEqual(vendorSubdir("Grimoire"), "grimoire");
+}
+
+func testTheEntryFileIsFolded() {
+    testing.assertEqual(entryFile("@Acme/Tool"), "tool.j");
+    testing.assertEqual(entryFile("@acme/tool"), "tool.j");
 }

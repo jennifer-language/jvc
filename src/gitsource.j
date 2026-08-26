@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 
 /**
  * A git remote as a deck source: the second way to fill a `catalog`, beside the
@@ -34,6 +35,7 @@
 use os;
 use fs;
 use path;
+use strings;
 import "./catalog.j" as catalog;
 import "./git.j" as git;
 import "./manifest.j" as manifest;
@@ -179,7 +181,8 @@ func candidateAt(dir as string, url as string, name as string, tag as string) {
             requires: $requires,
             engines: $engines,
             capabilities: $m.pkg.capabilities,
-            yanked: false
+            yanked: false,
+            registry: ""
         }
     ];
     return Fetch{ ok: true, candidates: $one, error: "" };
@@ -223,6 +226,46 @@ export func candidates(root as string, url as string, name as string) {
 }
 
 /**
+ * Report whether a string is a full commit id: forty lowercase hex digits.
+ *
+ * Nothing shorter counts. An abbreviated id can become ambiguous as a
+ * repository grows, and a ref is not an identity at all.
+ * @param s {string} the value recorded as the pin
+ * @return {bool} true when it identifies exactly one commit
+ */
+export func isCommit(s as string) {
+    if (not (len($s) == 40)) {
+        return false;
+    }
+    for (def ch in strings.chars($s)) {
+        if (not strings.contains("0123456789abcdef", $ch)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+# describePin names what was recorded instead of a commit, so the error says
+# which of the two mistakes was made.
+func describePin(pin as string) {
+    if ($pin == "") {
+        return "no commit at all";
+    }
+    return "\"" + $pin + "\"";
+}
+
+# hasCommit reports whether a mirror holds a commit object with exactly this id.
+# `rev-parse` is asked to peel, so a value that merely *resolves* (a tag, a
+# branch) is caught by comparing what came back against what was demanded.
+func hasCommit(dir as string, commit as string) {
+    def r as git.Result init git.run(git.revParseArgv($dir, $commit));
+    if (not $r.ok) {
+        return false;
+    }
+    return strings.trim($r.output) == $commit;
+}
+
+/**
  * Write one resolved git deck's tree to a tar file and return its bytes, for the
  * caller to unpack through the usual `src/`-only vendor path. The **commit** is
  * archived, not the tag, so a tag moved between resolution and install cannot
@@ -233,6 +276,21 @@ export func candidates(root as string, url as string, name as string) {
  * @throws {Error} kind "git" when the archive cannot be produced
  */
 export func archiveBytes(root as string, cand as catalog.Candidate) {
+    # The recorded pin must be a commit id and nothing else. `git archive`
+    # accepts any ref, so a `commit` field holding a tag or a branch name would
+    # archive whatever that ref points at *now*, which is the substitution the
+    # commit pin exists to prevent. Refuse before going near git.
+    if (not isCommit($cand.commit)) {
+        throw Error{
+            kind: "git",
+            message: $cand.name + " " + $cand.version +
+                " is not pinned to a commit (the lockfile records " +
+                describePin($cand.commit) +
+                "), so the code it names cannot be identified; re-resolve it " +
+                "with `jvc update`",
+            file: "", line: 0, col: 0
+        };
+    }
     def dir as string init mirrorDir($root, $cand.url);
     # A deck resolved from the registry names a commit without this client ever
     # having listed the remote's tags, so the mirror may not exist yet. Clone it
@@ -246,6 +304,24 @@ export func archiveBytes(root as string, cand as catalog.Candidate) {
                 file: "", line: 0, col: 0
             };
         }
+    }
+    # The mirror may predate the commit: a project locked against a newer
+    # release than this cache has seen needs one fetch. That is a refresh of the
+    # same coordinate, not a fallback to a different one, so the commit demanded
+    # afterwards is unchanged.
+    if (not hasCommit($dir, $cand.commit)) {
+        git.run(git.fetchArgv($dir));
+    }
+    if (not hasCommit($dir, $cand.commit)) {
+        throw Error{
+            kind: "git",
+            message: $cand.url + " cannot produce commit " + $cand.commit +
+                " for " + $cand.name + " " + $cand.version +
+                "; refusing to fall back to a ref or a branch, because the URL " +
+                "in a version record is only a coordinate and may since name a " +
+                "different repository",
+            file: "", line: 0, col: 0
+        };
     }
     # A real temp file rather than a name built from the commit: two jvc runs
     # fetching the same deck at once would otherwise write the same path.

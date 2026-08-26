@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 
 /**
  * Installing **apps**: runnable Jennifer programs, as opposed to the decks the
@@ -48,6 +49,7 @@ use strings;
 use lists;
 use convert;
 use archive;
+import "./deckname.j" as deckname;
 import "./manifest.j" as manifest;
 import "./git.j" as git;
 import "./gitsource.j" as gitsource;
@@ -638,6 +640,18 @@ func hasShebang(file as string) {
     }
 }
 
+# sameNameFrom returns the URL an app of this name was installed from, when that
+# is a different source. Empty when the name is free, or when this is the same
+# app being reinstalled, which is what makes install double as the update path.
+func sameNameFrom(loc as Locations, name as string, url as string) {
+    for (def r in installed($loc)) {
+        if ($r.name == $name and not ($r.url == $url)) {
+            return $r.url;
+        }
+    }
+    return "";
+}
+
 /**
  * Fetch an app from a git URL and put its command on PATH: mirror the
  * repository, choose a version, unpack that commit into the app store, and write
@@ -676,12 +690,23 @@ export func install(loc as Locations, url as string, spec as string,
     if ($name == "") {
         $name = nameFromUrl($url);
     }
-    if (strings.startsWith($name, "@")) {
-        return noInstall($name + " is a scoped name, so it is a deck, not an app; " +
-            "install it with `jvc install` from a project that requires it");
+    # A scoped deck may ship a command too (`[package] bin`), and installing it
+    # this way is the user-wide counterpart of vendoring it into one project.
+    # The command takes the deck half of the name, since `@scope/deck` is neither
+    # a directory nor something a shell can invoke.
+    if (deckname.isScoped($name)) {
+        $name = deckname.deckOf($name);
     }
     if ($name == "") {
         return noInstall("cannot work out an app name from " + $url);
+    }
+    # Two scopes may ship the same deck name, and they would land on one command
+    # and one store directory. Silently replacing the first is the wrong answer:
+    # the user asked for a different program that happens to share a word.
+    def clash as string init sameNameFrom($loc, $name, $url);
+    if (not ($clash == "")) {
+        return noInstall($name + " is already installed from " + $clash +
+            "\n  uninstall it first, or install this one with --scope <dir>");
     }
     def dir as string init path.join($loc.store, $name);
     # Refuse to clobber a command jvc did not write, before unpacking anything.

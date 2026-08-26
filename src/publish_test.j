@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 #
 # White-box tests for publish.j: packaging (src/ + manifest only), metadata
 # derivation, the prepare (no --db) path, and direct registration into a
@@ -99,7 +100,7 @@ func testCapabilitiesOfAPureDeck() {
 # publishing must refuse a deck whose code needs more than its manifest admits
 func testPublishRefusesAnUndeclaredCapability() {
     def dir as string init capDeck("undeclared", "", "# pragma-jennifer-capability: net\n");
-    def r as Result init publish($dir, "https://x/t.tar.gz", $dir + "/dist", "0", false);
+    def r as Result init check($dir, false);
     testing.assertFalse($r.ok);
     testing.assertContains($r.message, "src/ declares the capability pragma net");
     testing.assertContains($r.message, "capabilities");
@@ -109,14 +110,14 @@ func testPublishRefusesAnUndeclaredCapability() {
 func testPublishAcceptsADeclaredCapability() {
     def dir as string init capDeck("declared", 'capabilities = ["net"]' + "\n",
         "# pragma-jennifer-capability: net\n");
-    def r as Result init publish($dir, "https://x/t.tar.gz", $dir + "/dist", "0", false);
+    def r as Result init check($dir, false);
     testing.assertTrue($r.ok);
     fs.removeAll($dir);
 }
 
 func testPublishRefusesAnUnknownCapabilityName() {
     def dir as string init capDeck("unknown", 'capabilities = ["telepathy"]' + "\n", "");
-    def r as Result init publish($dir, "https://x/t.tar.gz", $dir + "/dist", "0", false);
+    def r as Result init check($dir, false);
     testing.assertFalse($r.ok);
     testing.assertContains($r.message, "not a Jennifer capability");
     fs.removeAll($dir);
@@ -129,24 +130,48 @@ func testCapabilitiesSpecOf() {
 }
 
 func testPublishCommandFormat() {
+    # deckadmin's positionals are deck, version, url, then an optional
+    # description. The checksum is a flag, not the fourth positional: emitting
+    # it as one put it in the description's slot and pushed the description off
+    # the end, so the printed command failed with `unexpected extra argument`.
+    # This assertion pinned that mistake for as long as it existed, which is why
+    # it now checks the description sits where deckadmin expects it.
     def cmd as string init publishCommand("@jennifer/routeros", "0.1.0",
         "https://x/r.tgz", "sha256:ab", "RouterOS", "@jennifer/net ^1.0.0",
         "jennifer ^0.21.0", "net");
-    testing.assertContains($cmd, "deckadmin add @jennifer/routeros 0.1.0 https://x/r.tgz sha256:ab");
+    testing.assertContains($cmd,
+        "deckadmin add @jennifer/routeros 0.1.0 https://x/r.tgz \"RouterOS\"");
+    testing.assertContains($cmd, "--checksum sha256:ab");
     testing.assertContains($cmd, "--requires \"@jennifer/net ^1.0.0\"");
     testing.assertContains($cmd, "--engines \"jennifer ^0.21.0\"");
     testing.assertContains($cmd, "--capabilities \"net\"");
 }
 
+func testTheChecksumIsNeverAPositional() {
+    # The failure mode was silent in the output and loud only when the command
+    # was run, so it is worth asserting directly.
+    def cmd as string init publishCommand("@acme/d", "1.0.0", "https://x/d.tgz",
+        "sha256:ff", "a deck", "", "", "");
+    testing.assertFalse(strings.contains($cmd, "d.tgz sha256:ff"));
+    testing.assertContains($cmd, "--checksum sha256:ff");
+}
+
 func testPublishPrepareWritesTarballAndCommand() {
     def dir as string init makeDeck("prep", "@jennifer/routeros", true);
     def out as string init $dir + "/dist";
-    def r as Result init publish($dir, "https://x/routeros-0.1.0.tar.gz", $out, "0", false);
+    def gate as Result init check($dir, false);
+    testing.assertTrue($gate.ok);
+    def r as Result init pack($dir, "https://x/routeros-0.1.0.tar.gz", $out, "0",
+        $gate.message);
     testing.assertTrue($r.ok);
     testing.assertTrue(fs.exists($out + "/routeros-0.1.0.tar.gz"));
     testing.assertTrue(fs.exists($out + "/publish.json"));
-    testing.assertContains($r.message, "deckadmin add @jennifer/routeros 0.1.0");
-    testing.assertContains($r.message, "--requires \"@jennifer/net ^1.0.0\"");
+    # The operator command is returned separately rather than appended, because
+    # whether it is the right instruction depends on the repository, which this
+    # module cannot see. The caller decides whether to print it.
+    testing.assertContains($r.operatorCommand, "deckadmin add @jennifer/routeros 0.1.0");
+    testing.assertContains($r.operatorCommand, "--requires \"@jennifer/net ^1.0.0\"");
+    testing.assertFalse(strings.contains($r.message, "deckadmin"));
     fs.removeAll($dir);
 }
 
@@ -155,7 +180,7 @@ func testPublishPrepareWritesTarballAndCommand() {
 # a bare (unscoped) deck name is not a registry deck -> publish refuses
 func testPublishRejectsBareName() {
     def dir as string init makeDeck("bare", "ansi", false);
-    def r as Result init publish($dir, "https://x/ansi.tar.gz", $dir + "/dist", "0", false);
+    def r as Result init check($dir, false);
     testing.assertFalse($r.ok);
     testing.assertContains($r.message, "scoped");
     fs.removeAll($dir);
@@ -165,7 +190,7 @@ func testPublishRejectsBareName() {
 func testPublishRejectsMissingEntrypoint() {
     def dir as string init makeDeck("noentry", "@jennifer/routeros", false);
     fs.remove($dir + "/src/routeros.j");   # remove the entrypoint
-    def r as Result init publish($dir, "https://x/r.tgz", $dir + "/dist", "0", false);
+    def r as Result init check($dir, false);
     testing.assertFalse($r.ok);
     testing.assertContains($r.message, "entrypoint");
     fs.removeAll($dir);

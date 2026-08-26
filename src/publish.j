@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 
 /**
  * The `jvc publish` flow: turn a local deck (its `deck.toml` plus `src/` tree)
@@ -43,17 +44,27 @@ import "semver.j" as semver;
  * @field ok {bool} true on success
  * @field message {string} the human-readable result
  */
+/**
+ * The outcome of packaging a release.
+ * @field ok {bool} whether packaging and the gate succeeded
+ * @field message {string} the human-facing report
+ * @field operatorCommand {string} the `deckadmin add` line **for whoever runs the
+ *     repository**, which is not normally the person publishing: it edits the
+ *     repository's own store on its own filesystem. Held here rather than
+ *     printed so a caller only shows it when the reader is that person.
+ */
 export def struct Result {
     ok as bool,
-    message as string
+    message as string,
+    operatorCommand as string
 };
 
 func ok(message as string) {
-    return Result{ ok: true, message: $message };
+    return Result{ ok: true, message: $message, operatorCommand: "" };
 }
 
 func fail(message as string) {
-    return Result{ ok: false, message: $message };
+    return Result{ ok: false, message: $message, operatorCommand: "" };
 }
 
 # hexSha256 returns the lowercase hex SHA-256 of data.
@@ -145,21 +156,30 @@ export func enginesSpecOf(m as manifest.Manifest) {
 }
 
 /**
- * Render the human-facing `deckadmin add` command a repository operator runs to
- * register this version (used when publish is not given a `--db`).
+ * Render the `deckadmin add` command a repository operator runs to register this
+ * version.
+ *
+ * The argument order is deckadmin's, not this module's convenience: the
+ * positionals are deck, version, and URL, the description is the optional
+ * fourth, and the checksum is a **flag**. Emitting the checksum as a positional
+ * put it in the description's slot and pushed the real description off the end,
+ * so the printed command died with `unexpected extra argument` and none of it
+ * was obvious from reading the output.
  * @param name {string} the deck name
  * @param version {string} the version
  * @param url {string} the artifact URL
  * @param checksum {string} the `sha256:<hex>` checksum
  * @param description {string} the deck description
  * @param requiresSpec {string} the requires spec ("" for none)
+ * @param enginesSpec {string} the engines spec ("" for none)
+ * @param capabilitiesSpec {string} the capabilities spec ("" for none)
  * @return {string} the ready-to-run command
  */
 export func publishCommand(name as string, version as string, url as string,
     checksum as string, description as string, requiresSpec as string,
     enginesSpec as string, capabilitiesSpec as string) {
     def cmd as string init "deckadmin add " + $name + " " + $version + " " +
-        $url + " " + $checksum + " \"" + $description + "\"";
+        $url + " \"" + $description + "\" --checksum " + $checksum;
     if (not ($requiresSpec == "")) {
         $cmd = $cmd + " --requires \"" + $requiresSpec + "\"";
     }
@@ -277,8 +297,7 @@ func writePlanJson(outDir as string, name as string, version as string,
  * @param now {string} the publish timestamp (Unix seconds as text)
  * @return {Result} the outcome
  */
-export func publish(dir as string, url as string, outDir as string,
-    now as string, runChecks as bool) {
+export func check(dir as string, runChecks as bool) {
     def manifestPath as string init manifest.findManifest($dir);
     if ($manifestPath == "") {
         return fail("no deck manifest found in " + $dir + "; run 'jvc init' first");
@@ -290,18 +309,40 @@ export func publish(dir as string, url as string, outDir as string,
     }
     # The ecosystem quality gate. A deck that cannot pass its own lint, tests,
     # and docblock checks does not get published.
-    def gate as string init "";
-    if ($runChecks) {
-        def report as verify.Report init verify.verify($dir);
-        if (not $report.ok) {
-            return fail("publish blocked by the quality gate:" +
-                verify.reportText($report) +
-                "\n\nfix these, or pass --no-verify to publish anyway");
-        }
-        $gate = "\n  checks:   passed" + verify.reportText($report);
-    } else {
-        $gate = "\n  checks:   SKIPPED (--no-verify)";
+    if (not $runChecks) {
+        return Result{ ok: true, message: "\n  checks:   SKIPPED (--no-verify)",
+            operatorCommand: "" };
     }
+    def report as verify.Report init verify.verify($dir);
+    if (not $report.ok) {
+        return fail("publish blocked by the quality gate:" +
+            verify.reportText($report) +
+            "\n\nfix these, or pass --no-verify to publish anyway");
+    }
+    return Result{ ok: true,
+        message: "\n  checks:   passed" + verify.reportText($report),
+        operatorCommand: "" };
+}
+
+/**
+ * Package a checked deck into a tarball, for the paths that need an artifact.
+ *
+ * **Only the operator path needs this.** A repository that accepts publishes is
+ * told a repository and a tag and reads the code from the forge itself, so
+ * building a tarball for it writes a file into the project that nothing will
+ * ever fetch and computes a checksum nothing will ever verify. Packaging is
+ * therefore a separate step the caller reaches for, not part of publishing.
+ * @param dir {string} the deck's root directory
+ * @param url {string} the artifact URL an operator will host it at
+ * @param outDir {string} where to write the tarball and the plan
+ * @param now {string} the publish timestamp (Unix seconds as text)
+ * @param gate {string} the gate's report, to head the summary
+ * @return {Result} the outcome, carrying the operator command
+ */
+export func pack(dir as string, url as string, outDir as string,
+    now as string, gate as string) {
+    def manifestPath as string init manifest.findManifest($dir);
+    def m as manifest.Manifest init manifest.load($manifestPath);
     def name as string init $m.pkg.name;
     def version as string init $m.pkg.version;
 
@@ -322,7 +363,11 @@ export func publish(dir as string, url as string, outDir as string,
     writePlanJson($outDir, $name, $version, $url, $checksum, $requiresSpec);
     def cmd as string init publishCommand($name, $version, $url, $checksum,
         $m.pkg.description, $requiresSpec, $enginesSpec, $capabilitiesSpec);
-    return ok("packaged " + $name + "@" + $version + "\n  tarball:  " + $tarPath +
-        "\n  checksum: " + $checksum + $gate +
-        "\n\nto register it, host the tarball at your URL and run:\n  " + $cmd);
+    def report as string init "packaged " + $name + "@" + $version +
+        "\n  tarball:  " + $tarPath + "\n  checksum: " + $checksum + $gate;
+    # The operator command is returned rather than appended, because whether it
+    # is the right instruction depends on something this module cannot see: a
+    # repository that accepts publishes makes it not just redundant but
+    # contradictory, telling the user to do by hand what jvc is about to do.
+    return Result{ ok: true, message: $report, operatorCommand: $cmd };
 }

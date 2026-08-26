@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 #
 # White-box tests for app.j: installing runnable programs onto PATH. The install
 # tests build a throwaway git repository in a temp directory and install it, so
@@ -388,13 +389,55 @@ func testInstallRefusesAnEntryWithoutAShebang() {
 }
 
 # a scoped name is a deck, and decks are never installed as commands
-func testInstallRefusesAScopedName() {
+func testAScopedDeckInstallsUnderItsDeckName() {
+    # A scoped deck that ships a command installs user-wide too; `@scope/deck`
+    # is neither a directory nor something a shell can invoke, so the command
+    # takes the deck half.
     def repo as string init appRepo("scoped", "routeros",
         manifestFor("@jennifer/routeros", "1.0.0", "routeros"), "v1.0.0");
     def root as string init scratch("scopedroot");
     def r as Installation init install(where($root), $repo, "*", path.join($root, "cache"));
-    testing.assertFalse($r.ok);
-    testing.assertContains($r.message, "is a deck, not an app");
+    testing.assertTrue($r.ok);
+    testing.assertEqual($r.record.name, "routeros");
+    testing.assertTrue(fs.exists(path.join($root, "bin", "routeros")));
+    fs.removeAll($repo);
+    fs.removeAll($root);
+}
+
+func testTwoScopesShippingTheSameDeckNameDoNotCollide() {
+    # `@a/tool` and `@b/tool` would land on one command and one store directory.
+    # Replacing the first silently is the wrong answer: the user asked for a
+    # different program that happens to share a word.
+    def root as string init scratch("clashroot");
+    def loc as Locations init where($root);
+    def cache as string init path.join($root, "cache");
+    def first as string init appRepo("clash1", "tool",
+        manifestFor("@acme/tool", "1.0.0", "tool"), "v1.0.0");
+    def second as string init appRepo("clash2", "tool",
+        manifestFor("@other/tool", "1.0.0", "tool"), "v1.0.0");
+    def a as Installation init install($loc, $first, "*", $cache);
+    testing.assertTrue($a.ok);
+    remember($loc, $a.record);
+    def b as Installation init install($loc, $second, "*", $cache);
+    testing.assertFalse($b.ok);
+    testing.assertContains($b.message, "already installed from");
+    fs.removeAll($first);
+    fs.removeAll($second);
+    fs.removeAll($root);
+}
+
+func testReinstallingTheSameAppIsNotAClash() {
+    # install doubles as the update path, so the same URL must be allowed to
+    # replace itself.
+    def root as string init scratch("againroot");
+    def loc as Locations init where($root);
+    def cache as string init path.join($root, "cache");
+    def repo as string init appRepo("again", "tool",
+        manifestFor("@acme/tool", "1.0.0", "tool"), "v1.0.0");
+    def a as Installation init install($loc, $repo, "*", $cache);
+    remember($loc, $a.record);
+    def b as Installation init install($loc, $repo, "*", $cache);
+    testing.assertTrue($b.ok);
     fs.removeAll($repo);
     fs.removeAll($root);
 }

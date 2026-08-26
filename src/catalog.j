@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 
 /**
  * The candidate catalog: the published deck versions a resolution may choose
@@ -57,7 +58,8 @@ export def struct Candidate {
     requires as map of string to string,
     engines as map of string to string,
     capabilities as list of string,
-    yanked as bool
+    yanked as bool,
+    registry as string
 };
 
 /**
@@ -102,7 +104,8 @@ export func candidate(name as string, version as string) {
         requires: $noReqs,
         engines: $noEngines,
         capabilities: $noCaps,
-            yanked: false
+            yanked: false,
+            registry: ""
     };
 }
 

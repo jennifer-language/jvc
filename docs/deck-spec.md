@@ -1,7 +1,6 @@
 # Deck manifest specification
 
-- **Version:** 1.11
-- **Status:** stable
+- **Version:** 0.2.0 (draft)
 - **Applies to:** jvc 0.1.0
 
 This is the authoritative specification of the *deck manifest* - the file that
@@ -9,6 +8,25 @@ declares a Jennifer deck's identity, requirements, and what it provides - and of
 how a deck is named, delivered, and installed. [docs/manifest.md](manifest.md)
 is the friendly guide; this document is the normative reference. The key words
 **MUST**, **SHOULD**, and **MAY** are used in the RFC 2119 sense.
+
+> **Scope, and what is specified elsewhere.** This document specifies the
+> *format*: what a manifest and a lockfile contain, what each field means, and
+> how a deck is named, delivered, and laid out on disk. **How a client behaves
+> towards a registry is not specified here** - which registry a scope resolves
+> at, how a dependency graph is resolved, how code is fetched and verified, and
+> how a write is authorised are normative in the
+> [client specification](https://registry.jennifer-lang.dev/specs/specs-client.html),
+> which the registry project owns and serves. This document references that contract
+> rather than restating it, so the two cannot drift: a local copy of it went
+> stale once before and cost a release's worth of debugging.
+
+**Versioning.** The **minor** position advances whenever this document's
+normative content changes; the patch position is for corrections that change no
+requirement. **The format stabilises with the tool**: this document reaches
+1.0.0 when jvc carries a stable `1.0.0` tag, and not before, because a
+specification cannot promise more stability than the thing that implements it.
+This is the same rule the registry project's server and client specifications
+follow, so all three read alike.
 
 The reference implementation is `src/manifest.j` (read/write), `src/deckname.j`
 (names), `src/cli.j` (install), `src/resolver.j` (resolution over a
@@ -68,9 +86,10 @@ an absent one just means the deck has none.
 | conflicts     | `[conflicts]` | `"conflicts"` | decks this deck cannot coexist with  |
 | provides      | `[provides]`  | `"provides"`  | capabilities this deck offers        |
 | sources       | `[sources]`   | `"sources"`   | per-deck source overrides (§6.1)     |
+| registries    | `[registries]` | `"registries"` | which registry a scope resolves at (§6.2) |
 
 YAML uses the same top-level keys as JSON (`package:`, `engines:`, `decks:`,
-`dev-decks:`, `conflicts:`, `provides:`, `sources:`).
+`dev-decks:`, `conflicts:`, `provides:`, `sources:`, `registries:`).
 
 ## 4. The `[package]` section
 
@@ -86,6 +105,8 @@ A table of scalar and string-array fields:
 | `authors`     | array of string   | no       | `[]`    | names / emails                          |
 | `keywords`    | array of string   | no       | `[]`    | search keywords                         |
 | `capabilities`| array of string   | no       | `[]`    | host capabilities the code needs (§4.2) |
+| `bin`         | string            | no       | `""`    | the one entry script exposed as a command (§14.0) |
+| `bin-dir`     | string            | no       | `bin/`  | where a project writes vendored commands (§14.0) |
 
 ¹ *Semantically* required for a usable, publishable deck. The parser is lenient
 (a missing field reads as its default); tools that publish or resolve **SHOULD**
@@ -204,6 +225,17 @@ runs under exactly one engine at a time, so the entries are the engines the deck
   running interpreter version MUST satisfy that key's constraint. If the running
   engine is not listed, or its version does not satisfy that entry, a tool
   **SHOULD** refuse to run or install the deck.
+- **A development build of an engine MUST bypass the version constraint**, and
+  MUST still be held to the allowlist. A version carrying a SemVer prerelease
+  (`0.24.0-dev+28`) is a development build; only a release tag is compared. This
+  mirrors `# pragma-jennifer-version`, where any `-dev` build passes the floor
+  and the interpreter compares release tags alone. The two MUST agree: a tool
+  gate stricter than the interpreter's own would refuse decks the interpreter
+  loads without complaint, and a development build of the next release is
+  precisely where a deck needing that release is tried first. Bypassing the
+  range is **not** licence to bypass the allowlist: a `-dev` build of
+  `jennifer-tiny` is still not `jennifer`, which is a question of which engine
+  runs, not of how new it is.
 
 So `jennifer = "^0.21.0"` alone means "only the full `jennifer` interpreter,
 0.21.x" (a `jennifer-tiny` run is refused); adding `jennifer-tiny = "^0.5.0"`
@@ -270,6 +302,37 @@ remote without its requirement changing.
 - A key **MUST** be a scoped name (§7), as in `[decks]`.
 - Resolution semantics for a git-sourced deck are in §10.5.
 
+### 6.2 The `[registries]` section
+
+A table whose **keys are scope patterns** and whose **values are registry base
+URLs**. It is what lets one project depend on internal decks and public ones at
+once.
+
+```toml
+[registries]
+"@acme/*" = "https://registry.internal.example"
+"*" = "https://decks.jennifer-lang.org"
+```
+
+A key **MUST** be either a **scope wildcard** (a scope name whose deck half is a
+star) or the bare **catch-all** star. A key **MUST NOT** be a deck name: the
+guarantee the mapping exists to give is stated over scopes, and making the deck
+the unit would reintroduce the ambiguity it removes.
+
+- A scope with no entry falls to the catch-all; with no catch-all either, it
+  falls to whatever the tool was told on its command line or in its environment.
+- The section is optional and **MAY** be absent; a manifest written before it
+  existed parses unchanged, and a project with one registry never needs it.
+
+**What a client does with this table is specified elsewhere.** That a scope
+resolves at exactly one registry with no fallback search - the defence against
+dependency confusion - that transitive dependencies follow the *consuming*
+project's mapping rather than a dependency's own, and that a client warns when a
+new mapping shadows an already-locked scope, are normative in the
+[client specification](https://registry.jennifer-lang.dev/specs/specs-client.html)
+section 2. This section defines the file; that one defines the behaviour, and
+the lockfile's side of it is in §11.
+
 ## 7. Deck and capability names
 
 A module name has one of two forms, and the form decides who owns it:
@@ -304,40 +367,21 @@ valid SemVer.
 
 ## 9. Version constraints
 
-A constraint (a `[decks]` / `[dev-decks]` value) is a **single** expression - no
-`||` or `,` compound ranges. Grammar:
+A **constraint** is the value of a `[decks]` or `[dev-decks]` entry, of a
+`[conflicts]` entry (§5), and of an `[engines]` entry (§5). Wherever this
+document says "constraint", it means one of those.
 
-```
-constraint = wildcard | exact | caret | tilde | comparator
-wildcard   = "" | "*" | "any"
-exact      = [ "=" ] version
-caret      = "^" partial
-tilde      = "~" partial
-comparator = ( ">=" | ">" | "<=" | "<" ) version
-version    = a full SemVer 2.0.0 string
-partial    = num [ "." num [ "." num ] ]      ; 1-3 numeric components
-```
+**The grammar and what each form matches are specified elsewhere**: they are
+normative in the
+[server specification](https://registry.jennifer-lang.dev/specs/specs-server.html)
+section 2.4, because the registry resolves against them too, and two documents
+defining one grammar is how two
+implementations end up disagreeing about `^1`. In outline, a constraint is a
+**single** expression with no `||` or `,` compound ranges, and it is a wildcard,
+an exact version, a caret, a tilde, or a comparator.
 
-Resolution semantics (a version *v* satisfies the constraint iff):
-
-| Form         | Satisfied when                                              |
-| ------------ | ---------------------------------------------------------- |
-| `*`/`any`/`` | *v* is any valid SemVer version                            |
-| `=1.2.3`     | *v* == 1.2.3                                                |
-| `^1.2.3`     | 1.2.3 ≤ *v* < 2.0.0                                         |
-| `^0.2.3`     | 0.2.3 ≤ *v* < 0.3.0                                         |
-| `^0.0.3`     | 0.0.3 ≤ *v* < 0.0.4                                         |
-| `^1` / `^1.2`| widened to the next unspecified position (`^1`→<2.0.0, `^0`→<1.0.0, `^0.0`→<0.1.0) |
-| `~1.2.3`/`~1.2` | 1.2.0 ≤ *v* < 1.3.0                                      |
-| `~1`         | 1.0.0 ≤ *v* < 2.0.0                                         |
-| `>=1.0.0` …  | the comparator holds                                       |
-
-A **prerelease** version (e.g. `2.0.0-rc.1`) never satisfies a caret/tilde
-range; address it with an exact or comparator constraint. An invalid version
-string never satisfies anything.
-
-Resolution against a repository picks the **highest** satisfying published
-version.
+The reference implementation is `src/constraint.j`, and the registry project
+carries a byte-identical copy of it.
 
 ## 10. Delivery, namespaces, and installation
 
@@ -437,18 +481,19 @@ direct `[decks]`. Starting from the root requirements, each chosen version
 contributes its own recorded `requires` (§10), and those dependencies are
 resolved in turn.
 
-- **Unification.** When more than one requirement constrains the same deck (a
-  diamond), the chosen version **MUST** satisfy **all** of those constraints
-  simultaneously; the resolver picks the **highest** published version that
-  does. If no published version satisfies the combined constraints, resolution
-  **MUST** fail rather than install an incompatible version.
-- **One version per deck.** The resolved set holds exactly one version of each
-  deck in the graph.
-- **Cycles.** A dependency cycle (`a → b → a`) **MUST** terminate - resolution
-  reaches a fixed point once the choice set stops changing - and is not itself
-  an error.
-- **Errors.** A missing deck, an unsatisfiable constraint set, or a graph that
-  cannot converge is a resolution error; nothing is installed.
+**The rules a resolution must satisfy are specified elsewhere.** Unification
+across a diamond, one version per deck, terminating rather than recursing on a
+cycle, a yanked version being skipped in a fresh resolution but still installing
+from a lockfile, and every name in the graph resolving through the consuming
+project's mapping, are normative in the
+[client specification](https://registry.jennifer-lang.dev/specs/specs-client.html)
+sections 2 and 7.
+
+What this document fixes is where those requirements come from: the manifest's
+`[decks]` and `[dev-decks]` (§5) for the roots, and each resolved version's own
+recorded `requires` (§10, §11) for everything below them. A missing deck or an
+unsatisfiable constraint set is a resolution error, and §10.2 stops at the first
+failure, so nothing is installed.
 
 The reference resolver is `src/resolver.j`, which runs **in the CLI**: it is pure
 over a `src/catalog.j` of candidate versions and never fetches, so a deck it does
@@ -501,7 +546,8 @@ reproducible "recording" of what was installed:
       "checksum": "sha256:…",
       "engines": { "jennifer": "^0.21.0" },
       "requires": { "@jennifer/net": "^1.0.0" },
-      "capabilities": ["net"]
+      "capabilities": ["net"],
+      "registry": "https://decks.jennifer-lang.org"
     },
     "@acme/spinner": {
       "version": "1.1.0",
@@ -523,6 +569,22 @@ Each entry also records that version's own `requires` (a map of deck name to
 constraint), which is what lets a tool judge the lockfile **offline** (§11.1),
 and its `capabilities` (§4.2), so a run-time check can consult the lockfile
 rather than re-scanning the vendor tree.
+
+An entry resolved from a registry also records which registry it came from, as
+`registry`; without it the same lockfile resolves to different code on a machine
+whose `[registries]` mapping differs (§6.2), which is the exact failure a
+lockfile exists to prevent. A `git`-sourced entry has no registry and omits the
+field, its integrity resting on the commit instead. An entry written before the
+field existed carries no registry and **MUST** be accepted, since there is
+nothing to disagree with; the next advance records it.
+
+**What a client must do with that field is specified elsewhere**: recording it,
+preferring the URL a registry advertises in its discovery document over the
+address it happened to be dialled at, fetching each locked deck from it, and
+failing rather than substituting when the current mapping disagrees, are
+normative in the
+[client specification](https://registry.jennifer-lang.dev/specs/specs-client.html)
+section 2.3.
 
 ### 11.1 When a lockfile may be used
 
@@ -727,6 +789,60 @@ that command into the project's command directory (`[package] bin-dir`, default
 This is distinct from installing an *app* (§14.1): a deck's command is a
 dependency, declared in the manifest and pinned in the lockfile, and is therefore
 reproduced by a fresh checkout plus an install.
+
+**One package, one command.** `bin` names a single entry script, and a deck or
+an app exposes **at most one** command. It is a string, never an array: an array
+where `bin` is expected is a field of the wrong type and **MUST** fail the parse
+(§12). A package that needs several verbs implements them as **subcommands** of
+its one command.
+
+This is a deliberate limit, not an oversight, and the reason is that the two
+namespaces are not the same shape. A deck name is scoped and cannot collide:
+`@acme/tool` is unique by construction, and §7 makes that a grammar rule. A
+command name is a **flat global**, shared with every other program on `PATH`, and
+nothing arbitrates it. One command per package keeps the mapping mechanical - the
+command is named for the package - so an install has exactly one name that can
+conflict, and one conflict to report. Several commands means several chances to
+collide with something already installed, discovered one at a time.
+
+That difference is also what would turn installing into a transaction it is not
+equipped to be. The rule above, and its counterpart in §14.1, forbid overwriting
+a command the tool did not itself create. With one command that refusal fails the
+whole install cleanly, and the tree is unchanged. With several, the same rule
+produces a **partial install**: some commands written, one refused, and a tool
+that now owes a rollback it has no record to perform. Update and uninstall
+inherit the problem in reverse, and an update that *drops* a command has to
+delete a file from `PATH`, which is the operation least forgiving of a mistake.
+
+Three further consequences are worth having on purpose:
+
+- **Versions are per package.** Commands shipped together upgrade together. If
+  that is acceptable, they are one program, which is exactly what subcommands
+  say; if it is not, they were two packages.
+- **`PATH` enumerates nothing.** `<command> help` lists subcommands, so one
+  command is a discovery surface for all of them; a second binary is findable
+  only by already knowing its name. One command is also one completion script.
+- **One entry means one dispatch table**, so argument parsing, `--help`, and
+  version reporting are written once and behave the same for every verb.
+
+**What this rule does not cover.** Two programs with genuinely different
+lifecycles - a daemon and the operator client that administers it - are **two
+apps** (§14.1), not one app with two binaries. They are installed, updated, and
+removed independently, which is the property that made them two programs in the
+first place. The price is that each carries its dependencies privately, in its
+own vendor tree, and that price is accepted.
+
+The one requirement subcommands cannot meet is an **exec-by-name contract**: a
+program that some other tool invokes under a fixed filename (a `git-<verb>`
+extension, an askpass helper, an `EDITOR`) has to exist under that exact name on
+`PATH`. Nothing in this specification serves that today, and a deck needing it
+must be installed by hand.
+
+If it is ever specified, the additive form is a list of **further names for the
+same entry script**, dispatched on `argv[0]` - which preserves one program, one
+version, and one thing to roll back, and is a different feature from shipping
+several programs. It is deliberately left unspecified until a real case asks for
+it, so that "several binaries" does not arrive through the side door.
 
 ### 14.1 Installing an app
 

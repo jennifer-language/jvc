@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 #
 # White-box tests for gitsource.j. These build a throwaway git repository in a
 # temp directory and read it back as deck candidates, so they exercise the real
@@ -216,4 +217,80 @@ func testArchiveBytesFollowsTheCommitNotTheTag() {
         }
     }
     fs.removeAll($repo);
+}
+
+# --- the commit pin is the whole protection ----------------------------------
+
+func testIsCommitAcceptsOnlyAFullHexId() {
+    testing.assertTrue(isCommit("7d50f9d0b683c5972a4906f6d6d3de1df3f5b035"));
+    testing.assertFalse(isCommit(""));
+    testing.assertFalse(isCommit("7d50f9d"));                     # abbreviated
+    testing.assertFalse(isCommit("v1.0.0"));                      # a tag
+    testing.assertFalse(isCommit("main"));                        # a branch
+    testing.assertFalse(isCommit("7D50F9D0B683C5972A4906F6D6D3DE1DF3F5B035"));
+    testing.assertFalse(isCommit("7d50f9d0b683c5972a4906f6d6d3de1df3f5b03z"));
+}
+
+func testArchiveRefusesARefInTheCommitField() {
+    # `git archive` accepts any ref, so a lockfile whose commit field held a tag
+    # would archive whatever that tag points at now. That is the substitution
+    # the pin exists to prevent, so it is refused before git is consulted.
+    def repo as string init fixture("reffield");
+    def cache as string init freshCache("reffield");
+    def r as Fetch init candidates($cache, $repo, "@acme/beta");
+    testing.assertTrue($r.ok);
+    def bad as catalog.Candidate init $r.candidates[0];
+    $bad.commit = "v1.0.0";
+    testing.assertThrows("archiveWithARefPin", "git");
+    fs.removeAll($repo);
+}
+
+# archiveWithARefPin is the throwing call testArchiveRefusesARefInTheCommitField
+# asserts on.
+func archiveWithARefPin() {
+    def repo as string init fixture("reffield2");
+    def cache as string init freshCache("reffield2");
+    def r as Fetch init candidates($cache, $repo, "@acme/beta");
+    def bad as catalog.Candidate init $r.candidates[0];
+    $bad.commit = "v1.0.0";
+    return archiveBytes($cache, $bad);
+}
+
+func testArchiveRefusesAnUnpinnedGitDeck() {
+    testing.assertThrows("archiveWithNoPin", "git");
+}
+
+func archiveWithNoPin() {
+    def repo as string init fixture("nopin");
+    def cache as string init freshCache("nopin");
+    def r as Fetch init candidates($cache, $repo, "@acme/beta");
+    def bad as catalog.Candidate init $r.candidates[0];
+    $bad.commit = "";
+    return archiveBytes($cache, $bad);
+}
+
+func testArchiveRefusesACommitTheRemoteCannotProduce() {
+    # A well-formed id the repository simply does not have: it must fail rather
+    # than fall back to the ref, the default branch, or a generated archive.
+    testing.assertThrows("archiveWithAnAbsentCommit", "git");
+}
+
+func archiveWithAnAbsentCommit() {
+    def repo as string init fixture("absent");
+    def cache as string init freshCache("absent");
+    def r as Fetch init candidates($cache, $repo, "@acme/beta");
+    def bad as catalog.Candidate init $r.candidates[0];
+    $bad.commit = "0123456789abcdef0123456789abcdef01234567";
+    return archiveBytes($cache, $bad);
+}
+
+func testTheModuleDeclaresItsOwnNamespaces() {
+    # A white-box overlay is spliced *after* the module, so the overlay's own
+    # `use` declarations satisfy the module's references too. A module that
+    # forgot one therefore passes its tests and fails the moment anything else
+    # loads it. This asserts the module stands on its own.
+    def src as string init fs.readString("src/gitsource.j");
+    for (def ns in ["strings", "os", "fs", "path"]) {
+        testing.assertContains($src, "use " + $ns + ";");
+    }
 }

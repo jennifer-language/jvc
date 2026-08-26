@@ -1,0 +1,17 @@
+#!/usr/bin/env -S jennifer run
+# SPDX-License-Identifier: LGPL-3.0-only
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
+#
+# jvc - the jennifer deck manager. A thin launcher over the `cli` module, which
+# holds all the logic and its tests. Run it directly:
+#
+#     ./jvc install
+#
+# or through the interpreter: `jennifer run jvc install`.
+
+use os;
+import "../src/cli.j" as cli;
+
+def code as int init cli.main(os.ARGS);
+exit $code;

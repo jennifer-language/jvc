@@ -1,33 +1,33 @@
 [package]
 name = "jvc"
 version = "0.1.0"
-description = "the jennifer deck manager - CLI and deck repository"
+description = "jennifer version control - CLI deck repository manager"
 license = "LGPL-3.0-only"
-authors = ["edv@gmi.eu"]
-keywords = ["package-manager", "decks", "jennifer"]
+authors = ["mplx <jennifer@mplx.dev>"]
+keywords = ["package-manager", "decks", "jvc", "version control", "jennifer"]
 
 # jvc is an *app*, not a deck: an unscoped name and a runnable entry script. This
 # is what makes `jvc app install <jvc-url>` able to install jvc over a bundled
 # copy. See docs/bundling.md.
-bin = "cli/jvc.j"
+bin = "bin/jvc"
 
 # Project URLs by role. `deck` (the deck's own manifest / registry
 # location) is mandatory; `homepage` and `manual` are optional.
 [package.urls]
 deck = "https://raw.githubusercontent.com/jennifer-language/jvc/main/deck.toml"
-homepage = "https://github.com/mplx/jennifer-lang"
-manual = "https://mplx.github.io/jennifer-lang/"
+homepage = "https://jennifer-lang.dev"
+manual = "https://jennifer-lang.dev"
 
 # Jennifer engines that can run this deck: engine = version range. jvc uses only
 # bundled stdlib modules (toml, yaml, json, flatdb, http, semver, web, ...), so
 # its runtime dependency is the engine itself - hence [engines], not [decks].
 #
-# A floor, not a caret: jvc needs the @vendor/deck resolver (M19.7), the http
-# bytes body, and brace-escaped string literals, and the language is pre-1.0, so
-# pinning one minor would need a jvc release per interpreter minor. jennifer-tiny
-# is absent by design - jvc needs net.
+# A floor, not a caret: jvc needs the @vendor/deck resolver, the http bytes body,
+# and brace-escaped string literals, and the language is pre-1.0, so pinning one
+# minor would need a jvc release per interpreter minor.
+# jennifer-tiny is absent by design - jvc needs net.
 [engines]
-jennifer = ">=0.24.0"
+jennifer = ">=0.25.0"
 
 # Runtime requirements: deck = version constraint. Registry decks only, and they
 # MUST be scoped (@scope/deck); bundled modules go in [engines] above and local

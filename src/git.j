@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 
 /**
  * A thin wrapper over the `git` binary: the few plumbing calls jvc needs to
@@ -23,10 +24,12 @@
  */
 
 use os;
+
 use strings;
 use hash;
 use encoding;
 use convert;
+import "semver.j" as semver;
 
 # The git executable. Resolved from PATH by os.run.
 def const GIT as string init "git";
@@ -197,4 +200,123 @@ export func cacheDirName(url as string) {
         $base = "repo";
     }
     return $base + "-" + $short;
+}
+
+/**
+ * Build the argv that prints a remote's fetch URL.
+ * @param dir {string} the working tree
+ * @param remote {string} the remote's name, usually "origin"
+ * @return {list of string} the git argv
+ */
+export func remoteUrlArgv(dir as string, remote as string) {
+    return [GIT, "-C", $dir, "remote", "get-url", $remote];
+}
+
+/**
+ * Build the argv that lists the tags pointing at a commit-ish.
+ * @param dir {string} the working tree
+ * @param ref {string} the commit-ish, usually "HEAD"
+ * @return {list of string} the git argv
+ */
+export func tagsAtArgv(dir as string, ref as string) {
+    return [GIT, "-C", $dir, "tag", "--points-at", $ref];
+}
+
+/**
+ * Normalise a remote URL to the `https://` clone URL a registry can fetch.
+ *
+ * An `git@host:owner/name.git` remote is the common case for a repository you
+ * push to, and it is useless to a registry: it names a transport only the
+ * pusher can use. The registry needs a URL it can read anonymously.
+ * @param url {string} the remote URL as git reports it
+ * @return {string} an https clone URL, or the input when it is already one
+ */
+export func httpsRemote(url as string) {
+    def out as string init strings.trim($url);
+    if (strings.startsWith($out, "git@")) {
+        def at as int init strings.indexOf($out, "@");
+        def colon as int init strings.indexOf($out, ":");
+        if ($colon > $at) {
+            def host as string init strings.substring($out, $at + 1, $colon);
+            def path as string init strings.substring($out, $colon + 1, len($out));
+            return "https://" + $host + "/" + $path;
+        }
+    }
+    if (strings.startsWith($out, "ssh://git@")) {
+        return "https://" + strings.substring($out, len("ssh://git@"), len($out));
+    }
+    return $out;
+}
+
+/**
+ * Build the argv that asks a remote whether it has a tag.
+ *
+ * A tag that exists only locally is invisible to anything that reads the
+ * repository over the network, which is exactly what a registry does.
+ * @param dir {string} the working tree
+ * @param remote {string} the remote to ask, usually "origin"
+ * @param tag {string} the tag to look for
+ * @return {list of string} the git argv
+ */
+export func lsRemoteTagArgv(dir as string, remote as string, tag as string) {
+    return [GIT, "-C", $dir, "ls-remote", "--tags", $remote,
+        "refs/tags/" + $tag];
+}
+
+/**
+ * Which spelling a repository already uses for release tags: `v1.2.3` or the
+ * bare `1.2.3`.
+ *
+ * Both are common and jvc reads either, so advice that names one has to name
+ * the one the repository has settled on. Suggesting the other would have the
+ * user create a second convention beside their first, which nothing later can
+ * tell apart from a mistake.
+ * @param tags {list of string} the repository's existing tags
+ * @return {string} `"v"` when the prefixed spelling leads, otherwise `""`
+ */
+export func tagPrefix(tags as list of string) {
+    def prefixed as int init 0;
+    def bare as int init 0;
+    for (def tag in $tags) {
+        if (not semver.isValid(versionOfTag($tag))) {
+            continue;
+        }
+        if (strings.startsWith($tag, "v")) {
+            $prefixed = $prefixed + 1;
+        } else {
+            $bare = $bare + 1;
+        }
+    }
+    if ($prefixed > $bare) {
+        return "v";
+    }
+    return "";
+}
+
+/**
+ * Build the argv that lists the configured remotes.
+ * @param dir {string} the working tree
+ * @return {list of string} the git argv
+ */
+export func remotesArgv(dir as string) {
+    return [GIT, "-C", $dir, "remote"];
+}
+
+/**
+ * The host a clone URL names, for telling one forge from another.
+ * @param url {string} the remote URL, in either the ssh or the https spelling
+ * @return {string} the hostname, or "" when there is none to read
+ */
+export func hostOfRemote(url as string) {
+    def out as string init httpsRemote(strings.trim($url));
+    def scheme as int init strings.indexOf($out, "://");
+    if ($scheme < 0) {
+        return "";
+    }
+    $out = strings.substring($out, $scheme + 3, len($out));
+    def slash as int init strings.indexOf($out, "/");
+    if ($slash >= 0) {
+        $out = strings.substring($out, 0, $slash);
+    }
+    return strings.lower($out);
 }

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 
 /**
  * Deck-name grammar and decomposition, shared by the CLI and the server. A deck
@@ -128,10 +129,26 @@ export func isValid(name as string) {
  * @return {string} the vendor-relative subdirectory
  */
 export func vendorSubdir(name as string) {
-    if (isScoped($name)) {
-        return scopeOf($name) + "/" + deckOf($name);
+    def folded as string init fold($name);
+    if (isScoped($folded)) {
+        return scopeOf($folded) + "/" + deckOf($folded);
     }
-    return $name;
+    return $folded;
+}
+
+/**
+ * Fold a deck name to its canonical lowercase form.
+ *
+ * The registry folds on the way in, so a client that does not fold asks for one
+ * name and stores another. It matters most on disk: `vendor/Acme/` and
+ * `vendor/acme/` are one directory on macOS and Windows and two on Linux, so an
+ * unfolded vendor path makes a lockfile mean different things on different
+ * machines. Folding at the boundary is what keeps it meaning one thing.
+ * @param name {string} the deck name as written
+ * @return {string} the folded name
+ */
+export func fold(name as string) {
+    return strings.lower($name);
 }
 
 /**
@@ -155,5 +172,5 @@ export func ptrEscape(token as string) {
  * @return {string} the entrypoint filename, e.g. "routeros.j"
  */
 export func entryFile(name as string) {
-    return deckOf($name) + ".j";
+    return deckOf(fold($name)) + ".j";
 }

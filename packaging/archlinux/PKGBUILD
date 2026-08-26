@@ -1,0 +1,89 @@
+# Maintainer: mplx <jennifer@mplx.dev>
+
+# jvc is pure Jennifer source: no compilation, nothing architecture specific.
+# The package is therefore a straight file copy of the two directories the
+# launcher needs, plus the shell completion and the documentation.
+#
+# The interpreter is not in the official repositories; `jennifer-git` provides
+# `jennifer`, so that is what is depended on. Note that the sources declare
+# `# pragma-jennifer-version: >=0.25.0` while `jennifer-git` carries no version
+# in its `provides`, so the floor cannot be expressed here as
+# `jennifer>=0.25.0` - it would be unsatisfiable rather than merely unmet. A
+# `-dev` interpreter bypasses a version floor anyway, which is how jvc runs on
+# today's 0.24.0-dev builds; the floor bites only under a tagged release.
+
+_pkgname=jvc
+pkgname=jvc-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc="The Jennifer deck manager: dependency resolution, vendoring, and publishing for Jennifer projects"
+arch=('any')
+url="https://github.com/jennifer-language/jvc"
+license=('LGPL-3.0-only')
+depends=('jennifer' 'git')
+makedepends=('git')
+provides=("${_pkgname}=${pkgver%%.r*}")
+conflicts=("${_pkgname}")
+source=("${_pkgname}::git+https://github.com/jennifer-language/jvc.git")
+sha256sums=('SKIP')
+
+pkgver() {
+	cd "${srcdir}/${_pkgname}"
+
+	# There are no release tags yet, so the manifest is the version of record
+	# and the revision count keeps successive builds ordered.
+	local ver
+	ver="$(sed -n 's/^version = "\(.*\)"/\1/p' deck.toml | head -n1)"
+	printf '%s.r%s.g%s' "${ver:-0}" "$(git rev-list --count HEAD)" \
+		"$(git rev-parse --short=7 HEAD)"
+}
+
+check() {
+	cd "${srcdir}/${_pkgname}"
+
+	# Every module carries a co-located white-box overlay. `jennifer test`
+	# splices the module in first, so the module itself is exercised here,
+	# not just the overlay.
+	local t
+	for t in manifest deckname catalog resolver constraint git gitsource \
+		scaffold pragma app verify publish registry scopemap ciauth cli; do
+		jennifer test "src/${t}_test.j"
+	done
+
+	jennifer lint src/*.j bin/jvc
+}
+
+package() {
+	cd "${srcdir}/${_pkgname}"
+
+	# The launcher resolves `import "../src/cli.j"` relative to its own file,
+	# so `bin/` and `src/` must stay siblings. `/usr/share` is right for an
+	# architecture-independent tree, and it matches the layout jvc itself uses
+	# when it installs an app into a prefix (`<prefix>/share/jvc/apps/<name>`).
+	install -Dm755 bin/jvc "${pkgdir}/usr/share/jvc/bin/jvc"
+	install -Dm644 deck.toml "${pkgdir}/usr/share/jvc/deck.toml"
+
+	# The test overlays are a development artefact: nothing at runtime imports
+	# them, and `jvc verify` runs the interpreter against the *consuming*
+	# project's overlays, not against these.
+	local f
+	for f in src/*.j; do
+		[[ ${f} == *_test.j ]] && continue
+		install -Dm644 "${f}" "${pkgdir}/usr/share/jvc/${f}"
+	done
+
+	# A symlink rather than a wrapper, which is also how `jvc app install`
+	# puts a command on PATH: `ls -l` then shows where jvc really lives, and
+	# the interpreter resolves the relative import through the link.
+	install -dm755 "${pkgdir}/usr/bin"
+	ln -s /usr/share/jvc/bin/jvc "${pkgdir}/usr/bin/jvc"
+
+	install -Dm644 completions/jvc.bash \
+		"${pkgdir}/usr/share/bash-completion/completions/jvc"
+	install -Dm644 completions/jvc.fish \
+		"${pkgdir}/usr/share/fish/vendor_completions.d/jvc.fish"
+
+	install -Dm644 README.md -t "${pkgdir}/usr/share/doc/${_pkgname}"
+	install -Dm644 docs/cli.md docs/manifest.md docs/deck-spec.md \
+		-t "${pkgdir}/usr/share/doc/${_pkgname}"
+}

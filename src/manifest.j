@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 
 /**
  * The deck manifest: the file that declares a deck's identity, its own
@@ -93,6 +94,7 @@ export def struct Dependency {
  * @field conflicts {list of Dependency} the decks (and version ranges) this deck conflicts with
  * @field provides {list of Dependency} the capabilities this deck provides
  * @field sources {list of Dependency} per-deck source overrides (deck -> git URL)
+ * @field registries {list of Dependency} scope pattern -> registry URL (see `[registries]`)
  */
 export def struct Manifest {
     pkg as Package,
@@ -101,7 +103,8 @@ export def struct Manifest {
     devDecks as list of Dependency,
     conflicts as list of Dependency,
     provides as list of Dependency,
-    sources as list of Dependency
+    sources as list of Dependency,
+    registries as list of Dependency
 };
 
 /**
@@ -134,7 +137,8 @@ export func empty(name as string, version as string) {
         devDecks: $noDeps,
         conflicts: $noDeps,
         provides: $noDeps,
-        sources: $noDeps
+        sources: $noDeps,
+        registries: $noDeps
     };
 }
 
@@ -254,7 +258,8 @@ func parseToml(text as string) {
         devDecks: tomlDeps($doc, "/dev-decks"),
         conflicts: tomlDeps($doc, "/conflicts"),
         provides: tomlDeps($doc, "/provides"),
-        sources: tomlDeps($doc, "/sources")
+        sources: tomlDeps($doc, "/sources"),
+        registries: tomlDeps($doc, "/registries")
     };
 }
 
@@ -337,7 +342,8 @@ func parseYaml(text as string) {
         devDecks: yamlDeps($doc, "/dev-decks"),
         conflicts: yamlDeps($doc, "/conflicts"),
         provides: yamlDeps($doc, "/provides"),
-        sources: yamlDeps($doc, "/sources")
+        sources: yamlDeps($doc, "/sources"),
+        registries: yamlDeps($doc, "/registries")
     };
 }
 
@@ -421,7 +427,8 @@ func parseJson(text as string) {
         devDecks: jsonDeps($doc, "/dev-decks"),
         conflicts: jsonDeps($doc, "/conflicts"),
         provides: jsonDeps($doc, "/provides"),
-        sources: jsonDeps($doc, "/sources")
+        sources: jsonDeps($doc, "/sources"),
+        registries: jsonDeps($doc, "/registries")
     };
 }
 
@@ -495,6 +502,7 @@ func encodeToml(m as Manifest) {
     $doc = tomlSetDeps($doc, "/conflicts", $m.conflicts);
     $doc = tomlSetDeps($doc, "/provides", $m.provides);
     $doc = tomlSetDeps($doc, "/sources", $m.sources);
+    $doc = tomlSetDeps($doc, "/registries", $m.registries);
     return toml.encodePretty($doc);
 }
 
@@ -547,6 +555,7 @@ func encodeYaml(m as Manifest) {
     $doc = yamlSetDeps($doc, "/conflicts", $m.conflicts);
     $doc = yamlSetDeps($doc, "/provides", $m.provides);
     $doc = yamlSetDeps($doc, "/sources", $m.sources);
+    $doc = yamlSetDeps($doc, "/registries", $m.registries);
     return yaml.encodePretty($doc);
 }
 
@@ -599,6 +608,7 @@ func encodeJson(m as Manifest) {
     $doc = jsonSetDeps($doc, "/conflicts", $m.conflicts);
     $doc = jsonSetDeps($doc, "/provides", $m.provides);
     $doc = jsonSetDeps($doc, "/sources", $m.sources);
+    $doc = jsonSetDeps($doc, "/registries", $m.registries);
     return json.encodePretty($doc);
 }
 
@@ -929,6 +939,42 @@ export func removeEngine(m as Manifest, name as string) {
 export func addSource(m as Manifest, name as string, url as string) {
     def out as Manifest init $m;
     $out.sources = depListSet($m.sources, $name, $url);
+    return $out;
+}
+
+/**
+ * Return a new manifest mapping a scope pattern to a registry (added or
+ * updated).
+ *
+ * The key is a scope wildcard, a scope name whose deck half is a star, or the
+ * bare catch-all star. It is never a deck name: a scope resolves at exactly one
+ * registry, and making the deck the unit would reintroduce the ambiguity the
+ * mapping exists to remove.
+ *
+ * (The patterns are spelled out in prose rather than shown, because a slash
+ * followed by a star inside a docblock opens a nested block comment and eats
+ * the terminator.)
+ * @param m {Manifest} the starting manifest
+ * @param pattern {string} the scope wildcard, or the catch-all star
+ * @param url {string} the registry base URL that scope resolves at
+ * @return {Manifest} a new manifest with the mapping set
+ */
+export func addRegistry(m as Manifest, pattern as string, url as string) {
+    def out as Manifest init $m;
+    $out.registries = depListSet($m.registries, $pattern, $url);
+    return $out;
+}
+
+/**
+ * Return a new manifest with a scope mapping removed, so that scope falls back
+ * to the catch-all (or to the CLI's own default when there is none).
+ * @param m {Manifest} the starting manifest
+ * @param pattern {string} the scope pattern to unmap
+ * @return {Manifest} a new manifest without that mapping
+ */
+export func removeRegistry(m as Manifest, pattern as string) {
+    def out as Manifest init $m;
+    $out.registries = depListRemove($m.registries, $pattern);
     return $out;
 }
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (C) 2026 jvc contributors
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+# pragma-jennifer-version: >=0.25.0
 #
 # White-box tests for git.j: the pure command builders and tag handling. The
 # calls that actually invoke git (`run` / `isAvailable`) are exercised end to end
@@ -105,4 +106,60 @@ func testCacheDirNameToleratesATrailingSlash() {
 func testCacheDirNameHasNoPathSeparators() {
     # the name becomes one directory under the cache root, so it must be flat
     testing.assertEqual(strings.indexOf(cacheDirName("https://x/a/b/c.git"), "/"), -1);
+}
+
+# --- remote URLs a registry can actually read --------------------------------
+
+func testAnSshRemoteBecomesHttps() {
+    # The remote you push to names a transport only you can use; a registry has
+    # to be given one it can read anonymously.
+    testing.assertEqual(httpsRemote("git@github.com:mplx/deck-clispinner.git"),
+        "https://github.com/mplx/deck-clispinner.git");
+    testing.assertEqual(httpsRemote("ssh://git@gitlab.example/group/sub/p.git"),
+        "https://gitlab.example/group/sub/p.git");
+}
+
+func testAnHttpsRemoteIsLeftAlone() {
+    testing.assertEqual(httpsRemote("https://github.com/mplx/deck-clispinner.git"),
+        "https://github.com/mplx/deck-clispinner.git");
+}
+
+func testHttpsRemoteTrimsSurroundingSpace() {
+    testing.assertEqual(httpsRemote("  https://x/y.git\n"), "https://x/y.git");
+}
+
+func testTheRemoteTagQueryAsksForOneRef() {
+    # Asking for the one ref rather than listing every tag keeps the check cheap
+    # on a repository with a long release history.
+    def argv as list of string init lsRemoteTagArgv("/w", "origin", "v1.2.3");
+    testing.assertContains(strings.join($argv, " "), "ls-remote --tags origin");
+    testing.assertContains(strings.join($argv, " "), "refs/tags/v1.2.3");
+}
+
+# --- which tag spelling a repository uses ------------------------------------
+
+func testABareTagHistoryKeepsBareTags() {
+    testing.assertEqual(tagPrefix(["0.1.0", "0.2.0", "1.0.0"]), "");
+}
+
+func testAPrefixedTagHistoryKeepsThePrefix() {
+    testing.assertEqual(tagPrefix(["v0.1.0", "v0.2.0"]), "v");
+}
+
+func testTheMajorityWinsInAMixedHistory() {
+    testing.assertEqual(tagPrefix(["0.1.0", "v0.2.0", "0.3.0"]), "");
+    testing.assertEqual(tagPrefix(["v0.1.0", "0.2.0", "v0.3.0"]), "v");
+}
+
+func testNonVersionTagsDoNotVote() {
+    # A `nightly` or `latest` tag says nothing about release spelling.
+    testing.assertEqual(tagPrefix(["latest", "nightly", "0.1.0"]), "");
+    testing.assertEqual(tagPrefix(["latest", "v0.1.0"]), "v");
+}
+
+func testNoTagsAtAllPrefersTheVersionAsWritten() {
+    # With nothing to follow, the bare form matches the manifest exactly, which
+    # is the least surprising thing to suggest.
+    def none as list of string init [];
+    testing.assertEqual(tagPrefix($none), "");
 }
