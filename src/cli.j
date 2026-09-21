@@ -2074,9 +2074,11 @@ export func runEngine(dir as string, name as string, constraint as string) {
 
 /**
  * Write a camcorder.lock in dir recording each resolved deck's version, URL,
- * kind, integrity pin, and `[engines]`. The engines are recorded here (not in
- * the pure `vendor/` tree) so the interpreter's vendor resolver can validate the
- * running engine against each imported deck at run time.
+ * kind, integrity pin, and `[engines]`. The engines are recorded here, rather
+ * than being re-fetched, so the graph-wide install gate and the offline
+ * staleness judgement can both be made from the lockfile alone. They are for
+ * jvc: the interpreter reads no lockfile, by design, and enforces a deck's
+ * requirements from its source files' pragma headers instead.
  *
  * The integrity pin depends on where the deck came from: a repository deck
  * records its artifact `checksum`, a git deck records the `ref` it resolved and
@@ -3436,6 +3438,80 @@ func appVersionOf(r as app.Record) {
     return strings.substring($r.commit, 0, 12);
 }
 
+# --- installing jvc over a packaged jvc -------------------------------------
+
+/**
+ * Report whether a path is one the operating system's package manager owns.
+ *
+ * `/usr/local` is deliberately excluded. The filesystem hierarchy reserves
+ * `/usr` for the distribution's package manager and `/usr/local` for locally
+ * administered software, which is exactly where jvc puts a `--scope system`
+ * install of its own: a copy jvc placed there is jvc's to manage and needs no
+ * warning about itself.
+ * @param realPath {string} the resolved path of the running command
+ * @return {bool} true when a package manager, not jvc, owns that path
+ */
+export func isOsManaged(realPath as string) {
+    if ($realPath == "") {
+        return false;
+    }
+    if (strings.startsWith($realPath, "/usr/local/")) {
+        return false;
+    }
+    return strings.startsWith($realPath, "/usr/") or
+        strings.startsWith($realPath, "/opt/");
+}
+
+/**
+ * The warning shown when a self-installed jvc now stands in front of one the
+ * system package manager installed.
+ *
+ * Installing jvc with jvc does not upgrade the packaged copy and cannot: the
+ * package manager owns those files. It writes a second copy and puts a command
+ * on `PATH`, so which one runs is decided by `PATH` order and nothing says so
+ * at the moment it happens. Saying it here is cheaper than the alternative,
+ * which is an upgrade that appears to do nothing.
+ * @param running {string} the resolved path of the jvc that ran
+ * @param binDir {string} the directory the new command was written into
+ * @return {string} the warning text
+ */
+export func packagedJvcWarning(running as string, binDir as string) {
+    return "warning: the jvc you just ran is " + $running + ", which your " +
+        "system package manager owns.\n" +
+        "  That copy has not been replaced. jvc has installed a second one and " +
+        "put its command in\n" +
+        "  " + $binDir + ", so which jvc runs is now decided by PATH order.\n" +
+        "  To upgrade the packaged copy, use the package manager that installed " +
+        "it (apt, pacman).\n" +
+        "  To run ahead of it on purpose, keep this one and make sure " +
+        $binDir + " comes first.\n" +
+        "  `jvc version` reports which copy is running and names the other.";
+}
+
+# withShadowNote appends that warning when an app operation has left a
+# self-installed jvc sitting behind a packaged one. It asks the store rather
+# than parsing the argument, so it does not matter whether the user typed
+# `jvc`, a git URL, or a scoped registry name, and `jvc app update` with no
+# arguments is covered too.
+func withShadowNote(args as list of string, scope as string, out as Outcome) {
+    if (not $out.ok) {
+        return $out;
+    }
+    def argv0 as string init "";
+    if (len($args) > 0) {
+        $argv0 = $args[0];
+    }
+    def running as string init selfPath($argv0);
+    if (not isOsManaged($running)) {
+        return $out;
+    }
+    def loc as app.Locations init app.locations($scope, ".");
+    if (not (app.recordOf($loc, "jvc").name == "jvc")) {
+        return $out;
+    }
+    return ok($out.message + "\n\n" + packagedJvcWarning($running, $loc.bin));
+}
+
 /**
  * Route a `jvc app ...` subcommand.
  * @param args {list of string} the full argument vector
@@ -3449,8 +3525,9 @@ export func runApp(args as list of string, pos as list of string) {
         $scope = "system";
     }
     if ($sub == "install" or $sub == "add") {
-        return runAppInstall(posAt($pos, 1), flagValue($args, "--version"),
-            $scope, registryBase($args));
+        return withShadowNote($args, $scope,
+            runAppInstall(posAt($pos, 1), flagValue($args, "--version"),
+                $scope, registryBase($args)));
     }
     if ($sub == "list" or $sub == "ls") {
         return fromApp(app.listApps(app.locations($scope, ".")));
@@ -3460,7 +3537,8 @@ export func runApp(args as list of string, pos as list of string) {
         for (def i as int init 1; $i < len($pos); $i = $i + 1) {
             $names[] = $pos[$i];
         }
-        return runAppUpdate($names, $scope, registryBase($args));
+        return withShadowNote($args, $scope,
+            runAppUpdate($names, $scope, registryBase($args)));
     }
     if ($sub == "uninstall" or $sub == "remove" or $sub == "rm") {
         def name as string init posAt($pos, 1);
@@ -3665,9 +3743,19 @@ export func engineSatisfied(engines as list of manifest.Dependency,
 /**
  * Check every resolved deck's `[engines]` (carried from the registry) against
  * the running interpreter. This gate is install-time and therefore against the
- * *installing* engine, not the final run-time engine - the authoritative
- * per-import check is the core resolver's job, using the engines recorded in
- * `camcorder.lock`. Returns ok, or the first dependency this engine cannot run.
+ * *installing* engine, not the final run-time engine.
+ *
+ * **Nothing re-checks this later.** The authoritative run-time check is the
+ * interpreter's own per-file pragma enforcement, which reads
+ * `# pragma-jennifer-version` and `# pragma-jennifer-capability` out of the
+ * source and deliberately reads no manifest and no lockfile, so that it stays
+ * neutral between package managers. A pragma cannot express "not on
+ * `jennifer-tiny`" for a reason other than a capability, so for the
+ * default-only surfaces (`term`, `serial`, `spi`, `i2c`, `gpio`, `crypto`
+ * RSA/ECDSA) this gate is the only warning before the tiny build's stub fails
+ * at the first call. Advice, then, but the only advice there is.
+ *
+ * Returns ok, or the first dependency this engine cannot run.
  * @param resolved {list of catalog.Candidate} the resolved graph
  * @param engineName {string} the running engine
  * @param engineVersion {string} the running interpreter version (release core)

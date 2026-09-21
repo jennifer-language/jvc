@@ -43,7 +43,8 @@ def const GIT as string init "git";
 export def struct Result {
     ok as bool,
     output as string,
-    error as string
+    error as string,
+    warning as string
 };
 
 /**
@@ -65,9 +66,51 @@ export func isAvailable() {
 export func run(argv as list of string) {
     def r as os.Result init os.run($argv);
     if (not ($r.exitCode == 0)) {
-        return Result{ ok: false, output: "", error: strings.trim($r.stderr) };
+        return Result{ ok: false, output: "", error: strings.trim($r.stderr),
+            warning: "" };
     }
-    return Result{ ok: true, output: strings.trim($r.stdout), error: "" };
+    # Standard error is kept on success too. git reports an ambiguous refname
+    # as a *warning* and still exits 0, so a caller that reads only the exit
+    # code cannot tell "this name means one thing" from "this name means two
+    # things and I picked one".
+    return Result{ ok: true, output: strings.trim($r.stdout), error: "",
+        warning: strings.trim($r.stderr) };
+}
+
+/**
+ * Report whether git warned that a name was ambiguous.
+ *
+ * Client specification 4.1.1 requires this warning to be treated as an error
+ * rather than as noise: it is git saying a ref and an object share a name, and
+ * on a hoster that allows such refs that is the shape of a substitution
+ * attack, not a cosmetic complaint.
+ * @param text {string} the standard error captured from a git command
+ * @return {bool} true when the text carries an ambiguity warning
+ */
+export func isAmbiguousRef(text as string) {
+    return strings.contains($text, "is ambiguous");
+}
+
+/**
+ * Report whether a name could be read as a git object id.
+ *
+ * Git accepts an abbreviation of four or more hex characters, and accepts it
+ * in either case, so anything in that shape occupies the same syntactic space
+ * as an object and can be made to stand in front of one. A version tag never
+ * looks like this: `0.1.0` and `v0.1.0` both carry a dot.
+ * @param name {string} the ref name to judge
+ * @return {bool} true when the name is hex of an object-id length
+ */
+export func looksLikeObjectId(name as string) {
+    if (len($name) < 4 or len($name) > 40) {
+        return false;
+    }
+    for (def ch in strings.chars(strings.lower($name))) {
+        if (not strings.contains("0123456789abcdef", $ch)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 # --- command builders (pure) ------------------------------------------------
@@ -101,6 +144,28 @@ export func fetchArgv(dir as string) {
  */
 export func lsTagsArgv(dir as string) {
     return [GIT, "-C", $dir, "tag", "--list"];
+}
+
+/**
+ * Fully qualify a tag name, so a tag is read as a tag and nothing else.
+ *
+ * git resolves a bare name by walking a precedence list (`refs/<name>`,
+ * then `refs/tags/<name>`, then `refs/heads/<name>`, ...), and it resolves a
+ * name that looks like an abbreviated object id as that object. Both make a
+ * bare name a guess. Where the caller means "the tag", saying `refs/tags/`
+ * removes the guess: a branch, a stray ref, or an object of the same name
+ * cannot answer instead.
+ *
+ * A name that is already fully qualified is left alone, so this is safe to
+ * apply twice.
+ * @param tag {string} the tag name
+ * @return {string} the unambiguous ref path for that tag
+ */
+export func tagRef(tag as string) {
+    if (strings.startsWith($tag, "refs/")) {
+        return $tag;
+    }
+    return "refs/tags/" + $tag;
 }
 
 /**

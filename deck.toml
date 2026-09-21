@@ -1,14 +1,29 @@
 [package]
 name = "jvc"
 version = "0.1.0"
-description = "jennifer version control - CLI deck repository manager"
+description = "the Jennifer deck manager: dependency resolution, vendoring, and publishing"
 license = "LGPL-3.0-only"
 authors = ["mplx <jennifer@mplx.dev>"]
-keywords = ["package-manager", "decks", "jvc", "version control", "jennifer"]
+keywords = ["package-manager", "decks", "jvc", "version-control", "jennifer"]
 
-# jvc is an *app*, not a deck: an unscoped name and a runnable entry script. This
-# is what makes `jvc app install <jvc-url>` able to install jvc over a bundled
-# copy. See docs/bundling.md.
+# Host capabilities this deck's code needs. Declared even though no file in
+# src/ carries a `# pragma-jennifer-capability` of its own: jvc reaches the
+# network through the bundled http.j, which declares `net` itself, so the
+# interpreter already refuses jvc on a build without it. Saying so here makes
+# the requirement visible before anything is run, and the publish gate accepts
+# a manifest that declares more than its sources do (it only refuses one that
+# declares less).
+capabilities = ["net"]
+
+# jvc is an *app*, not a deck: an unscoped name and a runnable entry script, so
+# it is installed onto PATH rather than vendored, and `jvc publish` refuses it
+# (a published deck must be scoped). Its releases are built by
+# scripts/build-tarball.sh and scripts/build-deb.sh, not by `jvc pack`.
+#
+# jvc ships as its own OS package and is not bundled with the interpreter.
+# `jvc app install <jvc-url>` still works and installs a second copy, which
+# shadows a packaged one by PATH order rather than replacing it; jvc says so
+# when that happens. See docs/cli.md.
 bin = "bin/jvc"
 
 # Project URLs by role. `deck` (the deck's own manifest / registry

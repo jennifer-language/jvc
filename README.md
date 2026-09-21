@@ -1,4 +1,4 @@
-# jvc - jennifer version control
+# jvc - jennifer vendor console
 
 `jvc` is a package manager for the [Jennifer language](https://jennifer-lang.dev/),
 written in Jennifer. It is the Jennifer counterpart to Python's requirements
@@ -60,6 +60,34 @@ arguments: `jvc remove` offers what the manifest requires, `jvc update` offers
 what `camcorder.lock` pins, `jvc registry` offers the scopes in play, and
 `jvc app uninstall` offers what is installed. Nothing there runs jvc, because a
 completion that starts an interpreter on every Tab stops being used.
+
+## Install
+
+Every tagged release publishes three artifacts, each with a sidecar
+`.sha256`. All of them need the `jennifer` interpreter, at the floor jvc's
+own `[engines]` table declares.
+
+```sh
+# Debian / Ubuntu
+sudo apt install ./jvc_0.1.0_all.deb
+
+# Arch
+sudo pacman -U jvc-0.1.0-1-any.pkg.tar.zst
+
+# anywhere else: unpack and put the launcher on PATH
+tar xzf jvc-0.1.0.tar.gz && ./jvc-0.1.0/bin/jvc version
+```
+
+The tarball is the runtime tree rather than a source archive, and it is
+reproducible: rebuilding a tag yields the same bytes.
+
+jvc can also install jvc (`jvc app install <jvc-url>`), which is how you run
+ahead of a release. It does not replace a packaged copy, it shadows it by PATH
+order, and it warns when that is what just happened. See
+[docs/cli.md](docs/cli.md#jvc-installs-jvc).
+
+Packaging lives in `packaging/` and is built by `scripts/build-tarball.sh` and
+`scripts/build-deb.sh`; `.github/workflows/release.yml` runs both on a tag.
 
 ## Quick start
 
@@ -177,8 +205,9 @@ The `jvc` launcher is a thin adapter; all the logic, and its tests, live in
 
 Implemented - the full deck lifecycle: the `deck.toml` manifest (TOML/YAML/JSON),
 `[engines]` / `[conflicts]` enforcement (engines checked install-time across the
-**whole resolved graph**, and recorded per deck in `camcorder.lock` for the
-authoritative run-time check by the interpreter's resolver), **scoped-only
+**whole resolved graph**, and recorded per deck in `camcorder.lock` so that gate
+and the staleness check need no network; at run time the interpreter enforces
+each source file's own pragma header instead, reading no lockfile), **scoped-only
 `@scope/deck`** registry decks (bare names are engine-bundled → `[engines]`, or
 local → not a dependency), the deck repository with a **namespace registry**,
 **`.tar.gz` delivery** with

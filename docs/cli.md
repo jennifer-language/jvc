@@ -484,6 +484,21 @@ How a git deck resolves:
 - **The pin is the commit.** `camcorder.lock` records `ref` (the tag) and
   `commit` (the SHA it pointed at) instead of an artifact checksum, and installs
   archive the *commit*, so moving a tag cannot change what a lockfile installs.
+- **A ref may not share its name with the commit.** git puts refs and object ids
+  in one namespace, so a repository can carry a tag or branch *named after* a
+  commit id, and on GitLab, Bitbucket and self-hosted git nothing prevents it.
+  Where such a name exists, jvc refuses to install from that repository at all
+  rather than let git choose a meaning:
+
+  ```
+  https://gitlab.example/acme/deck-beta.git has a ref named after commit
+  d9332c9d...; refusing to install either: a ref of that shape is how a
+  repository substitutes code behind a pin that has not changed.
+  ```
+
+  This is a hard failure on purpose. jvc also refuses a version record whose
+  `ref` field is itself shaped like a commit id, since a conforming repository
+  will not serve one. Client specification 4.1.1 is the normative rule.
 
 Mirrors are cached per user, keyed by URL, so several projects sharing a deck
 clone it once. The cache lives at `$JVC_CACHE`, else `$XDG_CACHE_HOME/jvc`, else
@@ -878,24 +893,51 @@ elsewhere simply exposes no project command.
 ### jvc installs jvc
 
 jvc is itself an app - an unscoped name with a runnable entry script - and
-declares `bin = "jvc"`, so `jvc app install <jvc-url>` installs it over a
-copy bundled with the interpreter. Since PATH order decides which one runs,
-`jvc version` reports the copy that is running, the interpreter beneath it, and
-any second copy that is installed but shadowed:
+declares `bin = "bin/jvc"`, so `jvc app install <jvc-url>` installs it over
+whatever copy is already there. Since PATH order decides which one runs, `jvc
+version` reports the copy that is running, the interpreter beneath it, and any
+second copy that is installed but shadowed:
 
 ```
 $ jvc version
 jvc 0.1.0
-  running:     /usr/share/jennifer/jvc/jvc
+  running:     /usr/share/jvc/bin/jvc
   interpreter: jennifer 0.25.0
 
 note: jvc 0.3.0 is also installed at ~/.local/bin/jvc but is not the copy running;
       put ~/.local/bin earlier on your PATH to use it
 ```
 
-The intent is that a jvc ships with the interpreter and a self-installed copy may
-shadow it: the bundled one is always present and is the rescue path, while
-`jvc app install` lets you run a newer jvc ahead of the next language release.
+**Installing jvc with jvc does not upgrade a packaged jvc, and cannot.** When
+jvc arrived as a `.deb` or an Arch package, those files belong to the system
+package manager; `jvc app install` writes a *second* copy under
+`~/.local/share/jvc/apps` and puts its command in `~/.local/bin`. Which one
+then runs is decided by PATH order, and nothing about the install says so, so
+jvc says it:
+
+```
+$ jvc app install jvc
+installed jvc 0.3.0
+
+warning: the jvc you just ran is /usr/share/jvc/bin/jvc, which your system
+package manager owns.
+  That copy has not been replaced. jvc has installed a second one and put its
+  command in
+  /home/you/.local/bin, so which jvc runs is now decided by PATH order.
+  To upgrade the packaged copy, use the package manager that installed it
+  (apt, pacman).
+  To run ahead of it on purpose, keep this one and make sure
+  /home/you/.local/bin comes first.
+  `jvc version` reports which copy is running and names the other.
+```
+
+The warning fires for `jvc app update` too, including the no-argument form that
+updates everything, and it is silent in the case it does not apply: a jvc
+installed under `/usr/local` is one jvc put there itself (`--scope system`), so
+it is jvc's to manage and says nothing.
+
+The intent is that a packaged jvc is always present and is the rescue path,
+while `jvc app install` lets you run a newer jvc ahead of the next release.
 
 ## publish and pack, in detail
 

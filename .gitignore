@@ -18,3 +18,6 @@ camcorder.lock
 /packaging/archlinux/pkg/
 /packaging/archlinux/*.pkg.tar.*
 /packaging/archlinux/*.log
+
+# Release artifacts built by scripts/build-*.sh.
+/release/

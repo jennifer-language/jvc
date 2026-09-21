@@ -134,7 +134,8 @@ export func versionTags(tags as list of string) {
 # Candidate for it. Returns a Fetch so the caller can report which tag failed.
 func candidateAt(dir as string, url as string, name as string, tag as string) {
     def version as string init git.versionOfTag($tag);
-    def shown as git.Result init git.run(git.showArgv($dir, $tag, DECK_MANIFEST));
+    def shown as git.Result init git.run(
+        git.showArgv($dir, git.tagRef($tag), DECK_MANIFEST));
     if (not $shown.ok) {
         return failed($name + " " + $tag + ": no " + DECK_MANIFEST + " at that tag");
     }
@@ -156,7 +157,8 @@ func candidateAt(dir as string, url as string, name as string, tag as string) {
         return failed($name + " " + $tag + ": " + DECK_MANIFEST + " declares \"" +
             $m.pkg.name + "\"; the [sources] entry names a different deck");
     }
-    def commit as git.Result init git.run(git.revParseArgv($dir, $tag));
+    def commit as git.Result init git.run(
+        git.revParseArgv($dir, git.tagRef($tag)));
     if (not $commit.ok) {
         return failed($name + " " + $tag + ": cannot resolve the tag to a commit");
     }
@@ -254,15 +256,60 @@ func describePin(pin as string) {
     return "\"" + $pin + "\"";
 }
 
-# hasCommit reports whether a mirror holds a commit object with exactly this id.
-# `rev-parse` is asked to peel, so a value that merely *resolves* (a tag, a
-# branch) is caught by comparing what came back against what was demanded.
-func hasCommit(dir as string, commit as string) {
+/** `commitState`: the mirror holds exactly this commit, unambiguously. */
+export def const HELD as string init "held";
+
+/** `commitState`: a ref shares its name with the commit, so neither is usable. */
+export def const AMBIGUOUS as string init "ambiguous";
+
+/** `commitState`: the mirror cannot produce this commit at all. */
+export def const MISSING as string init "missing";
+
+/**
+ * Report what a mirror can say about a commit id: that it holds it, that a ref
+ * shadows it, or that it cannot produce it.
+ *
+ * The distinction is the whole diagnostic. "I cannot find that commit" sends
+ * somebody looking for a deleted tag or a moved repository; "a ref in that
+ * repository is named after that commit" tells them what actually happened,
+ * and that it may not be an accident.
+ *
+ * The comparison is what makes it a check at all. `rev-parse` answers for a
+ * tag, a branch, or a stray ref of the same name just as readily as for an
+ * object, so asking it to peel and then checking that **what came back is what
+ * was demanded** is what turns "this name resolves" into "this is that
+ * commit". A hoster that permits a ref named like an object id (GitLab,
+ * Bitbucket, self-hosted git) is exactly where the difference bites.
+ * @param dir {string} the mirror directory
+ * @param commit {string} the full 40-character commit id demanded
+ * @return {string} `HELD`, `AMBIGUOUS`, or `MISSING`
+ */
+export func commitState(dir as string, commit as string) {
     def r as git.Result init git.run(git.revParseArgv($dir, $commit));
     if (not $r.ok) {
-        return false;
+        return MISSING;
     }
-    return strings.trim($r.output) == $commit;
+    # git exits 0 after warning that a name is ambiguous, having silently
+    # picked one meaning. Specification 4.1.1 makes that warning an error:
+    # when a ref shares its name with the commit, no answer is trustworthy,
+    # including the right-looking one.
+    if (git.isAmbiguousRef($r.warning)) {
+        return AMBIGUOUS;
+    }
+    if (not (strings.trim($r.output) == $commit)) {
+        return MISSING;
+    }
+    return HELD;
+}
+
+/**
+ * Report whether a mirror holds this commit unambiguously.
+ * @param dir {string} the mirror directory
+ * @param commit {string} the full 40-character commit id demanded
+ * @return {bool} true only when the mirror holds that exact commit and no ref shares its name
+ */
+export func hasCommit(dir as string, commit as string) {
+    return commitState($dir, $commit) == HELD;
 }
 
 /**
@@ -280,6 +327,20 @@ export func archiveBytes(root as string, cand as catalog.Candidate) {
     # accepts any ref, so a `commit` field holding a tag or a branch name would
     # archive whatever that ref points at *now*, which is the substitution the
     # commit pin exists to prevent. Refuse before going near git.
+    # A conforming registry will not store a `ref` shaped like an object id
+    # (server specification 3), so a record carrying one means the registry is
+    # not conforming or the response was tampered with. Either way it is not
+    # something to fetch from.
+    if (git.looksLikeObjectId($cand.ref)) {
+        throw Error{
+            kind: "git",
+            message: $cand.name + " " + $cand.version + " records a ref, \"" +
+                $cand.ref + "\", that is shaped like a commit id; refusing it, " +
+                "because a ref of that shape can stand in front of the object " +
+                "it imitates",
+            file: "", line: 0, col: 0
+        };
+    }
     if (not isCommit($cand.commit)) {
         throw Error{
             kind: "git",
@@ -309,10 +370,24 @@ export func archiveBytes(root as string, cand as catalog.Candidate) {
     # release than this cache has seen needs one fetch. That is a refresh of the
     # same coordinate, not a fallback to a different one, so the commit demanded
     # afterwards is unchanged.
-    if (not hasCommit($dir, $cand.commit)) {
+    def state as string init commitState($dir, $cand.commit);
+    if ($state == MISSING) {
         git.run(git.fetchArgv($dir));
+        $state = commitState($dir, $cand.commit);
     }
-    if (not hasCommit($dir, $cand.commit)) {
+    if ($state == AMBIGUOUS) {
+        throw Error{
+            kind: "git",
+            message: $cand.url + " has a ref named after commit " +
+                $cand.commit + ", so that name means both a ref and the " +
+                "commit " + $cand.name + " " + $cand.version + " is pinned " +
+                "to. Refusing to install either: a ref of that shape is how a " +
+                "repository substitutes code behind a pin that has not " +
+                "changed. Report it to whoever owns " + $cand.url + ".",
+            file: "", line: 0, col: 0
+        };
+    }
+    if (not ($state == HELD)) {
         throw Error{
             kind: "git",
             message: $cand.url + " cannot produce commit " + $cand.commit +
@@ -327,6 +402,15 @@ export func archiveBytes(root as string, cand as catalog.Candidate) {
     # fetching the same deck at once would otherwise write the same path.
     def out as string init fs.makeTempFile("", "jvc-archive");
     def r as git.Result init git.run(git.archiveArgv($dir, $cand.commit, $out));
+    if ($r.ok and git.isAmbiguousRef($r.warning)) {
+        throw Error{
+            kind: "git",
+            message: "git reports " + $cand.commit + " as an ambiguous name in " +
+                $cand.url + ", so a ref shares it with the commit; refusing to " +
+                "install either",
+            file: "", line: 0, col: 0
+        };
+    }
     if (not $r.ok) {
         throw Error{
             kind: "git",

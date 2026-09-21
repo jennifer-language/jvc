@@ -1,6 +1,6 @@
 # Deck manifest specification
 
-- **Version:** 0.2.0 (draft)
+- **Version:** 0.3.0 (draft)
 - **Applies to:** jvc 0.1.0
 
 This is the authoritative specification of the *deck manifest* - the file that
@@ -261,14 +261,40 @@ two distinct points, against two potentially different interpreters:
    **not** authoritative for the runtime: `jvc` needs `net`/`http`/`fs` and so
    almost always runs under the full `jennifer`, meaning it validates the
    *installing* machine - the product could later be run under `jennifer-tiny`.
-2. **Run time - against the interpreter that actually runs the app.** This is the
-   authoritative check and is **not** jvc's to make: only the interpreter's
-   vendor resolver knows the running engine at `import "@scope/deck/"`. Each
-   installed deck's `[engines]` is recorded in `camcorder.lock` (§11, kept there
-   rather than in the src-only `vendor/` tree); the resolver **SHOULD** consult
-   the nearest `camcorder.lock` and refuse to load a deck the running engine is
-   not allowed to run. (That resolver-side check is a core interpreter
-   responsibility, outside jvc.)
+2. **Run time - against the interpreter that actually runs the app.** This is
+   the authoritative check and is **not** jvc's to make, because only the
+   running interpreter knows what it is. It is made against each **source
+   file's own pragma header**, not against this table: the interpreter enforces
+   `# pragma-jennifer-version:` and `# pragma-jennifer-capability:` at every
+   import seam.
+
+   **The interpreter reads no manifest and no lockfile.** That is deliberate on
+   the interpreter side, and it is the reason the check is worth anything: a
+   core that parsed `camcorder.lock` would bind the language to one package
+   manager and foreclose the others an ecosystem should stay free to grow. The
+   pragma fires identically for a deck jvc vendored, one another manager
+   vendored, a hand-populated `vendor/`, and a plain `git clone`.
+   `camcorder.lock` is **jvc's private artifact** (§11), and nothing outside jvc
+   is required to read it.
+
+**What this table therefore does and does not guarantee.** `[engines]` is
+checked by jvc, at install time, and nowhere else. A pragma can say "at least
+this version" and "needs `net` / `exec` / `sql`"; it cannot say "not on
+`jennifer-tiny`" for any other reason, nor express an upper bound or a
+per-engine range. So the guarantees divide:
+
+| The deck needs | Refused at run time by | Refused at install by |
+| -------------- | ---------------------- | --------------------- |
+| a newer interpreter | the version pragma | `[engines]` |
+| `net`, `exec`, or `sql` | the capability pragma | `[engines]`, `capabilities` |
+| any other default-only surface (`term`, `serial`, `spi`, `i2c`, `gpio`, `crypto` RSA/ECDSA) | nothing at import; the tiny build's stub fails at the **first call** | `[engines]` |
+
+That third row is why `[engines]` still matters and **MUST** be kept accurate by
+the deck's author even though nothing enforces it later: for those surfaces,
+jvc refusing the install is the only automated warning before the program is
+running. A deck using them **MUST NOT** list `jennifer-tiny`. The failure mode
+without it is late rather than silent, which is tolerable, but it is a failure
+at first call rather than at install.
 
 ## 6. The `[provides]` section
 
@@ -390,7 +416,7 @@ an integrity **checksum**, the version's own runtime **requirements** (`requires
 a map of deck name → constraint - the deck's `[decks]` at that version), which
 drive transitive resolution (§10.4), and the version's **engines** (a map of
 engine name → range - the deck's `[engines]` at that version, §5), which drive
-the engine gates (§10.2) and the run-time check recorded in the lockfile (§11).
+the engine gates (§10.2).
 Every registry deck is a scoped `@scope/deck` deck (§7) delivered as a
 **`tar.gz`** and vendored:
 
@@ -455,7 +481,8 @@ routeros.greet();                    # binds the `routeros.` namespace
 3. **Graph-wide engine gate** - refuse if **any** deck in the resolved set (root
    or transitive) rules out the running interpreter by its recorded `[engines]`
    (§5). This checks the *installing* interpreter and is a fail-fast; the
-   authoritative per-import check happens at run time (§5, §11).
+   authoritative per-import check is the interpreter's own pragma enforcement
+   (§5), which reads the source files rather than this manifest.
 4. **Conflict gate** - refuse if **any** deck in the resolved set (root or
    transitive) matches `[conflicts]` (§5).
 5. **Fetch** - retrieve the artifact from the resolved `url` (`https://` via the
@@ -567,8 +594,9 @@ two forms is present per entry.
 
 Each entry also records that version's own `requires` (a map of deck name to
 constraint), which is what lets a tool judge the lockfile **offline** (§11.1),
-and its `capabilities` (§4.2), so a run-time check can consult the lockfile
-rather than re-scanning the vendor tree.
+and its `capabilities` (§4.2), so jvc can report what a graph will need without
+re-reading every vendored file. Both are recorded for **jvc's** use: the
+interpreter reads neither (§5).
 
 An entry resolved from a registry also records which registry it came from, as
 `registry`; without it the same lockfile resolves to different code on a machine
@@ -613,12 +641,16 @@ Given one or more deck names it **SHOULD** advance only those, pinning every
 other locked deck to its recorded version, so a single dependency can move
 without disturbing the rest of the graph.
 
-Each deck entry records its `[engines]` allowlist (§5). This is where - rather
-than in the src-only `vendor/` tree - a deck's engine requirement is available
-at **run time**: the interpreter's vendor resolver **SHOULD** consult the nearest
-`camcorder.lock` when it loads `import "@scope/deck/"` and refuse a deck the
-running engine (`jennifer` vs `jennifer-tiny`, and its version) is not allowed to
-run. An empty `engines` object means no restriction.
+Each deck entry records its `[engines]` allowlist (§5) so that the graph-wide
+install gate (§10.2) and the staleness judgement (§11.1) can both be made from
+the lockfile alone, without re-fetching a single version record. An empty
+`engines` object means no restriction.
+
+**It is recorded for jvc, not for the interpreter.** `camcorder.lock` is jvc's
+own reproducibility and integrity artifact; no interpreter is required to read
+it, and the reference interpreter deliberately does not. A deck's engine
+requirement binds at run time through its source files' pragma headers (§5), a
+mechanism that belongs to no package manager.
 
 ## 12. Parsing and validation
 

@@ -63,7 +63,106 @@ func fixture(label as string) {
     return $dir;
 }
 
-# freshCache returns an empty cache root.
+# shadowFixture builds the attack: a repository whose 1.0.0 release is one
+# commit, and which then grows a tag *named after that commit's id* pointing at
+# different code. A hoster that permits such a tag (GitLab, Bitbucket, and
+# self-hosted git do; GitHub rejects the shape) lets a repository owner change
+# what a recorded pin resolves to without changing the pin.
+#
+# Returns the repository path; the caller reads `good` out of it.
+func shadowFixture(label as string) {
+    def dir as string init os.tempDir() + "/jvc_shadow_" + $label;
+    fs.removeAll($dir);
+    fs.mkdirAll($dir);
+    git.run(["git", "-C", $dir, "init", "-q", "-b", "main"]);
+    commitTag($dir, "@acme/beta", "1.0.0", "v1.0.0", "");
+    def good as git.Result init git.run(git.revParseArgv($dir, "refs/tags/v1.0.0"));
+
+    # A second, hostile commit, left off every branch so only the tag reaches it.
+    fs.writeString($dir + "/src/beta.j",
+        'export func hello() { return "PWNED"; }' + "\n");
+    gitIn($dir, ["add", "-A"]);
+    gitIn($dir, ["-c", "user.email=t@x", "-c", "user.name=t", "commit", "-q",
+        "-m", "evil"]);
+    def evil as git.Result init git.run(git.revParseArgv($dir, "HEAD"));
+    gitIn($dir, ["reset", "-q", "--hard", $good.output]);
+    gitIn($dir, ["tag", $good.output, $evil.output]);
+    return $dir;
+}
+
+# A ref shaped like the pinned commit makes that name mean two things, and
+# specification 4.1.1 says neither may be installed: git picks one silently and
+# a client that accepts the pick has no way to know which it got.
+func testARefNamedAfterThePinnedCommitRefusesTheInstall() {
+    def repo as string init shadowFixture("archive");
+    def cache as string init freshCache("shadow");
+    def r as Fetch init candidates($cache, $repo, "@acme/beta");
+    def first as catalog.Candidate init $r.candidates[0];      # 1.0.0
+    testing.assertEqual($first.version, "1.0.0");
+    testing.assertThrows("archiveShadowed", "git");
+    fs.removeAll($repo);
+}
+
+# the throwing call, as its own function so assertThrows can run it
+func archiveShadowed() {
+    def repo as string init os.tempDir() + "/jvc_shadow_archive";
+    def cache as string init os.tempDir() + "/jvc_gitcache_shadow";
+    def r as Fetch init candidates($cache, $repo, "@acme/beta");
+    archiveBytes($cache, $r.candidates[0]);
+}
+
+# The message has to name the real cause. "Cannot produce that commit" would
+# send somebody looking for a deleted tag instead of at the repository.
+func testTheShadowRefusalNamesTheRef() {
+    def repo as string init shadowFixture("message");
+    def cache as string init freshCache("message");
+    def r as Fetch init candidates($cache, $repo, "@acme/beta");
+    def caught as string init "";
+    try {
+        archiveBytes($cache, $r.candidates[0]);
+    } catch (err) {
+        $caught = $err.message;
+    }
+    testing.assertContains($caught, "has a ref named after commit");
+    testing.assertContains($caught, "Refusing to install either");
+    fs.removeAll($repo);
+}
+
+# The three states are what let the caller tell the two failures apart.
+func testCommitStateSeparatesShadowedFromMissing() {
+    def repo as string init shadowFixture("state");
+    def good as string init git.run(git.revParseArgv($repo, "refs/tags/v1.0.0")).output;
+    testing.assertEqual(commitState($repo, $good), AMBIGUOUS);
+    testing.assertEqual(
+        commitState($repo, "0000000000000000000000000000000000000000"), MISSING);
+    testing.assertFalse(hasCommit($repo, $good));
+    fs.removeAll($repo);
+}
+
+# An unshadowed repository still installs, which is the control for the tests
+# above: the refusal has to be caused by the shadow and nothing else.
+func testAnUnshadowedRepositoryStillInstalls() {
+    def repo as string init fixture("control");
+    def cache as string init freshCache("control");
+    def r as Fetch init candidates($cache, $repo, "@acme/beta");
+    testing.assertEqual(commitState(mirrorDir($cache, $repo),
+        $r.candidates[0].commit), HELD);
+    fs.removeAll($repo);
+}
+
+# A record whose `ref` is shaped like an object id is refused before any fetch:
+# a conforming registry will not serve one (server specification 3).
+func testARecordWhoseRefLooksLikeACommitIsRefused() {
+    testing.assertTrue(git.looksLikeObjectId("4a3b1c9d"));
+    testing.assertTrue(git.looksLikeObjectId(
+        "37a9149cb59d6cc6bf8a20926d45166dbed269fe"));
+    testing.assertFalse(git.looksLikeObjectId("v1.0.0"));
+    testing.assertFalse(git.looksLikeObjectId("1.0.0"));
+    testing.assertFalse(git.looksLikeObjectId("abc"));
+    testing.assertFalse(git.looksLikeObjectId("nightly"));
+}
+
+# freshCache returns an empty cache root.# freshCache returns an empty cache root.
 func freshCache(label as string) {
     def dir as string init os.tempDir() + "/jvc_gitcache_" + $label;
     fs.removeAll($dir);

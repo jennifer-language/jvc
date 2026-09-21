@@ -542,7 +542,8 @@ export func pickRef(mirror as string, spec as string) {
     }
     for (def tag in $tags) {
         if (git.versionOfTag($tag) == $best) {
-            def commit as git.Result init git.run(git.revParseArgv($mirror, $tag));
+            def commit as git.Result init git.run(
+                git.revParseArgv($mirror, git.tagRef($tag)));
             if (not $commit.ok) {
                 return pickFailed("cannot resolve " + $tag + " to a commit");
             }
@@ -603,6 +604,36 @@ func manifestAt(mirror as string, ref as string) {
 # Unlike a deck install this keeps every file, not just `src/`: an app ships its
 # launcher, its sources, and its assets together.
 func unpackInto(mirror as string, commit as string, dir as string) {
+    # `git archive` takes any ref, so a pin that is not a commit id would
+    # archive whatever that name points at now. An app lands on PATH and is
+    # executed, so it gets the same two guards a vendored deck gets: the pin
+    # must be a full commit id, and the mirror must resolve it to itself.
+    if (not gitsource.isCommit($commit)) {
+        throw Error{
+            kind: "app",
+            message: "refusing to install from \"" + $commit + "\": an app is " +
+                "installed at a commit, and that is not one",
+            file: "", line: 0, col: 0
+        };
+    }
+    def state as string init gitsource.commitState($mirror, $commit);
+    if ($state == gitsource.AMBIGUOUS) {
+        throw Error{
+            kind: "app",
+            message: "the repository has a ref named after commit " + $commit +
+                ", so that name means both a ref and the commit this app is " +
+                "pinned to; refusing to install either",
+            file: "", line: 0, col: 0
+        };
+    }
+    if (not ($state == gitsource.HELD)) {
+        throw Error{
+            kind: "app",
+            message: "the repository cannot produce commit " + $commit +
+                "; refusing to fall back to a ref of the same name",
+            file: "", line: 0, col: 0
+        };
+    }
     def tar as string init fs.makeTempFile("", "jvc-app");
     def archived as git.Result init git.run(git.archiveArgv($mirror, $commit, $tar));
     if (not $archived.ok) {
@@ -684,7 +715,11 @@ export func install(loc as Locations, url as string, spec as string,
     if (not $picked.ok) {
         return noInstall($url + ": " + $picked.error);
     }
-    def m as manifest.Manifest init manifestAt($mirror, $picked.ref);
+    # At the commit, not at the tag. The manifest decides the entry script and
+    # the app's dependencies, and the code is unpacked at `commit`; reading the
+    # two at different names is how a manifest and the tree it describes come
+    # from different objects.
+    def m as manifest.Manifest init manifestAt($mirror, $picked.commit);
     def hasManifest as bool init not ($m.pkg.name == "");
     def name as string init $m.pkg.name;
     if ($name == "") {

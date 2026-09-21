@@ -1220,6 +1220,99 @@ func probeRequest() {
     return Request{ url: "http://r.example/v1/claim", body: '{"scope":"x"}' };
 }
 
+# --- installing jvc over a packaged jvc -------------------------------------
+
+func testAPackagedPathIsRecognisedAsOsManaged() {
+    testing.assertTrue(isOsManaged("/usr/share/jvc/bin/jvc"));
+    testing.assertTrue(isOsManaged("/opt/jvc/bin/jvc"));
+}
+
+# /usr/local is where jvc's own `--scope system` install goes, so a copy there
+# is jvc's to manage and must not warn about itself.
+func testUsrLocalIsNotOsManaged() {
+    testing.assertFalse(isOsManaged("/usr/local/share/jvc/apps/jvc/bin/jvc"));
+    testing.assertFalse(isOsManaged("/usr/local/bin/jvc"));
+}
+
+func testAUserInstallIsNotOsManaged() {
+    testing.assertFalse(isOsManaged("/home/u/.local/share/jvc/apps/jvc/bin/jvc"));
+    testing.assertFalse(isOsManaged(""));
+}
+
+# The warning has one job: say the packaged copy was not replaced, and that
+# PATH now decides. An "upgraded" that did nothing is the failure it prevents.
+func testTheWarningSaysThePackagedCopyIsUntouched() {
+    def w as string init packagedJvcWarning("/usr/share/jvc/bin/jvc",
+        "/home/u/.local/bin");
+    testing.assertContains($w, "/usr/share/jvc/bin/jvc");
+    testing.assertContains($w, "/home/u/.local/bin");
+    testing.assertContains($w, "has not been replaced");
+    testing.assertContains($w, "PATH order");
+}
+
+# appStore points the app-location environment at a scratch directory and
+# records a jvc install in it, which is the state the warning is about.
+func appStore(label as string) {
+    def dir as string init fs.makeTempDir("", "jvc-store-" + $label);
+    os.setEnv("JVC_APP_HOME", $dir + "/apps");
+    os.setEnv("JVC_BIN", $dir + "/bin");
+    return $dir;
+}
+
+func clearAppStore(dir as string) {
+    os.setEnv("JVC_APP_HOME", "");
+    os.setEnv("JVC_BIN", "");
+    fs.removeAll($dir);
+}
+
+func rememberJvc() {
+    app.remember(app.locations("", "."), app.Record{
+        name: "jvc", url: "https://github.com/jennifer-language/jvc",
+        version: "0.2.0", ref: "0.2.0", commit: "abc123", entry: "bin/jvc"
+    });
+}
+
+func testInstallingOverAPackagedJvcWarns() {
+    def dir as string init appStore("warns");
+    rememberJvc();
+    def out as Outcome init withShadowNote(["/usr/share/jvc/bin/jvc", "app",
+        "install", "jvc"], "", ok("installed jvc 0.2.0"));
+    testing.assertTrue($out.ok);
+    testing.assertContains($out.message, "installed jvc 0.2.0");
+    testing.assertContains($out.message, "system package manager owns");
+    clearAppStore($dir);
+}
+
+# The common case: the jvc that ran is the self-installed one, so there is no
+# packaged copy being shadowed and nothing to say.
+func testASelfInstalledJvcUpdatingItselfIsQuiet() {
+    def dir as string init appStore("quiet");
+    rememberJvc();
+    def out as Outcome init withShadowNote([$dir + "/apps/jvc/bin/jvc", "app",
+        "update"], "", ok("app update:\n  ok    jvc unchanged"));
+    testing.assertFalse(strings.indexOf($out.message, "package manager") >= 0);
+    clearAppStore($dir);
+}
+
+# Nothing was installed, so nothing shadows anything.
+func testNoWarningWhenJvcIsNotInTheStore() {
+    def dir as string init appStore("absent");
+    def out as Outcome init withShadowNote(["/usr/share/jvc/bin/jvc", "app",
+        "install", "grimoire"], "", ok("installed grimoire 0.1.0"));
+    testing.assertFalse(strings.indexOf($out.message, "package manager") >= 0);
+    clearAppStore($dir);
+}
+
+func testAFailedInstallIsNotDecoratedWithAWarning() {
+    def dir as string init appStore("failed");
+    rememberJvc();
+    def out as Outcome init withShadowNote(["/usr/share/jvc/bin/jvc", "app",
+        "install", "jvc"], "", fail("cannot reach the repository"));
+    testing.assertFalse($out.ok);
+    testing.assertFalse(strings.indexOf($out.message, "package manager") >= 0);
+    clearAppStore($dir);
+}
+
 # --- 5.5: authorising a write with nobody at a browser -----------------------
 
 # trustedPublishingAuth advertises the endpoint and audience a registry offering

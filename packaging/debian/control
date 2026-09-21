@@ -1,0 +1,35 @@
+Source: jvc
+Section: devel
+Priority: optional
+Maintainer: mplx <jennifer@mplx.dev>
+Homepage: https://github.com/jennifer-language/jvc
+Vcs-Browser: https://github.com/jennifer-language/jvc
+Vcs-Git: https://github.com/jennifer-language/jvc.git
+Standards-Version: 4.6.2
+
+Package: jvc
+Architecture: all
+Depends: jennifer (>= @ENGINE_FLOOR@)
+Recommends: git
+Description: deck manager for the Jennifer programming language
+ jvc resolves, vendors, and publishes Jennifer decks, the way composer
+ does for PHP or cargo does for Rust. It reads a deck.toml, resolves the
+ whole dependency graph against a deck repository, and pins the result in
+ a camcorder.lock so that a fresh checkout plus `jvc install` reproduces
+ the same code.
+ .
+ The package is architecture-independent Jennifer source: the launcher at
+ /usr/bin/jvc is a symlink into /usr/share/jvc, where bin/ and src/ sit
+ side by side because the launcher reaches its modules through a relative
+ import.
+ .
+ The versioned dependency on jennifer is the compatibility contract. It
+ mirrors the [engines] table in jvc's own deck.toml, and the interpreter
+ enforces the same floor at read time from the
+ `# pragma-jennifer-version:` header each source file carries.
+ .
+ git is a recommendation rather than a dependency because the common path
+ does not need it: installing decks from a repository uses HTTP only. git
+ is required for decks resolved from a [sources] git remote, for
+ `jvc app install`, and for publishing, which reads the tag and remote of
+ the working tree.

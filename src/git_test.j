@@ -10,6 +10,27 @@
 
 use testing;
 
+# --- tag qualification ------------------------------------------------------
+
+# git resolves a bare name by precedence (refs/<name>, then refs/tags/<name>,
+# then refs/heads/<name>, ...) and resolves a name shaped like an abbreviated
+# object id as that object. Saying refs/tags/ removes both guesses.
+func testTagRefQualifiesABareTag() {
+    testing.assertEqual(tagRef("v1.0.0"), "refs/tags/v1.0.0");
+    testing.assertEqual(tagRef("1.0.0"), "refs/tags/1.0.0");
+}
+
+# A tag whose name is an abbreviated commit id is the shape that wins a bare
+# lookup against the object it imitates. Qualified, it can only be the tag.
+func testTagRefQualifiesATagShapedLikeACommit() {
+    testing.assertEqual(tagRef("7d50f9d0b6"), "refs/tags/7d50f9d0b6");
+}
+
+func testTagRefLeavesAQualifiedRefAlone() {
+    testing.assertEqual(tagRef("refs/tags/v1.0.0"), "refs/tags/v1.0.0");
+    testing.assertEqual(tagRef("refs/heads/main"), "refs/heads/main");
+}
+
 # --- command builders -------------------------------------------------------
 
 func testCloneArgvIsBare() {
