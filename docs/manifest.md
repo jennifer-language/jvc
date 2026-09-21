@@ -5,8 +5,7 @@ A deck describes itself in a `deck.toml` (or `deck.yaml` / `deck.yml` /
 `composer.json`. It has these
 parts: package metadata (including project URLs), the deck's own version, the
 Jennifer engine versions that can run it, its runtime requirements, its
-development-only requirements, the decks it conflicts with, and what it
-provides.
+development-only requirements, and the decks it conflicts with.
 
 > This page is the friendly guide. For the normative reference - field types,
 > requiredness, the name grammar, delivery, and the exact constraint grammar -
@@ -71,9 +70,6 @@ jennifer = "^0.21.0"
 [conflicts]
 "@old/jvc" = "<1.0.0"
 
-# What this deck provides: capability = concrete version.
-[provides]
-deckmanager = "0.1.0"
 
 # Where a deck comes from, when not the repository: deck = git URL. Optional;
 # the version constraint stays in [decks] above.
@@ -94,8 +90,7 @@ the top level or under a `package` object:
   "engines": { "jennifer": "^0.21.0" },
   "decks": { "@jennifer/routeros": "^0.1.0" },
   "dev-decks": { "@acme/testkit": "^1.0.0" },
-  "conflicts": { "@old/jvc": "<1.0.0" },
-  "provides": { "deckmanager": "0.1.0" }
+  "conflicts": { "@old/jvc": "<1.0.0" }
 }
 ```
 
@@ -111,8 +106,6 @@ engines:
   jennifer: "^0.21.0"
 decks:
   "@jennifer/routeros": "^0.1.0"
-provides:
-  deckmanager: "0.1.0"
 ```
 
 TOML, YAML, and JSON are equivalent and round-trip through jvc unchanged.

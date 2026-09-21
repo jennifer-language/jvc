@@ -159,22 +159,6 @@ func testInitRefusesWhenJsonExists() {
     fs.removeAll($dir);
 }
 
-func testRunProvide() {
-    def dir as string init freshDir("provide");
-    runInit($dir, "demo");
-    testing.assertTrue(runProvide($dir, "logger", "1.0.0").ok);
-    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
-    testing.assertEqual(manifest.depListGet($m.provides, "logger"), "1.0.0");
-    fs.removeAll($dir);
-}
-
-func testRunProvideRejectsBadVersion() {
-    def dir as string init freshDir("providebad");
-    runInit($dir, "demo");
-    testing.assertFalse(runProvide($dir, "logger", "not-a-version").ok);
-    fs.removeAll($dir);
-}
-
 func testRunConflict() {
     def dir as string init freshDir("conflict");
     runInit($dir, "demo");

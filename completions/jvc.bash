@@ -143,7 +143,7 @@ _jvc() {
         cword=$COMP_CWORD
     fi
 
-    local commands="init add remove list check provide conflict engine source
+    local commands="init add remove list check conflict engine source
         query install update new publish pack app registry yank unyank whoami scopes
         claim owners login logout version help"
 

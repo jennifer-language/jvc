@@ -48,9 +48,7 @@ func testParseTomlFullSchema() {
         "[dev-decks]\n" +
         "prometheus = \"^1.0.0\"\n" +
         "[conflicts]\n" +
-        "oldjvc = \"<1.0.0\"\n" +
-        "[provides]\n" +
-        "logger = \"1.0.0\"\n";
+        "oldjvc = \"<1.0.0\"\n";
     def m as Manifest init parse($src, "toml");
     testing.assertEqual($m.pkg.name, "demo");
     testing.assertEqual($m.pkg.version, "0.3.0");
@@ -69,9 +67,6 @@ func testParseTomlFullSchema() {
     testing.assertEqual($m.devDecks[0].name, "prometheus");
     testing.assertEqual(depListGet($m.engines, "jennifer"), "^0.17.0");
     testing.assertEqual(depListGet($m.conflicts, "oldjvc"), "<1.0.0");
-    testing.assertEqual(len($m.provides), 1);
-    testing.assertEqual($m.provides[0].name, "logger");
-    testing.assertEqual($m.provides[0].constraint, "1.0.0");
 }
 
 func testParseTomlLenientTopLevel() {
@@ -85,13 +80,12 @@ func testParseTomlLenientTopLevel() {
 
 func testParseJson() {
     def src as string init '{"package":{"name":"demo","version":"0.3.0"},' +
-        '"decks":{"ansi":"^1.2.0"},"provides":{"logger":"1.0.0"}}';
+        '"decks":{"ansi":"^1.2.0"}}';
     def m as Manifest init parse($src, "json");
     testing.assertEqual($m.pkg.name, "demo");
     testing.assertEqual($m.pkg.description, "");
     testing.assertEqual(len($m.decks), 1);
     testing.assertEqual($m.decks[0].constraint, "^1.2.0");
-    testing.assertEqual($m.provides[0].constraint, "1.0.0");
 }
 
 # --- [sources] (per-deck git source overrides) ------------------------------
@@ -152,7 +146,6 @@ func testTomlRoundTrip() {
     $m = addDependency($m, "semver", ">=1.0.0");
     $m = addDevDependency($m, "prometheus", "^1.0.0");
     $m = addConflict($m, "oldjvc", "<1.0.0");
-    $m = addProvide($m, "logger", "1.0.0");
     def text as string init encode($m, "toml");
     def back as Manifest init parse($text, "toml");
     testing.assertEqual($back.pkg.name, "mydeck");
@@ -166,7 +159,6 @@ func testTomlRoundTrip() {
     testing.assertEqual(depListGet($back.devDecks, "prometheus"), "^1.0.0");
     testing.assertEqual(depListGet($back.engines, "jennifer"), "^0.17.0");
     testing.assertEqual(depListGet($back.conflicts, "oldjvc"), "<1.0.0");
-    testing.assertEqual(depListGet($back.provides, "logger"), "1.0.0");
 }
 
 func testJsonRoundTrip() {
@@ -174,13 +166,11 @@ func testJsonRoundTrip() {
     $m = setUrl($m, "deck", "https://reg.test/mydeck");
     $m = addDependency($m, "csv", "~0.4.0");
     $m = addConflict($m, "legacy", "*");
-    $m = addProvide($m, "reader", "2.0.0");
     def text as string init encode($m, "json");
     def back as Manifest init parse($text, "json");
     testing.assertEqual(getUrl($back, "deck"), "https://reg.test/mydeck");
     testing.assertEqual(getConstraint($back, "csv"), "~0.4.0");
     testing.assertEqual(depListGet($back.conflicts, "legacy"), "*");
-    testing.assertEqual(depListGet($back.provides, "reader"), "2.0.0");
 }
 
 func testGetUrlAbsent() {
@@ -284,16 +274,13 @@ func testParseYamlFullSchema() {
         "engines:\n" +
         "  jennifer: \"^0.17.0\"\n" +
         "decks:\n" +
-        "  ansi: \"^1.2.0\"\n" +
-        "provides:\n" +
-        "  demo: \"0.3.0\"\n";
+        "  ansi: \"^1.2.0\"\n";
     def m as Manifest init parse($src, "yaml");
     testing.assertEqual($m.pkg.name, "demo");
     testing.assertEqual($m.pkg.version, "0.3.0");
     testing.assertEqual(getUrl($m, "deck"), "https://reg.test/demo");
     testing.assertEqual(getConstraint($m, "ansi"), "^1.2.0");
     testing.assertEqual(depListGet($m.engines, "jennifer"), "^0.17.0");
-    testing.assertEqual(depListGet($m.provides, "demo"), "0.3.0");
 }
 
 func testYamlRoundTrip() {

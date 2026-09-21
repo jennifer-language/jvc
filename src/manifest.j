@@ -9,16 +9,16 @@
  * package metadata and version (the `[package]` table), the Jennifer engines
  * that can run it (the `[engines]` table), the runtime requirements (the
  * `[decks]` table), the development-only requirements (the `[dev-decks]`
- * table), the decks it conflicts with (the `[conflicts]` table), what the
- * deck provides (the `[provides]` table), and where individual decks come from
- * when not from the repository (the `[sources]` table, deck name -> git URL).
+ * table), the decks it conflicts with (the `[conflicts]` table), and where
+ * individual decks come from when not from the repository (the `[sources]`
+ * table, deck name -> git URL).
  * Two on-disk encodings
  * are supported, chosen by file extension - `deck.toml` (TOML, Jennifer's
  * native config format) and `deck.json` - both decoded to and encoded from
  * the same `Manifest` value. A dependency or conflict binds a deck name to a
- * version constraint (see the `constraint` module for the grammar); a provide
- * binds a capability name to the concrete version offered. The resolved,
- * installed set is pinned in a separate `camcorder.lock` (written by the CLI).
+ * version constraint (see the `constraint` module for the grammar). The
+ * resolved, installed set is pinned in a separate `camcorder.lock` (written by
+ * the CLI).
  * Pure Jennifer over `toml` / `json` / `fs`.
  * @module manifest
  * @example
@@ -73,10 +73,9 @@ export def struct Package {
  * One name/version binding. In the `[decks]` / `[dev-decks]` / `[conflicts]`
  * tables `name` is a deck and `constraint` is a version constraint ("^1.2.0");
  * in `[engines]` `name` is a Jennifer engine ("jennifer" / "jennifer-tiny") and
- * `constraint` is the interpreter version range; in `[provides]` `name` is a
- * provided capability and `constraint` is the concrete version offered.
- * @field name {string} the deck, engine, or capability name
- * @field constraint {string} the version constraint, or the provided version
+ * `constraint` is the interpreter version range.
+ * @field name {string} the deck or engine name
+ * @field constraint {string} the version constraint
  */
 export def struct Dependency {
     name as string,
@@ -85,14 +84,13 @@ export def struct Dependency {
 
 /**
  * A decoded deck manifest: the package metadata, the runtime and
- * development requirements, the conflicting decks, and the provided
- * capabilities. Each list follows its source document's order.
+ * development requirements, and the conflicting decks. Each list follows its
+ * source document's order.
  * @field pkg {Package} the package metadata and version
  * @field engines {list of Dependency} the Jennifer engine version ranges that can run this deck
  * @field decks {list of Dependency} the runtime requirements
  * @field devDecks {list of Dependency} the development-only requirements
  * @field conflicts {list of Dependency} the decks (and version ranges) this deck conflicts with
- * @field provides {list of Dependency} the capabilities this deck provides
  * @field sources {list of Dependency} per-deck source overrides (deck -> git URL)
  * @field registries {list of Dependency} scope pattern -> registry URL (see `[registries]`)
  */
@@ -102,14 +100,13 @@ export def struct Manifest {
     decks as list of Dependency,
     devDecks as list of Dependency,
     conflicts as list of Dependency,
-    provides as list of Dependency,
     sources as list of Dependency,
     registries as list of Dependency
 };
 
 /**
  * Build an empty manifest for a new deck: the given name and version, no other
- * metadata, and no requirements or provides.
+ * metadata, and no requirements.
  * @param name {string} the deck name
  * @param version {string} the initial version
  * @return {Manifest} a fresh manifest with empty sections
@@ -136,7 +133,6 @@ export func empty(name as string, version as string) {
         decks: $noDeps,
         devDecks: $noDeps,
         conflicts: $noDeps,
-        provides: $noDeps,
         sources: $noDeps,
         registries: $noDeps
     };
@@ -257,7 +253,6 @@ func parseToml(text as string) {
         decks: tomlDeps($doc, "/decks"),
         devDecks: tomlDeps($doc, "/dev-decks"),
         conflicts: tomlDeps($doc, "/conflicts"),
-        provides: tomlDeps($doc, "/provides"),
         sources: tomlDeps($doc, "/sources"),
         registries: tomlDeps($doc, "/registries")
     };
@@ -341,7 +336,6 @@ func parseYaml(text as string) {
         decks: yamlDeps($doc, "/decks"),
         devDecks: yamlDeps($doc, "/dev-decks"),
         conflicts: yamlDeps($doc, "/conflicts"),
-        provides: yamlDeps($doc, "/provides"),
         sources: yamlDeps($doc, "/sources"),
         registries: yamlDeps($doc, "/registries")
     };
@@ -426,7 +420,6 @@ func parseJson(text as string) {
         decks: jsonDeps($doc, "/decks"),
         devDecks: jsonDeps($doc, "/dev-decks"),
         conflicts: jsonDeps($doc, "/conflicts"),
-        provides: jsonDeps($doc, "/provides"),
         sources: jsonDeps($doc, "/sources"),
         registries: jsonDeps($doc, "/registries")
     };
@@ -500,7 +493,6 @@ func encodeToml(m as Manifest) {
     $doc = tomlSetDeps($doc, "/decks", $m.decks);
     $doc = tomlSetDeps($doc, "/dev-decks", $m.devDecks);
     $doc = tomlSetDeps($doc, "/conflicts", $m.conflicts);
-    $doc = tomlSetDeps($doc, "/provides", $m.provides);
     $doc = tomlSetDeps($doc, "/sources", $m.sources);
     $doc = tomlSetDeps($doc, "/registries", $m.registries);
     return toml.encodePretty($doc);
@@ -553,7 +545,6 @@ func encodeYaml(m as Manifest) {
     $doc = yamlSetDeps($doc, "/decks", $m.decks);
     $doc = yamlSetDeps($doc, "/dev-decks", $m.devDecks);
     $doc = yamlSetDeps($doc, "/conflicts", $m.conflicts);
-    $doc = yamlSetDeps($doc, "/provides", $m.provides);
     $doc = yamlSetDeps($doc, "/sources", $m.sources);
     $doc = yamlSetDeps($doc, "/registries", $m.registries);
     return yaml.encodePretty($doc);
@@ -606,7 +597,6 @@ func encodeJson(m as Manifest) {
     $doc = jsonSetDeps($doc, "/decks", $m.decks);
     $doc = jsonSetDeps($doc, "/dev-decks", $m.devDecks);
     $doc = jsonSetDeps($doc, "/conflicts", $m.conflicts);
-    $doc = jsonSetDeps($doc, "/provides", $m.provides);
     $doc = jsonSetDeps($doc, "/sources", $m.sources);
     $doc = jsonSetDeps($doc, "/registries", $m.registries);
     return json.encodePretty($doc);
@@ -716,7 +706,7 @@ export func depListHas(deps as list of Dependency, name as string) {
 }
 
 /**
- * Return the constraint (or provided version) bound to a name in a Dependency
+ * Return the constraint bound to a name in a Dependency
  * list, or "" when the name is absent.
  * @param deps {list of Dependency} the list to inspect
  * @param name {string} the name to find
@@ -843,32 +833,6 @@ export func addDevDependency(m as Manifest, name as string, constraint as string
 export func removeDevDependency(m as Manifest, name as string) {
     def out as Manifest init $m;
     $out.devDecks = depListRemove($m.devDecks, $name);
-    return $out;
-}
-
-/**
- * Return a new manifest that provides a capability at a concrete version
- * (added or updated).
- * @param m {Manifest} the starting manifest
- * @param name {string} the capability name
- * @param version {string} the concrete version provided
- * @return {Manifest} a new manifest with the provide set
- */
-export func addProvide(m as Manifest, name as string, version as string) {
-    def out as Manifest init $m;
-    $out.provides = depListSet($m.provides, $name, $version);
-    return $out;
-}
-
-/**
- * Return a new manifest with a provided capability removed.
- * @param m {Manifest} the starting manifest
- * @param name {string} the capability name to remove
- * @return {Manifest} a new manifest without that provide
- */
-export func removeProvide(m as Manifest, name as string) {
-    def out as Manifest init $m;
-    $out.provides = depListRemove($m.provides, $name);
     return $out;
 }
 

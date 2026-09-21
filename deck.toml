@@ -48,7 +48,3 @@ jennifer = ">=0.25.0"
 # MUST be scoped (@scope/deck); bundled modules go in [engines] above and local
 # modules need no entry. jvc has no scoped-deck dependencies.
 [decks]
-
-# What this deck provides: capability = concrete version.
-[provides]
-deckmanager = "0.1.0"

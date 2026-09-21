@@ -1,10 +1,10 @@
 # Deck manifest specification
 
-- **Version:** 0.3.0 (draft)
+- **Version:** 0.4.0 (draft)
 - **Applies to:** jvc 0.1.0
 
 This is the authoritative specification of the *deck manifest* - the file that
-declares a Jennifer deck's identity, requirements, and what it provides - and of
+declares a Jennifer deck's identity and its requirements - and of
 how a deck is named, delivered, and installed. [docs/manifest.md](manifest.md)
 is the friendly guide; this document is the normative reference. The key words
 **MUST**, **SHOULD**, and **MAY** are used in the RFC 2119 sense.
@@ -21,12 +21,14 @@ is the friendly guide; this document is the normative reference. The key words
 > stale once before and cost a release's worth of debugging.
 
 **Versioning.** The **minor** position advances whenever this document's
-normative content changes; the patch position is for corrections that change no
-requirement. **The format stabilises with the tool**: this document reaches
-1.0.0 when jvc carries a stable `1.0.0` tag, and not before, because a
-specification cannot promise more stability than the thing that implements it.
-This is the same rule the registry project's server and client specifications
-follow, so all three read alike.
+normative content changes; the patch position is for corrections that change
+no requirement. **A version tracks a committed change, not an edit**:
+everything that lands together carries one number, however many passes it took
+to write. **The format stabilises with the tool**: this document reaches 1.0.0
+when jvc carries a stable `1.0.0` tag, and not before, because a specification
+cannot promise more stability than the thing that implements it. This is the
+same rule the registry project's server and client specifications follow, so
+all three read alike.
 
 The reference implementation is `src/manifest.j` (read/write), `src/deckname.j`
 (names), `src/cli.j` (install), `src/resolver.j` (resolution over a
@@ -74,7 +76,7 @@ field as empty (§12). That tolerance is about parsing, not completeness: a
 non-empty `name`, a valid `version`, and a `urls.deck` (§4). So "optional" here
 means only "the parser will not reject a document that omits it", **not** "a real
 deck may leave it out". The dependency sections (`[decks]`, `[dev-decks]`,
-`[conflicts]`, `[provides]`, `[engines]`, `[sources]`) are genuinely optional -
+`[conflicts]`, `[engines]`, `[sources]`) are genuinely optional -
 an absent one just means the deck has none.
 
 | Section       | TOML          | JSON key      | Meaning                              |
@@ -84,12 +86,11 @@ an absent one just means the deck has none.
 | requirements  | `[decks]`     | `"decks"`     | runtime dependencies                 |
 | dev reqs      | `[dev-decks]` | `"dev-decks"` | development-only dependencies        |
 | conflicts     | `[conflicts]` | `"conflicts"` | decks this deck cannot coexist with  |
-| provides      | `[provides]`  | `"provides"`  | capabilities this deck offers        |
 | sources       | `[sources]`   | `"sources"`   | per-deck source overrides (§6.1)     |
 | registries    | `[registries]` | `"registries"` | which registry a scope resolves at (§6.2) |
 
 YAML uses the same top-level keys as JSON (`package:`, `engines:`, `decks:`,
-`dev-decks:`, `conflicts:`, `provides:`, `sources:`, `registries:`).
+`dev-decks:`, `conflicts:`, `sources:`, `registries:`).
 
 ## 4. The `[package]` section
 
@@ -296,16 +297,12 @@ running. A deck using them **MUST NOT** list `jennifer-tiny`. The failure mode
 without it is late rather than silent, which is tolerable, but it is a failure
 at first call rather than at install.
 
-## 6. The `[provides]` section
+## 6. Further tables
 
-A table whose **keys are capability names** and whose **values are concrete
-versions** (string, valid SemVer - not a constraint). It declares that this deck
-supplies an implementation of a named capability at a given version.
-
-```toml
-[provides]
-deckmanager = "0.1.0"
-```
+Three tables that are neither package metadata (§4) nor requirements (§5):
+`[sources]` says where an individual deck's code comes from when it is not the
+repository, `[registries]` says which repository a scope resolves at, and
+`[provides]` is a reserved key that no longer has a meaning.
 
 ### 6.1 The `[sources]` section
 
@@ -359,6 +356,51 @@ new mapping shadows an already-locked scope, are normative in the
 section 2. This section defines the file; that one defines the behaviour, and
 the lockfile's side of it is in §11.
 
+### 6.3 `[provides]` is reserved and unspecified
+
+Earlier drafts defined a `[provides]` table mapping a bare capability name to a
+concrete version, for the "one interface, several implementations" pattern. It
+was **removed in 0.4.0** because it was never finished: nothing resolved
+against it, nothing transmitted it on publish, no registry stored it and no
+lockfile recorded it, so a declaration could not be observed by any consumer
+even in principle. A table that looks load-bearing and changes nothing is worse
+than either having it or not having it.
+
+The key stays **reserved**. Parsing is lenient (§12), so a manifest still
+carrying the table keeps parsing and the table is ignored. A tool that rewrites
+a manifest from its parsed model drops the table at that point, so the
+migration happens by itself and nothing has to be edited by hand.
+
+Specifying it later means answering four questions first, and each changes the
+resolver, so none of it is an implementation detail:
+
+1. **How is a capability required?** There is no syntax for it today: a
+   `[decks]` key **MUST** be scoped (§5) and a capability name is bare (§7), so
+   the two namespaces cannot meet. Either a new table, or a relaxation of the
+   scoped-key rule plus a rule for bare keys colliding with bundled module
+   names (`ansi`, `semver`).
+2. **Is a capability exclusive within one resolution?** Exclusive (Debian
+   `Provides:` with a conflict, Cargo `links`) makes it an interface a consumer
+   can rely on; non-exclusive makes it a tag that says nothing about which
+   implementation was got. A *concrete version* rather than a constraint is
+   what you declare when you are the one implementation, which argues for
+   exclusive.
+3. **Does providing a capability satisfy a direct requirement on the providing
+   deck, and the reverse?** A graph requiring both must not double-count.
+4. **What is transmitted and recorded?** A publish spec, a registry field, a
+   `/resolve-graph` field, and a lockfile column, since a consumer resolves
+   locally.
+
+There is a naming problem to settle too: `[package] capabilities` (§4.2)
+already means the host capabilities `net` / `exec` / `sql`, which the
+interpreter enforces and which the registry and the lockfile carry. Two
+unrelated things called "capability" in one manifest is its own defect.
+
+Above all, a virtual package only works where the name implies a **contract**,
+and Jennifer has no way to state one: a deck's surface is whatever
+`src/<deck>.j` exports. Whatever is specified here has to say what a consumer
+may assume of an arbitrary provider.
+
 ## 7. Deck and capability names
 
 A module name has one of two forms, and the form decides who owns it:
@@ -378,8 +420,8 @@ A module name has one of two forms, and the form decides who owns it:
 Consequently a **published deck name** and every **`[decks]` / `[dev-decks]`
 entry MUST be scoped**; a bare name never names a registry dependency (require a
 bundled module via `[engines]`, and a local module needs no entry). Capability
-names (`[provides]`) and engine names (`[engines]`) follow the bare rule - they
-are not registry decks. A **scope** must be registered in the registry before a
+Engine names (`[engines]`) follow the bare rule - they are not registry
+decks. A **scope** must be registered in the registry before a
 scoped deck may be published under it (§10.3). Tools **SHOULD** validate names on
 publish; the manifest parser accepts the key verbatim. The reference
 implementation is `src/deckname.j`.
@@ -388,7 +430,7 @@ implementation is `src/deckname.j`.
 
 A concrete version is a **Semantic Versioning 2.0.0** string
 (`major.minor.patch` with optional `-prerelease` and `+build`), as parsed by the
-`semver` module. `[package].version` and every `[provides]` value **MUST** be
+`semver` module. `[package].version` **MUST** be
 valid SemVer.
 
 ## 9. Version constraints
@@ -658,9 +700,8 @@ mechanism that belongs to no package manager.
   or section takes its default. A parse fails only on malformed TOML/YAML/JSON or
   a field of the wrong scalar type (e.g. a non-string dependency value).
 - A tool that **publishes** a deck **SHOULD** additionally enforce: a non-empty
-  `name` matching §7, a valid SemVer `version`, and valid SemVer `[provides]`
-  values. jvc enforces valid SemVer for `provide` values and rejects an invalid
-  deck name and an unregistered scope on publish.
+  `name` matching §7 and a valid SemVer `version`. jvc rejects an invalid deck
+  name and an unregistered scope on publish.
 - On publish, the deck's `[decks]` and `[engines]` are recorded with the version
   in the registry (as `requires` and `engines`, §10). `jvc publish` derives both
   from the manifest; the low-level `deckadmin add` accepts them as `--requires`
@@ -695,9 +736,6 @@ jennifer = "^0.21.0"
 
 [conflicts]
 "@old/jvc" = "<1.0.0"
-
-[provides]
-deckmanager = "0.1.0"
 ```
 
 ### JSON (`deck.json`)
@@ -720,8 +758,7 @@ deckmanager = "0.1.0"
   "engines": { "jennifer": "^0.21.0" },
   "decks": { "@jennifer/routeros": "^0.1.0" },
   "dev-decks": { "@acme/testkit": "^1.0.0" },
-  "conflicts": { "@old/jvc": "<1.0.0" },
-  "provides": { "deckmanager": "0.1.0" }
+  "conflicts": { "@old/jvc": "<1.0.0" }
 }
 ```
 
@@ -747,8 +784,6 @@ dev-decks:
   "@acme/testkit": "^1.0.0"
 conflicts:
   "@old/jvc": "<1.0.0"
-provides:
-  deckmanager: "0.1.0"
 ```
 
 All three documents are equivalent and round-trip through jvc unchanged.

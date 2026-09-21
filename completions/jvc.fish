@@ -213,7 +213,6 @@ complete -c jvc -n __jvc_needs_verb -a add -d 'add a requirement'
 complete -c jvc -n __jvc_needs_verb -a remove -d 'remove a requirement'
 complete -c jvc -n __jvc_needs_verb -a list -d 'show the manifest'
 complete -c jvc -n __jvc_needs_verb -a check -d 'verify this interpreter can run the deck'
-complete -c jvc -n __jvc_needs_verb -a provide -d 'declare a provided capability'
 complete -c jvc -n __jvc_needs_verb -a conflict -d 'declare a conflict with a deck'
 complete -c jvc -n __jvc_needs_verb -a engine -d 'require a Jennifer engine version'
 complete -c jvc -n __jvc_needs_verb -a source -d 'resolve a deck from git'
@@ -285,7 +284,7 @@ complete -c jvc -n '__jvc_verb_is engine; and __jvc_at_arg 2' \
     -a 'jennifer jennifer-tiny' -d engine
 complete -c jvc -n '__jvc_verb_is yank unyank; and __jvc_at_arg 2' \
     -a '(__jvc_self)' -d 'this deck'
-complete -c jvc -n '__jvc_verb_is help' -a 'init add remove list check provide conflict
+complete -c jvc -n '__jvc_verb_is help' -a 'init add remove list check conflict
     engine source query install update new publish pack app registry yank unyank whoami
     scopes claim owners login logout version'
 

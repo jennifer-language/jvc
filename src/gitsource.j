@@ -117,6 +117,13 @@ export func ensureMirror(root as string, url as string) {
  * Select the tags that name a version, in the order git listed them. A tag that
  * is not valid SemVer once its `v` prefix is dropped is skipped rather than
  * rejected, so release tags may share a repository with any other tags.
+ *
+ * **A prerelease tag is kept on purpose.** It looks like something to filter
+ * here, and filtering it would be wrong: a prerelease is excluded at *match*
+ * time by `constraint.satisfies` (server specification 2.4), which is what
+ * stops `*` and the comparators selecting it. Dropping it here instead would
+ * also break the opt-in, since `=0.2.0-dev` could then never resolve against a
+ * git source.
  * @param tags {list of string} every tag in the repository
  * @return {list of string} the version tags
  */

@@ -4,7 +4,7 @@
 
 /**
  * The jvc command-line logic: the verbs that read and edit a deck
- * manifest (`init` / `add` / `remove` / `list` / `provide`) and the verbs that
+ * manifest (`init` / `add` / `remove` / `list`) and the verbs that
  * talk to a deck repository (`query` / `install`). Each verb is a `run*`
  * function returning an `Outcome` (an ok flag plus a message to print), so the
  * filesystem verbs are unit-testable against a temp directory and the entry
@@ -1829,7 +1829,7 @@ func urlsSection(urls as map of string to string) {
 
 /**
  * Summarize dir's manifest: the package line plus the urls, requirements,
- * dev-requirements, conflicts, and provides.
+ * dev-requirements, and conflicts.
  * @param dir {string} the directory holding the manifest
  * @return {Outcome} the summary to print
  */
@@ -1852,40 +1852,10 @@ export func runList(dir as string) {
     $body = $body + section("requirements", $m.decks);
     $body = $body + section("dev-requirements", $m.devDecks);
     $body = $body + section("conflicts", $m.conflicts);
-    $body = $body + section("provides", $m.provides);
     if (len($m.sources) > 0) {
         $body = $body + section("sources", $m.sources);
     }
     return ok($head + $body);
-}
-
-/**
- * Declare that dir's deck provides a capability at a concrete version. The
- * version must be valid SemVer.
- * @param dir {string} the directory holding the manifest
- * @param name {string} the capability name
- * @param version {string} the concrete version provided (SemVer)
- * @return {Outcome} the result to print
- */
-export func runProvide(dir as string, name as string, version as string) {
-    if ($name == "" or $version == "") {
-        return fail("usage: jvc provide <capability> <version>");
-    }
-    if (not semver.isValid($version)) {
-        return fail("not a valid version: " + $version);
-    }
-    def loc as Located init locate($dir);
-    if (not ($loc.error == "")) {
-        return fail($loc.error);
-    }
-    if ($loc.path == "") {
-        return noManifest($dir);
-    }
-    def path as string init $loc.path;
-    def m as manifest.Manifest init manifest.load($path);
-    $m = manifest.addProvide($m, $name, $version);
-    manifest.save($m, $path);
-    return ok("now providing " + $name + " " + $version);
 }
 
 /**
@@ -3910,7 +3880,6 @@ func helpText() {
         "  remove <deck>               remove a requirement (--dev for dev)\n" +
         "  list                        show the manifest\n" +
         "  check                       verify this interpreter can run the deck\n" +
-        "  provide <cap> <version>     declare a provided capability\n" +
         "  conflict <deck> [range]     declare a conflict with a deck\n" +
         "  engine [name] [range]       require a Jennifer engine version\n" +
         "  source <deck> [git-url]     resolve a deck from git (no url: from the repository)\n" +
@@ -3980,9 +3949,6 @@ export func dispatch(args as list of string) {
     }
     if ($command == "check") {
         return runCheck(".");
-    }
-    if ($command == "provide") {
-        return runProvide(".", posAt($pos, 0), posAt($pos, 1));
     }
     if ($command == "conflict") {
         return runConflict(".", posAt($pos, 0), posAt($pos, 1));
