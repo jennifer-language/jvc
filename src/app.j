@@ -538,7 +538,8 @@ export func pickRef(mirror as string, spec as string) {
     }
     def best as string init constraint.best($versions, $spec);
     if ($best == "") {
-        return pickFailed("no released version satisfies " + $spec);
+        return pickFailed("no released version satisfies " + $spec +
+                constraint.prereleaseHint($versions));
     }
     for (def tag in $tags) {
         if (git.versionOfTag($tag) == $best) {
@@ -551,7 +552,8 @@ export func pickRef(mirror as string, spec as string) {
                 error: "" };
         }
     }
-    return pickFailed("no released version satisfies " + $spec);
+    return pickFailed("no released version satisfies " + $spec +
+                constraint.prereleaseHint($versions));
 }
 
 # --- installing -------------------------------------------------------------

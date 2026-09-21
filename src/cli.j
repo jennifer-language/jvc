@@ -368,7 +368,8 @@ func pickApp(found as list of catalog.Candidate, name as string, spec as string,
     def best as string init constraint.best($versions, $want);
     if ($best == "") {
         return AppSource{ url: "", version: "",
-            error: "no version of " + $name + " at " + $from + " satisfies " + $want };
+            error: "no version of " + $name + " at " + $from + " satisfies " +
+                $want + constraint.prereleaseHint($versions) };
     }
     for (def c in $found) {
         if ($c.version == $best) {

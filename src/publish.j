@@ -297,6 +297,25 @@ func writePlanJson(outDir as string, name as string, version as string,
  * @param now {string} the publish timestamp (Unix seconds as text)
  * @return {Result} the outcome
  */
+# prereleaseNote warns an author that an unreleased version will not be picked
+# up. Publishing a beta is legitimate and is not blocked: it is stored like any
+# other version, and a consumer reaches it by naming it. What is worth saying
+# is that no ordinary constraint will, because the alternative is an author
+# tagging `0.2.0-rc.1`, publishing it, and concluding the registry is broken
+# when `jvc update` does not move.
+func prereleaseNote(version as string) {
+    if (not semver.isValid($version)) {
+        return "";
+    }
+    if (not semver.isPrerelease(semver.parse($version))) {
+        return "";
+    }
+    return "\n  note:     " + $version + " is a prerelease, so no `*`, `^`, " +
+        "`~` or plain comparator will select it;\n" +
+        "            a consumer opts in with a constraint that names it, " +
+        "such as \"=" + $version + "\"";
+}
+
 export func check(dir as string, runChecks as bool) {
     def manifestPath as string init manifest.findManifest($dir);
     if ($manifestPath == "") {
@@ -310,8 +329,8 @@ export func check(dir as string, runChecks as bool) {
     # The ecosystem quality gate. A deck that cannot pass its own lint, tests,
     # and docblock checks does not get published.
     if (not $runChecks) {
-        return Result{ ok: true, message: "\n  checks:   SKIPPED (--no-verify)",
-            operatorCommand: "" };
+        return Result{ ok: true, message: "\n  checks:   SKIPPED (--no-verify)" +
+            prereleaseNote($m.pkg.version), operatorCommand: "" };
     }
     def report as verify.Report init verify.verify($dir);
     if (not $report.ok) {
@@ -320,7 +339,8 @@ export func check(dir as string, runChecks as bool) {
             "\n\nfix these, or pass --no-verify to publish anyway");
     }
     return Result{ ok: true,
-        message: "\n  checks:   passed" + verify.reportText($report),
+        message: "\n  checks:   passed" + verify.reportText($report) +
+            prereleaseNote($m.pkg.version),
         operatorCommand: "" };
 }
 

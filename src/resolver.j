@@ -205,7 +205,8 @@ export func resolveGraph(cat as catalog.Catalog, roots as map of string to strin
             def pick as string init bestSatisfyingAll($open, $cons[$name]);
             if ($pick == "") {
                 return failed("no version of " + $name + " satisfies " +
-                    joinConstraints($cons[$name]));
+                    joinConstraints($cons[$name]) +
+                    constraint.prereleaseHint($open));
             }
             $next[$name] = $pick;
         }
