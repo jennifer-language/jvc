@@ -420,6 +420,7 @@ export def struct Source {
  * @param version {string} the manifest version, for the fallback tag
  * @param repoFlag {string} `--repository`, or "" to read `origin`
  * @param tagFlag {string} `--tag`, or "" to look for the version's tag
+ * @param remote {string} `--remote`, or "" to read `origin`
  * @return {Source} the resolved source, or why it could not be
  */
 export func publishSource(dir as string, version as string, repoFlag as string,
@@ -2750,11 +2751,10 @@ func fetchInto(mapper as Mapper, sources as list of manifest.Dependency,
  * `seed` is the catalog to start from. Pass `catalog.empty()` in production; a
  * pre-filled catalog resolves without touching the network or git, which is how
  * the tests exercise this offline.
- * @param client {registry.Client} the repository client
+ * @param mapper {Mapper} which repository each scope resolves at
  * @param seed {catalog.Catalog} the candidates already known
  * @param roots {map of string to string} the root requirements (name -> constraint)
  * @param sources {list of manifest.Dependency} the `[sources]` table (deck -> git URL)
- * @param basePath {string} the negotiated registry API base path
  * @return {Resolved} the locked set, or the reason it could not be resolved
  */
 export func resolveRoots(mapper as Mapper, seed as catalog.Catalog,
@@ -2785,15 +2785,6 @@ export func resolveRoots(mapper as Mapper, seed as catalog.Catalog,
     return resolveFailed("dependency resolution did not converge");
 }
 
-/**
- * Resolve every requirement in dir's manifest, write a lockfile, and vendor each
- * resolved deck. With dev = true the dev-requirements are installed too. A
- * network call.
- * @param dir {string} the directory holding the manifest
- * @param baseUrl {string} the repository base URL
- * @param includeDev {bool} also install the dev-requirements
- * @return {Outcome} a report of what was installed, or a failure
- */
 # binDirOf returns the directory a project's vendored commands are written to:
 # the manifest's `[package] bin-dir`, else `bin`. Composer writes to
 # `vendor/bin`; a project-owned `bin/` matches the Symfony `bin/console` shape
@@ -2900,6 +2891,7 @@ func applySet(dir as string, m as manifest.Manifest,
  * @param dir {string} the directory holding the manifest
  * @param baseUrl {string} the repository base URL
  * @param includeDev {bool} also install the dev-requirements
+ * @param runTests {bool} also run each installed deck's own overlays here
  * @return {Outcome} a report of what was installed, or a failure
  */
 export func runInstall(dir as string, baseUrl as string, includeDev as bool,
@@ -2984,6 +2976,7 @@ func resolveAndApply(dir as string, m as manifest.Manifest,
  * @param baseUrl {string} the repository base URL
  * @param includeDev {bool} also update the dev-requirements
  * @param only {list of string} the decks to advance ("" = all of them)
+ * @param runTests {bool} also run each installed deck's own overlays here
  * @return {Outcome} a report of what moved, or a failure
  */
 export func runUpdate(dir as string, baseUrl as string, includeDev as bool,
@@ -3522,13 +3515,18 @@ export func runApp(args as list of string, pos as list of string) {
 }
 
 /**
- * Package the deck in dir and register (or prepare) a release. With a non-empty
- * dbPath the version is registered directly into that registry document;
- * otherwise the tarball and the `deckadmin add` command to run are produced.
+ * Run the quality gate over the deck in dir, then publish it to a repository
+ * by naming the repository and the tag it should read.
+ *
+ * Nothing is uploaded: the registry reads `deck.toml` from that commit itself
+ * and resolves the tag to the commit that becomes the pin. `jvc pack` is the
+ * path for a repository that accepts no publishes.
  * @param dir {string} the deck directory (holds deck.toml + src/)
- * @param url {string} the artifact URL the registry fetches from
- * @param outDir {string} where to write the tarball / plan
  * @param runChecks {bool} run the quality gate (false only for --no-verify)
+ * @param base {string} the repository base URL
+ * @param repoFlag {string} `--repository`, or "" to read the git remote
+ * @param tagFlag {string} `--tag`, or "" to look for the version's tag
+ * @param remote {string} `--remote`, or "" to read `origin`
  * @return {Outcome} the result to print
  */
 export func runPublish(dir as string, runChecks as bool, base as string,
@@ -3832,6 +3830,39 @@ func selfPath(argv0 as string) {
 }
 
 /**
+ * Name how the running copy of jvc got onto this machine, from where it lives.
+ *
+ * `jvc version` prints the path already, but a path only answers the question
+ * for somebody who knows the layouts. Which copy runs is decided by `PATH`
+ * order and nothing announces it, so "why did my upgrade not take effect" is
+ * the common question and this is the line that answers it.
+ *
+ * A copy the OCI image baked in is deliberately indistinguishable from a
+ * packaged one: the image adopted the package layout (`/usr/share/jvc` with a
+ * symlink on `PATH`) precisely so that installing the `.deb` there later
+ * changes nothing, and two names for one layout would be a distinction this
+ * function cannot honestly draw.
+ * @param running {string} the resolved path of the running launcher
+ * @param store {string} the app store this user installs into
+ * @return {string} a short label for the `installed:` line, or "" when unknown
+ */
+export func channelOf(running as string, store as string) {
+    if ($running == "") {
+        return "";
+    }
+    if (not ($store == "") and strings.startsWith($running, $store)) {
+        return "jvc app install";
+    }
+    if (isOsManaged($running)) {
+        return "system package manager";
+    }
+    if (strings.startsWith($running, "/usr/local/")) {
+        return "/usr/local (locally administered, not packaged)";
+    }
+    return "working tree or unpacked tarball";
+}
+
+/**
  * Report jvc's version, where this copy of it lives, and which interpreter is
  * running it.
  *
@@ -3849,8 +3880,12 @@ export func runVersion(argv0 as string) {
     if (not ($running == "")) {
         $out = $out + "\n  running:     " + $running;
     }
-    $out = $out + "\n  interpreter: " + runningEngine() + " " + meta.VERSION;
     def loc as app.Locations init app.locations("", ".");
+    def channel as string init channelOf($running, $loc.store);
+    if (not ($channel == "")) {
+        $out = $out + "\n  installed:   " + $channel;
+    }
+    $out = $out + "\n  interpreter: " + runningEngine() + " " + meta.VERSION;
     def record as app.Record init app.recordOf($loc, "jvc");
     if ($record.name == "") {
         return ok($out);

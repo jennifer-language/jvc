@@ -79,11 +79,17 @@ func testModulesOfADeckWithoutSrc() {
     fs.removeAll($dir);
 }
 
+# The variable is restored, not blanked. Tests in one overlay share a process,
+# so leaving it empty sends every later test that shells out looking for
+# `jennifer` on PATH; that works on a developer's machine and fails on a runner
+# that built the interpreter somewhere else.
 func testInterpreterHonoursTheOverride() {
+    def previous as string init os.getEnv("JVC_JENNIFER");
     os.setEnv("JVC_JENNIFER", "/opt/jennifer");
     testing.assertEqual(interpreter(), "/opt/jennifer");
     os.setEnv("JVC_JENNIFER", "");
     testing.assertEqual(interpreter(), "jennifer");
+    os.setEnv("JVC_JENNIFER", $previous);
 }
 
 # --- docblock drift ---------------------------------------------------------

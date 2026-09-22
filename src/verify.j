@@ -22,12 +22,9 @@
  *     any `warning` or `error` diagnostic blocks the release. This catches doc
  *     drift, such as an `@param` for a parameter that no longer exists.
  *
- * **`jennifer fmt` is deliberately not in the gate.** It joins a `func`
- * signature up to 102 columns while `lint` rejects anything over 100, because it
- * does not count the trailing ` {`. A signature landing on 101 or 102 columns is
- * therefore unformattable: fmt joins it, lint flags it, and hand-wrapping is
- * undone by the next fmt run. Gating on fmt would make such decks unpublishable.
- * Reported to the language team; add it here once it is resolved.
+ * **`jennifer fmt` is not in the gate.** The gate asks whether a deck is
+ * correct; formatting is not. The one formatting rule that bears on
+ * correctness, line width, is a lint rule already.
  * @module verify
  * @example
  * import "./verify.j" as verify;

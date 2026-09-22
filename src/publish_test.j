@@ -203,3 +203,87 @@ func testEnginesSpecOf() {
     $m = manifest.addEngine($m, "jennifer-tiny", "^0.5.0");
     testing.assertEqual(enginesSpecOf($m), "jennifer ^0.21.0, jennifer-tiny ^0.5.0");
 }
+
+# --- claiming jennifer-tiny a deck's code contradicts ------------------------
+
+func testUsesOfReadsDeclarations() {
+    def src as string init "use os;\nuse strings;\n\nexport def const X as int init 1;\n";
+    def found as list of string init usesOf($src);
+    testing.assertEqual(len($found), 2);
+    testing.assertEqual($found[0], "os");
+    testing.assertEqual($found[1], "strings");
+}
+
+# A docblock line mentioning one begins with its own ` * `, so it does not
+# match once trimmed. Without that, documenting the rule would trip it.
+func testUsesOfIgnoresADocblockMention() {
+    def src as string init "/**\n * Needs `use gpio;` on the default build.\n */\nuse os;\n";
+    def found as list of string init usesOf($src);
+    testing.assertEqual(len($found), 1);
+    testing.assertEqual($found[0], "os");
+}
+
+func testUsesOfIgnoresWhatIsNotADeclaration() {
+    testing.assertEqual(len(usesOf("used = 1;\nusefully();\nuse os\n")), 0);
+}
+
+# tinyDeck writes a deck whose code declares `use <lib>;` and whose [engines]
+# optionally claims the tiny build can run it.
+func tinyDeck(tag as string, lib as string, claimsTiny as bool) {
+    def dir as string init os.tempDir() + "/jvc_tiny_" + $tag;
+    fs.removeAll($dir);
+    fs.mkdirAll($dir + "/src");
+    def m as manifest.Manifest init manifest.empty("@acme/blinker", "1.0.0");
+    $m = manifest.setUrl($m, "deck", "https://reg/blinker");
+    $m = manifest.addEngine($m, "jennifer", ">=0.20.0");
+    if ($claimsTiny) {
+        $m = manifest.addEngine($m, "jennifer-tiny", ">=0.5.0");
+    }
+    manifest.save($m, $dir + "/deck.toml");
+    fs.writeString($dir + "/src/blinker.j",
+        "use " + $lib + ";\nexport def const X as int init 1;\n");
+    return $dir;
+}
+
+func testADeckClaimingTinyWhileUsingGpioIsRefused() {
+    def dir as string init tinyDeck("gpio", "gpio", true);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    def problem as string init tinyProblem($m, $dir);
+    testing.assertContains($problem, "jennifer-tiny");
+    testing.assertContains($problem, "use gpio;");
+    fs.removeAll($dir);
+}
+
+# The same code is fine when the manifest does not claim tiny, which is the
+# whole point: the defect is the claim, not the dependency.
+func testTheSameDeckIsFineWithoutTheClaim() {
+    def dir as string init tinyDeck("noclaim", "gpio", false);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    testing.assertEqual(tinyProblem($m, $dir), "");
+    fs.removeAll($dir);
+}
+
+func testClaimingTinyWithOrdinaryLibrariesIsFine() {
+    def dir as string init tinyDeck("ordinary", "strings", true);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    testing.assertEqual(tinyProblem($m, $dir), "");
+    fs.removeAll($dir);
+}
+
+# `crypto` is left out on purpose: the library is not default-only as a whole,
+# only its RSA and ECDSA entry points are, and a `use` cannot tell them apart.
+func testCryptoIsNotTreatedAsDefaultOnly() {
+    def dir as string init tinyDeck("crypto", "crypto", true);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    testing.assertEqual(tinyProblem($m, $dir), "");
+    fs.removeAll($dir);
+}
+
+func testEveryDefaultOnlyLibraryIsCaught() {
+    for (def lib in DEFAULT_ONLY) {
+        def dir as string init tinyDeck("each_" + $lib, $lib, true);
+        def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+        testing.assertContains(tinyProblem($m, $dir), $lib);
+        fs.removeAll($dir);
+    }
+}

@@ -1,0 +1,199 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+#
+# Tag-triggered release. Publishes three artifacts to GitHub Releases:
+#
+#   jvc-<version>.tar.gz          the runtime tree, unpack and run
+#   jvc_<version>_all.deb         Debian / Ubuntu
+#   jvc-<version>-1-any.pkg.tar.zst   Arch
+#
+# jvc is architecture-independent Jennifer source, so there is no build
+# matrix: one tarball and one package of each kind serve every platform
+# the interpreter runs on. The Arch package is assembled from the same
+# tarball the release ships, so the three artifacts cannot disagree about
+# their contents.
+#
+# The test suite runs first and a red suite blocks the release.
+
+name: release
+
+on:
+  push:
+    tags:
+      # Bare-version tags like `0.1.0` (no `v` prefix), matching the
+      # interpreter's convention and jvc's own SemVer validation, which
+      # rejects a leading `v`.
+      - '[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    name: Test before releasing
+    uses: ./.github/workflows/test.yml
+
+  linux:
+    name: Tarball and .deb
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Build the tarball and the .deb
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME}"
+          # Timestamp every archive member with the tagged commit's own
+          # date, so rebuilding the tag reproduces the same bytes and the
+          # published checksum stays meaningful.
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$GITHUB_REF_NAME")"
+          export SOURCE_DATE_EPOCH
+          scripts/build-tarball.sh "$version" release
+          scripts/build-deb.sh "$version" release
+          ls -l release
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: release/
+          if-no-files-found: error
+
+  arch:
+    name: Arch package
+    needs: linux
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      # base-devel carries makepkg but not git, and actions/checkout wants
+      # it for anything but a REST download.
+      - name: Install git
+        run: pacman -Sy --noconfirm --needed git
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Fetch the tarball built upstream of this job
+        uses: actions/download-artifact@v8
+        with:
+          name: linux
+          path: release
+
+      - name: Build the package
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME}"
+          sum="$(sha256sum "release/jvc-$version.tar.gz" | cut -d' ' -f1)"
+
+          mkdir -p build
+          # Stamp the tag and the real checksum into the PKGBUILD. The
+          # result is published as a release asset so an AUR maintainer
+          # (and `publish.sh`) can take a ready-to-commit file rather than
+          # rerunning updpkgsums by hand.
+          sed -e "s/^pkgver=.*/pkgver=$version/" \
+              -e "s/^sha256sums=.*/sha256sums=('$sum')/" \
+              packaging/archlinux/PKGBUILD > build/PKGBUILD
+          # makepkg finds the source in the build directory and skips the
+          # download, which is what lets this job package the exact bytes
+          # the release ships rather than fetching a copy that does not
+          # exist yet.
+          cp "release/jvc-$version.tar.gz" build/
+
+          # makepkg refuses to run as root, and the container is root.
+          useradd -m builder
+          chown -R builder build
+          # --nodeps because the dependency (`jennifer`) is not in any Arch
+          # repository yet, and --nocheck because the release tarball
+          # deliberately excludes the test overlays: the suite already ran
+          # in the gate job, against a real interpreter.
+          sudo -u builder bash -c "cd '$GITHUB_WORKSPACE/build' && makepkg --nodeps --nocheck"
+
+          mkdir -p out
+          cp build/*.pkg.tar.zst out/
+          cp build/PKGBUILD out/PKGBUILD
+          (cd out && for f in *.pkg.tar.zst; do sha256sum "$f" > "$f.sha256"; done)
+          ls -l out
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: arch
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: [linux, arch]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect the artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Decide whether this is a pre-release
+        id: prerel
+        run: |
+          case "${GITHUB_REF_NAME}" in
+              0.*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
+              *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Write the release notes
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME}"
+          cat > release_notes.md <<EOF
+          jvc $version, the deck manager for the Jennifer programming language.
+
+          jvc needs the \`jennifer\` interpreter; every package declares the
+          floor its \`[engines]\` table sets, and the interpreter enforces the
+          same floor at read time.
+
+          ### Install
+
+          Debian / Ubuntu:
+
+          \`\`\`sh
+          sudo apt install ./jvc_${version}_all.deb
+          \`\`\`
+
+          Arch:
+
+          \`\`\`sh
+          sudo pacman -U jvc-${version}-1-any.pkg.tar.zst
+          \`\`\`
+
+          Anywhere else, unpack and put the launcher on PATH:
+
+          \`\`\`sh
+          tar xzf jvc-${version}.tar.gz
+          ./jvc-${version}/bin/jvc version
+          \`\`\`
+
+          Every artifact ships a sidecar \`.sha256\`. The tarball is
+          reproducible: rebuilding this tag yields the same bytes.
+          EOF
+          ls -l release
+
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: false
+          # Pre-1.0.0 tags are flagged as pre-releases, matching the
+          # interpreter's pipeline and jvc's own "the format stabilises
+          # with the tool" rule.
+          prerelease: ${{ steps.prerel.outputs.prerelease }}
+          generate_release_notes: false
+          body_path: release_notes.md
+          files: |
+            release/*.tar.gz
+            release/*.deb
+            release/*.pkg.tar.zst
+            release/*.sha256
+            release/PKGBUILD

@@ -1,0 +1,36 @@
+# Grimoire book configuration for jvc's documentation.
+
+[book]
+title = "jvc - jennifer vendor console, the Jennifer deck manager"
+description = "Resolving, vendoring and publishing decks for the Jennifer programming language."
+authors = []
+authorsLabel = ""
+language = "en"
+src = "docs"
+
+[build]
+out = "public"
+
+[html]
+theme = "carbon"
+mode = "auto"
+tocDepth = 3
+sectionNumbers = false
+footer = 'Rendered with <a href="https://grimoire.jennifer-lang.dev/">Grimoire</a>.'
+repoUrl = "https://github.com/jennifer-language/jvc"
+repoLabel = "Source"
+editUrl = "https://github.com/jennifer-language/jvc/edit/main/docs/{path}"
+favicon = "favicon.ico"
+titleUrl = "/"
+
+[highlight]
+enabled = true
+
+[highlightjs]
+enabled = false
+
+[search]
+enabled = true
+
+[pdf]
+enabled = false

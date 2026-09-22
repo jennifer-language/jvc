@@ -40,11 +40,6 @@ import "./verify.j" as verify;
 import "semver.j" as semver;
 
 /**
- * The outcome of a publish: whether it succeeded and a message to print.
- * @field ok {bool} true on success
- * @field message {string} the human-readable result
- */
-/**
  * The outcome of packaging a release.
  * @field ok {bool} whether packaging and the gate succeeded
  * @field message {string} the human-facing report
@@ -214,6 +209,87 @@ export func capabilitiesOf(dir as string) {
     return $out;
 }
 
+# The libraries the default `jennifer` build carries and `jennifer-tiny` does
+# not. They are not capabilities: no pragma declares them, so the interpreter
+# cannot refuse such a deck at import the way it refuses one needing `net`, and
+# the tiny build's stub instead fails at the first *call*. That makes this the
+# only place the mistake can be caught while it is still cheap to fix.
+#
+# `crypto` is deliberately absent although its RSA and ECDSA entry points are
+# default-only too. The library as a whole is not: a deck using it for sha256
+# runs on tiny perfectly well, and a `use` declaration cannot tell the two
+# apart. Refusing on `use crypto;` would fail honest decks, so this checks the
+# five whole-library cases and leaves the partial one to the run-time stub.
+def const DEFAULT_ONLY as list of string init [
+    "term", "serial", "spi", "i2c", "gpio"
+];
+
+/**
+ * The library names a Jennifer source file declares with `use`.
+ *
+ * Line-based, which is what the language allows: a `use` is a declaration at
+ * the top level of a file, one per line. A docblock line mentioning one begins
+ * with its own ` * `, so it does not match once trimmed.
+ * @param source {string} the file's text
+ * @return {list of string} the names declared, in order, with repeats kept
+ */
+export func usesOf(source as string) {
+    def out as list of string init [];
+    for (def line in strings.split($source, "\n")) {
+        def t as string init strings.trim($line);
+        if (not strings.startsWith($t, "use ") or not strings.endsWith($t, ";")) {
+            continue;
+        }
+        def name as string init strings.trim(
+            strings.substring($t, 4, len($t) - 1));
+        if (not ($name == "")) {
+            $out[] = $name;
+        }
+    }
+    return $out;
+}
+
+/**
+ * The default-only libraries a deck's sources declare, deduplicated.
+ * @param dir {string} the deck's root directory
+ * @return {list of string} the default-only libraries in use
+ */
+export func defaultOnlyUses(dir as string) {
+    def found as list of string init [];
+    for (def st in fs.walk($dir + "/src")) {
+        if ($st.isDir or not strings.endsWith($st.path, ".j")) {
+            continue;
+        }
+        for (def name in usesOf(fs.readString($st.path))) {
+            for (def only in DEFAULT_ONLY) {
+                if ($name == $only) {
+                    $found = pragma.merge($found, [$name]);
+                }
+            }
+        }
+    }
+    return $found;
+}
+
+# tinyProblem refuses a deck that claims `jennifer-tiny` while its code needs a
+# library only the default build has. The claim is the defect: nothing later
+# enforces `[engines]`, so a consumer on tiny installs happily and finds out at
+# the first call into a stub.
+func tinyProblem(m as manifest.Manifest, dir as string) {
+    if (not manifest.depListHas($m.engines, "jennifer-tiny")) {
+        return "";
+    }
+    def used as list of string init defaultOnlyUses($dir);
+    if (len($used) == 0) {
+        return "";
+    }
+    return "[engines] lists jennifer-tiny, but src/ declares `use " +
+        strings.join($used, ";` and `use ") + ";`, which that build does not " +
+        "carry. Drop jennifer-tiny from [engines], or stop using " +
+        strings.join($used, " / ") + ". Nothing enforces [engines] after " +
+        "install, so the claim is all a consumer has to go on.";
+}
+
 # capabilityProblem compares a manifest's declared capability set against what
 # the source actually needs, returning "" when the manifest is honest. Both
 # directions matter: an undeclared capability would surprise a consumer whose
@@ -266,6 +342,10 @@ func validate(m as manifest.Manifest, dir as string) {
     if (not fs.exists($entry)) {
         return "missing entrypoint src/" + deckname.entryFile($m.pkg.name);
     }
+    def tiny as string init tinyProblem($m, $dir);
+    if (not ($tiny == "")) {
+        return $tiny;
+    }
     return capabilityProblem($m, $dir);
 }
 
@@ -283,20 +363,6 @@ func writePlanJson(outDir as string, name as string, version as string,
     return $planPath;
 }
 
-/**
- * Package and (optionally) register a deck release. Validates the deck at `dir`,
- * writes `outDir/<deck>-<version>.tar.gz`, and checksums it. With a non-empty
- * `dbPath` it registers the version directly into that registry document (via
- * the `admin` verbs, so a scoped deck still needs its namespace registered) and
- * persists it; otherwise it writes `outDir/publish.json` and returns the
- * `deckadmin add` command to run. `url` names where the tarball will be hosted
- * (required to register); `now` is the publish timestamp.
- * @param dir {string} the deck's root directory (holds deck.toml + src/)
- * @param url {string} the artifact URL the registry will fetch from
- * @param outDir {string} where to write the tarball / plan
- * @param now {string} the publish timestamp (Unix seconds as text)
- * @return {Result} the outcome
- */
 # prereleaseNote warns an author that an unreleased version will not be picked
 # up. Publishing a beta is legitimate and is not blocked: it is stored like any
 # other version, and a consumer reaches it by naming it. What is worth saying
@@ -316,6 +382,19 @@ func prereleaseNote(version as string) {
         "such as \"=" + $version + "\"";
 }
 
+/**
+ * Validate the deck at `dir` and, unless told not to, run the quality gate
+ * over it.
+ *
+ * Validation is about the manifest: a scoped name, scoped dependencies, a
+ * SemVer version, a `[package.urls] deck`, a `src/` with the entrypoint in it,
+ * an honest capability declaration, and no `jennifer-tiny` claim the code
+ * contradicts. The gate is about the code: lint, every module's overlay, and
+ * docblocks that have not drifted.
+ * @param dir {string} the deck's root directory (holds deck.toml + src/)
+ * @param runChecks {bool} run the quality gate (false only for --no-verify)
+ * @return {Result} the outcome, with the gate's report as its message
+ */
 export func check(dir as string, runChecks as bool) {
     def manifestPath as string init manifest.findManifest($dir);
     if ($manifestPath == "") {

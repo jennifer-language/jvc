@@ -31,7 +31,7 @@ bin = "bin/jvc"
 [package.urls]
 deck = "https://raw.githubusercontent.com/jennifer-language/jvc/main/deck.toml"
 homepage = "https://jennifer-lang.dev"
-manual = "https://jennifer-lang.dev"
+manual = "https://jvc.jennifer-lang.dev/"
 
 # Jennifer engines that can run this deck: engine = version range. jvc uses only
 # bundled stdlib modules (toml, yaml, json, flatdb, http, semver, web, ...), so

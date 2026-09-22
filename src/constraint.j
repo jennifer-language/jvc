@@ -244,9 +244,9 @@ export func satisfies(version as string, constraint as string) {
         return false;
     }
     def v as semver.Version init semver.parse($version);
-    # One gate for all six forms. The rule used to live inside `rangeMatch`,
-    # which only caret and tilde reach, so `*` and every comparator admitted a
-    # prerelease and `best` then preferred it over the release it precedes.
+    # One gate for all six forms: the wildcards, the four comparators, and the
+    # caret and tilde ranges. A prerelease reaching any of them without being
+    # named would outrank the release it precedes, since it sorts above it.
     if (semver.isPrerelease($v) and not prereleaseAllowed($v, $c)) {
         return false;
     }
@@ -279,13 +279,6 @@ export func satisfies(version as string, constraint as string) {
     return cmpMatch($v, $c, "=");
 }
 
-/**
- * Pick the highest version from a list that satisfies the constraint. Versions
- * that are not valid SemVer are skipped. Returns "" when none match.
- * @param versions {list of string} the candidate versions
- * @param constraint {string} the constraint expression
- * @return {string} the highest satisfying version, or "" if none match
- */
 /**
  * The newest prerelease among these versions, or `""` when none is one.
  *
@@ -342,6 +335,13 @@ export func prereleaseHint(versions as list of string) {
         "such as \"=" + $newest + "\")";
 }
 
+/**
+ * Pick the highest version from a list that satisfies the constraint. Versions
+ * that are not valid SemVer are skipped. Returns "" when none match.
+ * @param versions {list of string} the candidate versions
+ * @param constraint {string} the constraint expression
+ * @return {string} the highest satisfying version, or "" if none match
+ */
 export func best(versions as list of string, constraint as string) {
     def chosen as string init "";
     def have as bool init false;

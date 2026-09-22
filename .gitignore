@@ -21,3 +21,6 @@ camcorder.lock
 
 # Release artifacts built by scripts/build-*.sh.
 /release/
+
+# Grimoire book output.
+/public/

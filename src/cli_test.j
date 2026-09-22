@@ -1204,6 +1204,38 @@ func probeRequest() {
     return Request{ url: "http://r.example/v1/claim", body: '{"scope":"x"}' };
 }
 
+# --- which copy of jvc is running -------------------------------------------
+
+func testTheChannelOfAPackagedCopy() {
+    testing.assertEqual(channelOf("/usr/share/jvc/bin/jvc", "/home/u/.local/share/jvc/apps"),
+        "system package manager");
+    testing.assertEqual(channelOf("/opt/jvc/bin/jvc", "/home/u/.local/share/jvc/apps"),
+        "system package manager");
+}
+
+func testTheChannelOfASelfInstalledCopy() {
+    testing.assertEqual(
+        channelOf("/home/u/.local/share/jvc/apps/jvc/bin/jvc",
+            "/home/u/.local/share/jvc/apps"),
+        "jvc app install");
+}
+
+# /usr/local is where `jvc app install --scope system` puts a copy, so it is
+# neither packaged nor this user's.
+func testTheChannelOfAUsrLocalCopy() {
+    testing.assertEqual(channelOf("/usr/local/bin/jvc", "/home/u/.local/share/jvc/apps"),
+        "/usr/local (locally administered, not packaged)");
+}
+
+func testTheChannelOfACheckout() {
+    testing.assertEqual(channelOf("/home/u/src/app-jvc/bin/jvc",
+        "/home/u/.local/share/jvc/apps"), "working tree or unpacked tarball");
+}
+
+func testNoChannelWithoutAPath() {
+    testing.assertEqual(channelOf("", "/home/u/.local/share/jvc/apps"), "");
+}
+
 # --- installing jvc over a packaged jvc -------------------------------------
 
 func testAPackagedPathIsRecognisedAsOsManaged() {

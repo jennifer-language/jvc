@@ -1,6 +1,6 @@
 # Deck manifest specification
 
-- **Version:** 0.4.0 (draft)
+- **Version:** 0.4.1 (draft)
 - **Applies to:** jvc 0.1.0
 
 This is the authoritative specification of the *deck manifest* - the file that
@@ -44,8 +44,8 @@ A manifest is a single file named `deck.toml`, `deck.yaml` / `deck.yml`, or
 `deck.json`, living in a deck's root directory.
 
 - A directory **MUST** contain at most one manifest. If more than one of the four
-  filenames exists, a tool **MUST** abort with an error listing them rather than
-  choosing one.
+  filenames exists, a tool **MUST** abort with an error that lists them
+  instead of choosing one.
 - Tools discover the manifest in this order: `deck.toml`, then `deck.yaml`, then
   `deck.yml`, then `deck.json` - the first present wins (and, per the rule above,
   it **MUST** be the only one present).
@@ -160,7 +160,7 @@ This mirrors the interpreter's own read-time guard. A `.j` file may open with
 ```
 
 and a build without that capability **refuses to load the file** - including
-through a vendored `import`, so a deck needing `net` simply cannot be used under
+through a vendored `import`, so a deck needing `net` cannot run under
 `jennifer-tiny`. The pragma is authoritative; `capabilities` is how a deck
 *advertises* the same fact to tools before anything is installed.
 
@@ -233,7 +233,7 @@ runs under exactly one engine at a time, so the entries are the engines the deck
   and the interpreter compares release tags alone. The two MUST agree: a tool
   gate stricter than the interpreter's own would refuse decks the interpreter
   loads without complaint, and a development build of the next release is
-  precisely where a deck needing that release is tried first. Bypassing the
+  where a deck needing that release is tried first. Bypassing the
   range is **not** licence to bypass the allowlist: a `-dev` build of
   `jennifer-tiny` is still not `jennifer`, which is a question of which engine
   runs, not of how new it is.
@@ -294,15 +294,15 @@ That third row is why `[engines]` still matters and **MUST** be kept accurate by
 the deck's author even though nothing enforces it later: for those surfaces,
 jvc refusing the install is the only automated warning before the program is
 running. A deck using them **MUST NOT** list `jennifer-tiny`. The failure mode
-without it is late rather than silent, which is tolerable, but it is a failure
-at first call rather than at install.
+without it is late but never silent, which is tolerable; it is still a failure
+at first call instead of at install.
 
 ## 6. Further tables
 
 Three tables that are neither package metadata (§4) nor requirements (§5):
 `[sources]` says where an individual deck's code comes from when it is not the
 repository, `[registries]` says which repository a scope resolves at, and
-`[provides]` is a reserved key that no longer has a meaning.
+`[provides]` is reserved.
 
 ### 6.1 The `[sources]` section
 
@@ -356,23 +356,15 @@ new mapping shadows an already-locked scope, are normative in the
 section 2. This section defines the file; that one defines the behaviour, and
 the lockfile's side of it is in §11.
 
-### 6.3 `[provides]` is reserved and unspecified
+### 6.3 `[provides]` is reserved
 
-Earlier drafts defined a `[provides]` table mapping a bare capability name to a
-concrete version, for the "one interface, several implementations" pattern. It
-was **removed in 0.4.0** because it was never finished: nothing resolved
-against it, nothing transmitted it on publish, no registry stored it and no
-lockfile recorded it, so a declaration could not be observed by any consumer
-even in principle. A table that looks load-bearing and changes nothing is worse
-than either having it or not having it.
+The key `[provides]` is **reserved** and carries no meaning. Parsing is lenient
+(§12), which already covers it: a manifest carrying the table still parses and
+the table is ignored, and a tool that rewrites a manifest from its parsed model
+drops it.
 
-The key stays **reserved**. Parsing is lenient (§12), so a manifest still
-carrying the table keeps parsing and the table is ignored. A tool that rewrites
-a manifest from its parsed model drops the table at that point, so the
-migration happens by itself and nothing has to be edited by hand.
-
-Specifying it later means answering four questions first, and each changes the
-resolver, so none of it is an implementation detail:
+It is held for the "one interface, several implementations" pattern. Giving it
+a meaning means answering four questions first, and each changes the resolver:
 
 1. **How is a capability required?** There is no syntax for it today: a
    `[decks]` key **MUST** be scoped (§5) and a capability name is bare (§7), so
@@ -470,9 +462,8 @@ Every registry deck is a scoped `@scope/deck` deck (§7) delivered as a
 `kind` is `tar.gz` for every registry deck; `/resolve` returns it. A deck named
 in `[sources]` (§6.1) is `git` instead and never appears in the registry at all
 (§10.5). Both kinds install identically, through the `src/`-only vendor path.
-(The single-`.j` `file` kind - a bare deck installed to `decks/<name>.j` - has
-been **retired**: bare names are engine-bundled or local modules, not registry
-decks, §7.) A `tar.gz` version's `checksum`, when present, is `sha256:<hex>`; jvc
+(There is no single-`.j` `file` kind: a bare name is an engine-bundled or a
+local module, not a registry deck, §7.) A `tar.gz` version's `checksum`, when present, is `sha256:<hex>`; jvc
 **MUST** verify it against the fetched bytes before installing (§10.2). A `git`
 deck is pinned by its commit instead and carries no checksum.
 
@@ -551,7 +542,7 @@ contributes its own recorded `requires` (§10), and those dependencies are
 resolved in turn.
 
 **The rules a resolution must satisfy are specified elsewhere.** Unification
-across a diamond, one version per deck, terminating rather than recursing on a
+across a diamond, one version per deck, terminating instead of recursing on a
 cycle, a yanked version being skipped in a fresh resolution but still installing
 from a lockfile, and every name in the graph resolving through the consuming
 project's mapping, are normative in the
@@ -587,7 +578,7 @@ vendor tree (§10.1); only where its metadata and artifact come from differs.
   graph **MAY** mix git-sourced and registry decks in any combination.
 - **The tag and its manifest MUST agree.** If a tag's `deck.toml` declares a
   different `version`, or a different `name` than the `[sources]` key, resolution
-  **MUST** fail rather than lock a version the vendored code contradicts.
+  **MUST** fail instead of locking a version the vendored code contradicts.
 - **The pin is the commit.** A git candidate carries no artifact checksum; it
   records the resolved `ref` and the `commit` that ref pointed at (§11). Install
   **MUST** archive the **commit**, not the ref, so a tag moved after resolution
@@ -819,9 +810,9 @@ registry's contents can be relied on:
 A tool **MAY** offer an explicit bypass, and **MUST** then say in its output that
 the checks were skipped.
 
-`jennifer fmt` is **not** currently part of this gate: it disagrees with
-`jennifer lint` about line width, so no source form satisfies both and gating on
-it would make some decks unpublishable. It belongs here once that is resolved.
+A formatter (`jennifer fmt`) is **not** part of this gate. The gate asks
+whether a deck is correct, and formatting is not correctness; the line-width
+rule that does matter is already enforced by the linter.
 
 ## 14. Frames and the `template/` directory
 
@@ -953,7 +944,7 @@ a minimal built-in frame so `jvc new` works against any deck.
   names: `{{name}}` (the frame's name), `{{deck}}` (the engine's canonical
   name), `{{namespace}}` (the namespace its import binds), and `{{version}}`
   (the resolved engine version). An unbound placeholder **SHOULD** be left as
-  written rather than blanked. A file whose contents are not valid UTF-8
+  written, not blanked. A file whose contents are not valid UTF-8
   **MUST** be copied byte for byte.
 - If `template/deck.toml` is present it is the base for the frame's manifest,
   with the engine requirement added on top; otherwise a minimal manifest is

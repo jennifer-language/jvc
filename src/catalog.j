@@ -45,6 +45,8 @@ use maps;
  * @field requires {map of string to string} this version's own deps (deck -> constraint)
  * @field engines {map of string to string} the engines that can run it (engine -> range)
  * @field capabilities {list of string} host capabilities its code needs (net / exec / sql)
+ * @field yanked {bool} whether the registry has withdrawn this version (5)
+ * @field registry {string} the repository this version came from ("" for a git deck)
  */
 export def struct Candidate {
     name as string,

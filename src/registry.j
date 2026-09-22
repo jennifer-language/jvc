@@ -78,6 +78,7 @@ export def struct ApiVersion {
  * @field spec {string} the registry specification version it implements
  * @field apis {list of ApiVersion} every mount served, canonical path first
  * @field features {list of string} the optional operations offered (see `hasFeature`)
+ * @field auth {Auth} how the registry wants to be logged into, absent when it accepts none
  */
 export def struct Discovery {
     registry as string,
@@ -105,6 +106,9 @@ export def struct Discovery {
  * @field authorizeUrl {string} the `authcode` flow's browser endpoint
  * @field clientId {string} set when the client runs the flow against the provider
  * @field scopes {list of string} the `authcode` flow's requested scopes
+ * @field trustedUrl {string} where a CI identity token is presented ("" when not offered)
+ * @field trustedAudience {string} the `aud` a CI job must request ("" when not offered)
+ * @field trustedProviders {list of string} the CI issuers accepted
  */
 export def struct Auth {
     present as bool,
@@ -182,6 +186,7 @@ export def struct Negotiated {
  * @field checksum {string} the matched version's checksum ("" when not found)
  * @field description {string} the matched version's description ("" when not found)
  * @field kind {string} the delivery kind, "file" (single .j) or "tar.gz" (vendored deck)
+ * @field engines {map of string to string} the engines that can run it (engine -> range)
  */
 export def struct Resolution {
     found as bool,
@@ -494,6 +499,7 @@ export func resolveGraph(client as Client, roots as map of string to string) {
  * @param client {Client} the repository client
  * @param name {string} the deck name
  * @param constraint {string} the version constraint
+ * @param basePath {string} the negotiated API base path
  * @return {Resolution} the parsed resolution
  * @throws {Error} on a transport failure or an unparseable body
  */

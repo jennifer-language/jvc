@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+#
+# Build the Grimoire book in docs/ and publish it to GitHub Pages.
+#
+# Grimoire is checked out and run from source rather than pulled as a
+# container image, matching the interpreter repository: the image tracks
+# a release, the book format moves with Grimoire's tip, and an image a
+# version behind fails in a way that looks like a broken book.
+#
+# Everything this needs is already proven by test.yml: the interpreter
+# builds from source, and `JENNIFER_SYSMODDIR` points its bare imports at
+# that checkout's modules.
+
+name: docs
+
+on:
+  push:
+    branches: [main]
+  # Publishing by hand is useful when only the theme or the config moved.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and never cancel one in flight: a half-applied
+# Pages deployment is worse than a stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the book (Grimoire)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout jvc
+        uses: actions/checkout@v7
+
+      - name: Checkout the interpreter
+        uses: actions/checkout@v7
+        with:
+          repository: jennifer-language/jennifer
+          path: .interpreter
+          fetch-depth: 0
+
+      - name: Checkout Grimoire
+        uses: actions/checkout@v7
+        with:
+          repository: jennifer-language/grimoire
+          path: .grimoire
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: .interpreter/go.mod
+          cache-dependency-path: .interpreter/go.sum
+
+      - name: Build the interpreter
+        working-directory: .interpreter
+        run: go build -o "$RUNNER_TEMP/jennifer" ./cmd/jennifer
+
+      - name: Build the book
+        # --sysmoddir points Grimoire's own bare imports (markdown.j, html.j)
+        # at the interpreter checkout, the same way test.yml points jvc's.
+        run: |
+          "$RUNNER_TEMP/jennifer" run --sysmoddir=.interpreter/modules \
+              .grimoire/bin/grimoire build --config grimoire.toml
+          ls -l public
+
+      - name: Assert the custom domain survived the build
+        # A Pages deployment publishes exactly what the artifact holds, so a
+        # build that dropped docs/CNAME would quietly unbind
+        # jvc.jennifer-lang.dev and leave the site on github.io with no error
+        # anywhere. Grimoire copies it through as an ordinary asset; this is
+        # the check that it did.
+        run: |
+          set -eu
+          test -f public/CNAME
+          grep -qx 'jvc.jennifer-lang.dev' public/CNAME
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: public
+
+  deploy:
+    name: Publish to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5

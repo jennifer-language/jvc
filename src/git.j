@@ -39,6 +39,7 @@ def const GIT as string init "git";
  * @field ok {bool} true when git exited 0
  * @field output {string} standard output (trailing newline trimmed)
  * @field error {string} standard error, for the failure message ("" when ok)
+ * @field warning {string} standard error kept even on success, for git's ambiguity warning
  */
 export def struct Result {
     ok as bool,

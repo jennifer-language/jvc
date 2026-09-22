@@ -22,7 +22,6 @@ flag is needed with a current `jennifer` build.
 | `remove <deck> [--dev]`              | remove a requirement                            |
 | `list`                               | print the manifest                              |
 | `check`                              | verify the running interpreter satisfies the deck's `[engines]` |
-| `provide <cap> <version>`            | declare a provided capability (version must be SemVer) |
 | `conflict <deck> [constraint]`       | declare a conflict with a deck (empty range → `*`) |
 | `engine [name] [constraint]`         | require a Jennifer engine version (name → `jennifer`) |
 | `source <deck> [git-url]`            | resolve a deck from a git remote (no url → back to the repository) |
@@ -70,7 +69,7 @@ highest API version both sides support, then use that version's `basePath`. A
 Two things follow that are worth knowing when a command refuses:
 
 - **No shared version, no guessing.** jvc names both sides' versions and stops,
-  rather than trying an endpoint the repository may not serve.
+  instead of trying an endpoint the repository may not serve.
 - **An operation the repository does not advertise is refused by name.** A
   repository lists what it offers in the discovery document's `features`, so
   `jvc query` against one without `resolve` says so, and points at `install`,
@@ -146,6 +145,28 @@ produces a file, for hosting yourself, for a mirror, or for handing to the
 operator of a repository that accepts no publishes. `--out` chooses the
 directory (default `dist`), `--url` records where you will host it.
 
+### Claiming `jennifer-tiny`
+
+The gate refuses a deck whose `[engines]` lists `jennifer-tiny` while its
+sources declare a library only the default build carries (`term`, `serial`,
+`spi`, `i2c`, `gpio`):
+
+```
+[engines] lists jennifer-tiny, but src/ declares `use gpio;`, which that build
+does not carry. Drop jennifer-tiny from [engines], or stop using gpio. Nothing
+enforces [engines] after install, so the claim is all a consumer has to go on.
+```
+
+The defect is the claim, not the dependency: the same code publishes fine
+without `jennifer-tiny` in `[engines]`. It matters because these libraries are
+not capabilities, so no pragma declares them and the interpreter cannot refuse
+such a deck at import the way it refuses one needing `net`. On the tiny build
+the stub instead fails at the first *call*, which is long after install.
+
+`crypto` is not checked. Its RSA and ECDSA entry points are
+default-only, but the library is not: a deck using it for sha256 runs on tiny
+perfectly well, and a `use` declaration cannot tell the two apart.
+
 **`deckadmin` is the repository operator's tool, not yours.** It edits the store
 on the repository's own host, so a release only an operator can register is one
 you hand *facts* to: the deck name, the version, and the tag.
@@ -219,7 +240,7 @@ your project decides where every dependency is fetched from, however deep. That
 is what makes an internal mirror, or a fork of a public scope, work.
 
 **The lockfile records which repository each deck came from**, and `install`
-refuses rather than silently substituting when the mapping has since moved:
+refuses when the mapping has since moved, and does not silently substitute:
 
 ```
 $ jvc install
@@ -275,8 +296,8 @@ gets stored.
 ### What am I holding?
 
 `jvc whoami` decodes the stored token and prints its claims. It makes **no
-network call**, which is the point: the question is worth answering precisely
-when the repository is the thing misbehaving.
+network call**, which is the point: you need the answer most when the
+repository is the thing misbehaving.
 
 ```
 $ jvc whoami
@@ -337,7 +358,7 @@ claim will be refused if the token does not carry it.
 ### Publishing from a pipeline
 
 A device grant ends with a human typing a code into a browser, and a build
-runner has no human. `jvc login` therefore **refuses** rather than printing a
+runner has no human. `jvc login` therefore **refuses** instead of printing a
 code nobody will read:
 
 ```
@@ -370,8 +391,8 @@ Nothing has to be configured in jvc. It reads the audience the repository
 advertises, asks the CI system for a token carrying exactly that value, and
 sends it. **jvc never chooses an audience of its own**: the audience is the
 thing that stops a token minted for one service being replayed at another, so a
-repository that advertises no audience gets no identity token rather than a
-guessed one.
+repository that advertises no audience gets no identity token, not a guessed
+one.
 
 **`$JVC_TOKEN`** is the fallback, for a CI system that issues no identity token
 or a machine that is not CI at all. It is a standing secret, it proves
@@ -383,7 +404,7 @@ JVC_TOKEN=... jvc publish --tag 0.2.0
 ```
 
 The order is **trusted publishing, then `$JVC_TOKEN`, then a stored login**. A
-CI identity that is present but broken stops the search rather than quietly
+CI identity that is present but broken stops the search instead of quietly
 falling back to a weaker credential, since a misconfigured workflow is worth
 reporting.
 
@@ -399,7 +420,7 @@ published @acme/routeros@0.2.0 to https://registry.jennifer-lang.dev
 
 Neither CI mechanism is refreshed on a `401`. There is nothing for jvc to
 renew: `$JVC_TOKEN` belongs to whoever set it, and a fresh identity token would
-have to come from the CI system. The failure says so rather than reporting a
+have to come from the CI system. The failure says so instead of reporting a
 refresh that was never possible.
 
 ## Scopes
@@ -437,7 +458,7 @@ jvc unyank @mplx/clispinner 0.1.0
 Yanking **does not delete**. The version stays fetchable, so a project whose
 lockfile already pins it keeps installing exactly as before; only fresh
 resolutions skip it. That asymmetry is the entire point, and it is why the
-operation is reversible: a mistaken yank is undone with `unyank` rather than by
+operation is reversible: a mistaken yank is undone with `unyank`, not by
 republishing, which immutability forbids.
 
 Both need a token and a scope you own.
@@ -530,7 +551,7 @@ check is entirely offline because each entry records its own `requires`:
   one);
 - a locked deck's own recorded requirement is unmet inside the locked set.
 
-An unreadable lockfile is an error rather than a silent re-resolve, so a corrupt
+An unreadable lockfile is an error, not a silent re-resolve, so a corrupt
 file is never papered over.
 
 ### update
@@ -565,7 +586,7 @@ the running build does not provide:
   warning: @acme/fetcher 1.0.0 needs net, which this build does not provide
 ```
 
-It is a warning rather than a refusal because the interpreter installing the
+It is a warning, not a refusal, because the interpreter installing the
 decks need not be the one that runs the app; the point is to say at install time
 what would otherwise surface as a load failure later. The set is recorded per
 deck in `camcorder.lock` so a run-time check can read it there.
@@ -588,7 +609,7 @@ interpreter and fail on yours while still satisfying its declared `[engines]`
 range. In a pre-1.0 language that moves quickly, that gap is where breakage
 lives.
 
-The check is deliberately weaker than the publish gate. It runs whatever
+The check is weaker than the publish gate, on purpose. It runs whatever
 overlays a deck ships, without requiring one per module: coverage is the
 publisher's responsibility and is enforced at publish. A deck shipping no tests
 passes.
@@ -715,7 +736,7 @@ Four placeholders are substituted, in both file contents and file names:
 | `{{namespace}}` | the namespace the import binds, `cms`         |
 | `{{version}}`   | the resolved engine version, `1.0.0`          |
 
-An unbound placeholder is left as written rather than blanked, so a typo is
+An unbound placeholder is left as written, not blanked, so a typo is
 visible in the stamped file. Non-text files (an icon, say) are copied byte for
 byte.
 
@@ -769,7 +790,7 @@ installed grimoire 1.0.0
 belongs in `/usr/local`.
 
 **`--scope system` needs privileges, and says so before doing any work.** jvc
-probes whether it can write the command directory rather than inspecting the
+probes whether it can write the command directory instead of inspecting the
 user id, which is right under `sudo`, in a container, with an ACL, or on a
 read-only mount. It never tries to elevate itself; it prints the command to
 re-run:
@@ -810,7 +831,7 @@ could be copied into an unrelated script but a link's target cannot.
 satisfying `--version` is installed, and the resolved commit is what is recorded.
 A repository with **no** version tags installs its default branch head instead,
 so an app that does not tag releases is still installable - but then an explicit
-`--version` is an error rather than a silent branch install.
+`--version` is an error, not a silent branch install.
 
 **An app names itself** in a `deck.toml` with a plain (unscoped) name and a
 `[package] bin` naming its entry script. Both are optional: without a manifest
@@ -819,7 +840,7 @@ name. A scoped `@scope/deck` name is refused, since that is a deck. An entry
 script with no `#!` line is refused too, since nothing could run it.
 
 If the app declares `[decks]`, they are resolved and vendored into the app's own
-directory, so an app carries its dependencies privately rather than sharing a
+directory, so an app carries its dependencies privately instead of sharing a
 project's `vendor/`.
 
 `jvc app update` reinstalls at the newest version each app's repository offers
@@ -851,7 +872,7 @@ repository to check out, and the installer reads the manifest at the chosen tag
 from a git mirror, so it says so plainly instead of failing later.
 
 This is the user-wide counterpart of the section below: the same published deck,
-installed for you rather than for one project.
+installed for you, not for one project.
 
 ### A deck that also ships a command
 
@@ -888,7 +909,7 @@ script is safe.
 
 `bin` **must point inside `src/`**: only `src/` is vendored, so a command
 outside it cannot be reached from a consuming project. A deck whose `bin` sits
-elsewhere simply exposes no project command.
+elsewhere exposes no project command.
 
 ### jvc installs jvc
 
@@ -902,6 +923,7 @@ second copy that is installed but shadowed:
 $ jvc version
 jvc 0.1.0
   running:     /usr/share/jvc/bin/jvc
+  installed:   system package manager
   interpreter: jennifer 0.25.0
 
 note: jvc 0.3.0 is also installed at ~/.local/bin/jvc but is not the copy running;
@@ -935,6 +957,13 @@ The warning fires for `jvc app update` too, including the no-argument form that
 updates everything, and it is silent in the case it does not apply: a jvc
 installed under `/usr/local` is one jvc put there itself (`--scope system`), so
 it is jvc's to manage and says nothing.
+
+The `installed:` line names how the running copy arrived, because a path only
+answers that for somebody who knows the layouts. It is one of `system package
+manager`, `jvc app install`, `/usr/local (locally administered, not packaged)`,
+or `working tree or unpacked tarball`. A copy baked into the OCI image reads as
+packaged, and that is correct rather than a limitation: the image uses the
+package layout so that installing the `.deb` there later changes nothing.
 
 The intent is that a packaged jvc is always present and is the rescue path,
 while `jvc app install` lets you run a newer jvc ahead of the next release.
@@ -984,7 +1013,7 @@ sha256. `README`, `vendor/`, and test overlays are excluded.
 ### The quality gate
 
 A deck that cannot pass its own checks does not get published. The ecosystem is
-only as trustworthy as what enters it, so these are enforced rather than left to
+only as trustworthy as what enters it, so these are enforced instead of left to
 a convention nobody checks:
 
 | Check | Passes when |
@@ -1007,12 +1036,10 @@ publish blocked by the quality gate:
 fix these, or pass --no-verify to publish anyway
 ```
 
-**`jennifer fmt` is deliberately not in the gate.** It joins a `func` signature
-up to 102 columns while `lint` rejects anything over 100, because it does not
-count the trailing ` {`. A signature landing on 101 or 102 columns is
-unformattable: fmt joins it, lint flags it, and hand-wrapping is undone by the
-next fmt run. Gating on fmt would make such decks unpublishable. This has been
-reported to the language team; it goes in once fixed.
+**`jennifer fmt` is not in the gate.** The gate asks whether a deck is correct:
+it lints, its overlays pass, its docblocks match the code. Formatting is not
+correctness, and the one formatting rule that bears on it, line width, is a
+lint rule already.
 
 `$JVC_JENNIFER` overrides the interpreter the gate shells out to; otherwise
 `jennifer` is taken from `PATH`.

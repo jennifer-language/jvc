@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+# SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
+#
+# PR gate: run every module's test overlay and the linter against an
+# interpreter built from the tip of the jennifer repository.
+#
+# There is no released interpreter to install from a package repository
+# yet, so CI builds one. That is not a workaround: jvc is the client half
+# of a language that is still moving, and building against its tip is how
+# a break shows up here rather than in somebody's install. It is also the
+# mirror image of the M26.3 release gate, where jennifer's own CI runs
+# this suite against a release candidate before it tags.
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # release.yml runs this as its gate, so a red suite blocks a tag from
+  # being published rather than being noticed afterwards.
+  workflow_call:
+
+# A second push supersedes the first: these jobs build an interpreter from
+# source, so a superseded run is a minute of runner time for an answer nobody
+# will read. Not applied to `release.yml`, where a superseded tag build would
+# leave a release half-published.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: jennifer test + lint
+    runs-on: ubuntu-latest
+    env:
+      # The bundled modules jvc imports by bare name (http.j, semver.j, ...)
+      # live in the interpreter checkout, not at the FHS location a package
+      # would have installed them to.
+      JENNIFER_SYSMODDIR: ${{ github.workspace }}/.interpreter/modules
+      # `verify.j` shells out to an interpreter to lint and test the deck it is
+      # checking, and takes `jennifer` from PATH unless told otherwise. This job
+      # builds one into the runner temp and never puts it on PATH, so without
+      # this the verify overlays fail with "executable file not found".
+      JVC_JENNIFER: ${{ runner.temp }}/jennifer
+    steps:
+      - name: Checkout jvc
+        uses: actions/checkout@v7
+
+      - name: Checkout the interpreter
+        uses: actions/checkout@v7
+        with:
+          repository: jennifer-language/jennifer
+          path: .interpreter
+          # The interpreter stamps its version from `git describe`, and a
+          # shallow checkout would leave it without tags to describe from.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: .interpreter/go.mod
+          cache-dependency-path: .interpreter/go.sum
+
+      - name: Build the interpreter
+        working-directory: .interpreter
+        run: go build -o "$RUNNER_TEMP/jennifer" ./cmd/jennifer
+
+      - name: Report what we are testing against
+        run: |
+          "$RUNNER_TEMP/jennifer" --version
+          # A build from the tip reports a `-dev` version, and a -dev build
+          # bypasses every version floor, so jvc's own `>=0.25.0` pragma does
+          # not gate this run. The day the interpreter cuts a release that
+          # jvc's floor excludes, this step is where it becomes visible.
+
+      - name: Run every module's overlay
+        run: |
+          set -eu
+          # Globbed rather than listed, so a new module cannot be added
+          # without its overlay running here.
+          for overlay in src/*_test.j; do
+              echo "== $overlay"
+              "$RUNNER_TEMP/jennifer" test "$overlay"
+          done
+
+      - name: Lint
+        run: '"$RUNNER_TEMP/jennifer" lint src/*.j bin/jvc'
+
+      - name: Smoke-test the launcher
+        # Every test exercises a module directly; nothing else here runs the
+        # command a user runs. This is what catches the launcher's relative
+        # `import "../src/cli.j"` breaking, which is a cross-repo contract (the
+        # OCI image and both OS packages stage `bin/` and `src/` as siblings)
+        # and is invisible to the suite.
+        run: |
+          set -eu
+          "$RUNNER_TEMP/jennifer" run bin/jvc version
+          "$RUNNER_TEMP/jennifer" run bin/jvc list
+          "$RUNNER_TEMP/jennifer" run bin/jvc help > /dev/null
+
+      - name: jvc passes its own quality gate
+        # `jvc publish` refuses any deck whose lint, overlays or docblocks have
+        # drifted. jvc has to clear the bar it holds everyone else to, and the
+        # docblock leg is the one the steps above do not cover: it had drifted
+        # 25 ways before this check existed.
+        run: |
+          cat > "$RUNNER_TEMP/selfgate.j" <<'EOF'
+          use io;
+          use os;
+          import "./src/verify.j" as verify;
+          def r as verify.Report init verify.verify(".");
+          io.printf("%s\n", verify.reportText($r));
+          if (not $r.ok) { exit 1; }
+          EOF
+          cp "$RUNNER_TEMP/selfgate.j" selfgate.j
+          "$RUNNER_TEMP/jennifer" run selfgate.j
+          rm -f selfgate.j
+
+      - name: Check for em-dashes and en-dashes
+        # A repo convention, and the kind of thing that is invisible in
+        # review and trivial for a machine.
+        run: |
+          if grep -rInP '\xe2\x80\x93|\xe2\x80\x94' \
+                  --include='*.j' --include='*.md' --include='PKGBUILD*' \
+                  --exclude=JENNIFER.md . ; then
+              echo "::error::em-dash or en-dash found (repo convention forbids both)"
+              exit 1
+          fi
