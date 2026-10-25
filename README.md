@@ -7,9 +7,9 @@ result, and pins it so a fresh checkout rebuilds the same tree.
 
 - **Packages are called *decks*.** The manifest is `deck.toml`; the resolved
   set is pinned in `camcorder.lock`.
-- **A deck is a *scoped* `@jennifer/routeros`**, vendored into `vendor/` and
-  imported as `import "@jennifer/routeros/";`. Bare names (`ansi`, `http`) are
-  engine-bundled or local modules, not registry decks.
+- **A deck has a scoped name** such as `@jennifer/routeros`, is vendored into
+  `vendor/`, and is imported as `import "@jennifer/routeros/";`. Bare names
+  (`ansi`, `http`) are bundled or local modules, not decks.
 - **jvc is the client.** The deck repository is a separate project, and it owns
   the [client
   specification](https://registry.jennifer-lang.dev/specs/specs-client.html)
@@ -23,9 +23,8 @@ sudo pacman -U jvc-0.1.0-1-any.pkg.tar.zst    # Arch
 tar xzf jvc-0.1.0.tar.gz                      # anywhere else
 ```
 
-Every release also ships a sidecar `.sha256`, and needs the `jennifer`
-interpreter at the floor `[engines]` declares. See
-[docs/install.md](docs/install.md).
+Each artifact has a sidecar `.sha256`. All need `jennifer` 0.25.0 or later.
+See [Installing jvc](https://jvc.jennifer-lang.dev/install.html).
 
 ## Quick start
 
@@ -36,7 +35,8 @@ jvc update                                # advance to the newest allowed
 jvc publish                               # gate, then publish a tag
 ```
 
-`jvc help` lists every verb. See [docs/quickstart.md](docs/quickstart.md).
+`jvc help` lists every verb. See the
+[quick start](https://jvc.jennifer-lang.dev/quickstart.html).
 
 ## Documentation
 
@@ -46,14 +46,14 @@ Published at **<https://jvc.jennifer-lang.dev/>**. The pages in `docs/` are a
 
 | | |
 | --- | --- |
-| [Introduction](docs/index.md) | the vocabulary, the three shapes, the layout |
-| [Installing jvc](docs/install.md) | packages, completions, building the artifacts |
-| [Quick start](docs/quickstart.md) | the path through the verbs |
-| [The jvc CLI](docs/cli.md) | every verb and flag, in full |
-| [The deck manifest](docs/manifest.md) | the format, as a guide |
-| [Deck manifest specification](docs/deck-spec.md) | the normative reference |
-| [Working on jvc](docs/development.md) | tests, conventions, CI |
-| [Status](docs/status.md) | what is implemented, and what is not |
+| [Introduction](https://jvc.jennifer-lang.dev/) | the vocabulary, the three shapes, the layout |
+| [Installing jvc](https://jvc.jennifer-lang.dev/install.html) | packages, completions, building the artifacts |
+| [Quick start](https://jvc.jennifer-lang.dev/quickstart.html) | the path through the verbs |
+| [The jvc CLI](https://jvc.jennifer-lang.dev/cli.html) | every verb and flag, in full |
+| [The deck manifest](https://jvc.jennifer-lang.dev/manifest.html) | the format, as a guide |
+| [Deck manifest specification](https://jvc.jennifer-lang.dev/deck-spec.html) | the normative reference |
+| [Working on jvc](https://jvc.jennifer-lang.dev/development.html) | tests, conventions, CI |
+| [Status](https://jvc.jennifer-lang.dev/status.html) | what is implemented, and what is not |
 
 ## Tests
 
@@ -62,8 +62,8 @@ for t in src/*_test.j; do jennifer test "$t"; done
 jennifer lint src/*.j bin/jvc
 ```
 
-Every module has a co-located `*_test.j` white-box overlay. The launcher is a
-thin adapter; all the logic, and all the tests, live in `src/`.
+Every module has a white-box `*_test.j` overlay beside it. The launcher is a
+thin adapter; the logic and the tests live in `src/`.
 
 ## License
 

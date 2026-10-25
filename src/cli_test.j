@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
 # pragma-jennifer-version: >=0.25.0
 #
-# White-box tests for cli.j: the filesystem verbs, the lockfile writer, the
-# argument helpers, and dispatch. The network verbs (query / install) are not
-# exercised here. Run with:
+# White-box tests for cli.j: the manifest verbs, the lockfile, vendoring,
+# credentials, the argument helpers and dispatch, against temp directories and
+# local git repositories. No request leaves the machine. Run with:
 #
-#     JENNIFER_SYSMODDIR=../jennifer-lang/modules jennifer test cli/cli_test.j
+#     jennifer test src/cli_test.j
 
 use testing;
 use convert;
@@ -77,6 +77,61 @@ func testRunInitCreatesManifest() {
     fs.removeAll($dir);
 }
 
+# a scoped name is a publishable deck, so it gets the module and its overlay
+func testRunInitWritesADeckSkeleton() {
+    def dir as string init freshDir("initdeck");
+    def outcome as Outcome init runInit($dir, "@Acme/Widgets");
+    testing.assertTrue($outcome.ok);
+    testing.assertContains($outcome.message, "created " + $dir + "/src/widgets.j");
+    testing.assertEqual(manifest.load($dir + "/deck.toml").pkg.name, "@acme/widgets");
+    testing.assertContains(fs.readString($dir + "/src/widgets.j"), "@module widgets");
+    testing.assertContains(fs.readString($dir + "/src/widgets_test.j"), "func testGreet()");
+    fs.removeAll($dir);
+}
+
+# the skeleton is only worth having if it passes the gate `jvc publish` runs
+func testTheDeckSkeletonPassesThePublishGate() {
+    def dir as string init freshDir("initgate");
+    runInit($dir, "@acme/widgets");
+    def r as verify.Report init verify.verify($dir);
+    testing.assertTrue($r.ok);
+    fs.removeAll($dir);
+}
+
+# a bare name (the directory-name default, in a project that only consumes
+# decks) gets the manifest alone
+func testRunInitOfABareNameWritesNoSource() {
+    def dir as string init freshDir("initbare");
+    testing.assertTrue(runInit($dir, "demo").ok);
+    testing.assertFalse(fs.exists($dir + "/src"));
+    fs.removeAll($dir);
+}
+
+func testRunInitKeepsAnExistingModule() {
+    def dir as string init freshDir("initkeep");
+    fs.mkdirAll($dir + "/src");
+    fs.writeString($dir + "/src/widgets.j", "# mine\n");
+    def outcome as Outcome init runInit($dir, "@acme/widgets");
+    testing.assertTrue($outcome.ok);
+    testing.assertContains($outcome.message, "kept    " + $dir + "/src/widgets.j");
+    testing.assertEqual(fs.readString($dir + "/src/widgets.j"), "# mine\n");
+    testing.assertTrue(fs.exists($dir + "/src/widgets_test.j"));
+    fs.removeAll($dir);
+}
+
+# the deck half becomes a file name, so an invalid one writes nothing at all
+func testRunInitRefusesAnInvalidDeckName() {
+    def dir as string init freshDir("initbad");
+    for (def name in ["@acme/my-deck", "@acme/../x", "@acme/"]) {
+        def outcome as Outcome init runInit($dir, $name);
+        testing.assertFalse($outcome.ok);
+        testing.assertContains($outcome.message, "not a valid deck name");
+    }
+    testing.assertFalse(fs.exists($dir + "/deck.toml"));
+    testing.assertFalse(fs.exists($dir + "/src"));
+    fs.removeAll($dir);
+}
+
 func testRunInitFailsIfExists() {
     def dir as string init freshDir("initdup");
     runInit($dir, "demo");
@@ -125,6 +180,20 @@ func testRunRemove() {
     fs.removeAll($dir);
 }
 
+# Saving rewrites the manifest and drops its comments, so a typo is reported
+# rather than "removed" with nothing removed.
+func testRunRemoveOfAnAbsentDeckIsRefused() {
+    def dir as string init freshDir("removeabsent");
+    runInit($dir, "demo");
+    runAdd($dir, "@acme/ansi", "^1.2.0", false);
+    def out as Outcome init runRemove($dir, "@acme/ansii", false);
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "not in the requirements");
+    # a runtime requirement is not a dev one
+    testing.assertFalse(runRemove($dir, "@acme/ansi", true).ok);
+    fs.removeAll($dir);
+}
+
 func testRunListShowsDeps() {
     def dir as string init freshDir("list");
     runInit($dir, "demo");
@@ -162,12 +231,51 @@ func testInitRefusesWhenJsonExists() {
 func testRunConflict() {
     def dir as string init freshDir("conflict");
     runInit($dir, "demo");
-    testing.assertTrue(runConflict($dir, "oldjvc", "<1.0.0").ok);
-    # empty constraint defaults to "*"
-    testing.assertTrue(runConflict($dir, "legacy", "").ok);
+    testing.assertTrue(runConflict($dir, "@acme/oldjvc", "<1.0.0").ok);
+    # empty constraint defaults to "*"; the name is stored folded
+    testing.assertTrue(runConflict($dir, "@Acme/Legacy", "").ok);
     def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
-    testing.assertEqual(manifest.depListGet($m.conflicts, "oldjvc"), "<1.0.0");
-    testing.assertEqual(manifest.depListGet($m.conflicts, "legacy"), "*");
+    testing.assertEqual(manifest.depListGet($m.conflicts, "@acme/oldjvc"), "<1.0.0");
+    testing.assertEqual(manifest.depListGet($m.conflicts, "@acme/legacy"), "*");
+    fs.removeAll($dir);
+}
+
+# An unscoped name or a constraint outside the grammar matches nothing, so the
+# conflict it was meant to declare would never be enforced.
+func testRunConflictRefusesWhatCouldNeverMatch() {
+    def dir as string init freshDir("conflictbad");
+    runInit($dir, "demo");
+    testing.assertFalse(runConflict($dir, "oldjvc", "<1.0.0").ok);
+    testing.assertFalse(runConflict($dir, "@acme/old", "less than one").ok);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    testing.assertEqual(len($m.conflicts), 0);
+    fs.removeAll($dir);
+}
+
+func testRunEngineRefusesABadConstraint() {
+    def dir as string init freshDir("enginebad");
+    runInit($dir, "demo");
+    testing.assertFalse(runEngine($dir, "jennifer", "newest").ok);
+    fs.removeAll($dir);
+}
+
+func testRunSourceRefusesABadNameOrUrl() {
+    def dir as string init freshDir("sourcebad");
+    runInit($dir, "demo");
+    testing.assertFalse(runSource($dir, "@acme/../x", "https://x/y.git").ok);
+    testing.assertFalse(runSource($dir, "@acme/tool", "--upload-pack=evil").ok);
+    testing.assertTrue(runSource($dir, "@Acme/Tool", "https://x/y.git").ok);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    testing.assertEqual(manifest.getSource($m, "@acme/tool"), "https://x/y.git");
+    fs.removeAll($dir);
+}
+
+func testRunRegistryRefusesSomethingThatIsNotAUrl() {
+    def dir as string init freshDir("registrybad");
+    runInit($dir, "demo");
+    testing.assertFalse(runRegistry($dir, "@acme", "registry.internal").ok);
+    testing.assertFalse(runRegistry($dir, "@acme", "https://").ok);
+    testing.assertTrue(runRegistry($dir, "@acme", "https://registry.internal").ok);
     fs.removeAll($dir);
 }
 
@@ -188,8 +296,7 @@ func testRunSourceSetsAndClears() {
     runAdd($dir, "@acme/routeros", "^1.0.0", false);
     testing.assertTrue(runSource($dir, "@acme/routeros", "https://x/deck-routeros.git").ok);
     def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
-    testing.assertEqual(manifest.getSource($m, "@acme/routeros"),
-        "https://x/deck-routeros.git");
+    testing.assertEqual(manifest.getSource($m, "@acme/routeros"), "https://x/deck-routeros.git");
     # the requirement itself is untouched by sourcing
     testing.assertEqual(manifest.getConstraint($m, "@acme/routeros"), "^1.0.0");
     testing.assertTrue(runSource($dir, "@acme/routeros", "").ok);
@@ -250,22 +357,26 @@ func seeded() {
 }
 
 func testResolveRootsResolvesTransitively() {
-    def r as Resolved init resolveRoots(offline(), seeded(),
-        {"@acme/alpha": "^1.0.0"}, noSources());
+    def r as Resolved init resolveRoots(
+        offline(),
+        seeded(),
+        {"@acme/alpha": "^1.0.0"},
+        noSources());
     testing.assertTrue($r.ok);
     testing.assertEqual(len($r.decks), 2);
     testing.assertEqual($r.decks[0].name, "@acme/alpha");
-    testing.assertEqual($r.decks[1].version, "1.4.0");   # highest satisfying
+    testing.assertEqual($r.decks[1].version, "1.4.0"); # highest satisfying
 }
 
 # a git-sourced deck is fetched from its [sources] URL, not the repository: with
 # an offline client, a graph whose only unknown deck is git-sourced still fails
 # on git rather than on HTTP, which is what proves the routing.
 func testResolveRootsRoutesAGitSourcedDeckToGit() {
-    def sources as list of manifest.Dependency init
-        manifest.depListSet(noSources(), "@acme/gamma", "/no/such/repo.git");
-    def r as Resolved init resolveRoots(offline(), seeded(),
-        {"@acme/gamma": "^1.0.0"}, $sources);
+    def sources as list of manifest.Dependency init manifest.depListSet(
+        noSources(),
+        "@acme/gamma",
+        "/no/such/repo.git");
+    def r as Resolved init resolveRoots(offline(), seeded(), {"@acme/gamma": "^1.0.0"}, $sources);
     testing.assertFalse($r.ok);
     testing.assertContains($r.error, "cannot reach /no/such/repo.git");
 }
@@ -285,8 +396,11 @@ func resolveUnsourced() {
 }
 
 func testResolveRootsReportsUnsatisfiable() {
-    def r as Resolved init resolveRoots(offline(), seeded(),
-        {"@acme/beta": ">=9.0.0"}, noSources());
+    def r as Resolved init resolveRoots(
+        offline(),
+        seeded(),
+        {"@acme/beta": ">=9.0.0"},
+        noSources());
     testing.assertFalse($r.ok);
     testing.assertContains($r.error, "no version of @acme/beta");
 }
@@ -312,8 +426,7 @@ func testRunNewRejectsABareEngineName() {
 func testRunNewRefusesANonEmptyDirectory() {
     def dir as string init freshDir("newexisting");
     fs.writeString($dir + "/keep.txt", "mine");
-    def out as Outcome init runNew($dir, "mysite", "@you/cms", "", "",
-        "http://127.0.0.1:1");
+    def out as Outcome init runNew($dir, "mysite", "@you/cms", "", "", "http://127.0.0.1:1");
     testing.assertFalse($out.ok);
     testing.assertContains($out.message, "not empty");
     # the guard must fire before anything is written
@@ -325,7 +438,12 @@ func testRunNewRefusesANonEmptyDirectory() {
 func testRunNewLeavesNothingBehindWhenResolutionFails() {
     def dir as string init os.tempDir() + "/jvc_cli_newfail";
     fs.removeAll($dir);
-    def out as Outcome init runNew($dir, "mysite", "@you/cms", "", "/no/such/repo.git",
+    def out as Outcome init runNew(
+        $dir,
+        "mysite",
+        "@you/cms",
+        "",
+        "/no/such/repo.git",
         "http://127.0.0.1:1");
     testing.assertFalse($out.ok);
     testing.assertContains($out.message, "cannot resolve @you/cms");
@@ -334,8 +452,17 @@ func testRunNewLeavesNothingBehindWhenResolutionFails() {
 
 func testDispatchNewReadsItsFlags() {
     # --from / --version / --source values must not leak into the positionals
-    def args as list of string init ["jvc", "new", "mysite", "--from", "@you/cms",
-        "--version", "^1.0.0", "--source", "https://x/cms.git"];
+    def args as list of string init [
+        "jvc",
+        "new",
+        "mysite",
+        "--from",
+        "@you/cms",
+        "--version",
+        "^1.0.0",
+        "--source",
+        "https://x/cms.git"
+    ];
     def pos as list of string init positionals($args, 2);
     testing.assertEqual(len($pos), 1);
     testing.assertEqual($pos[0], "mysite");
@@ -368,8 +495,8 @@ func testWriteLock() {
         requires: $noReqs,
         engines: {"jennifer": "^0.21.0"},
         capabilities: ["net"],
-            yanked: false,
-            registry: ""
+        yanked: false,
+        registry: ""
     };
     def b as catalog.Candidate init catalog.Candidate{
         name: "csv",
@@ -383,8 +510,8 @@ func testWriteLock() {
         requires: $noReqs,
         engines: {},
         capabilities: [],
-            yanked: false,
-            registry: ""
+        yanked: false,
+        registry: ""
     };
     def path as string init writeLock($dir, [$a, $b]);
     def doc as json.Value init json.decode(fs.readString($path));
@@ -421,10 +548,18 @@ func testVersionFlagsAShadowedInstall() {
     def root as string init freshDir("versionshadow");
     os.setEnv("JVC_APP_HOME", $root + "/store");
     os.setEnv("JVC_BIN", $root + "/bin");
-    app.remember(app.locations("", "."), app.Record{
-        name: "jvc", url: "https://x/jvc.git", version: "9.9.9",
-        ref: "v9.9.9", commit: "abc", entry: "cli/jvc.j"
-    });
+    app.remember(
+        app.locations("", "."),
+        app.Record{
+            name: "jvc",
+            url: "https://x/jvc.git",
+            version: "9.9.9",
+            ref: "v9.9.9",
+            commit: "abc",
+            entry: "cli/jvc.j",
+            deck: "",
+            spec: ""
+        });
     def out as Outcome init runVersion("/elsewhere/cli/jvc.j");
     testing.assertContains($out.message, "jvc 9.9.9 is also installed");
     testing.assertContains($out.message, "earlier on your PATH");
@@ -439,10 +574,18 @@ func testVersionReportsTheAppOrigin() {
     os.setEnv("JVC_APP_HOME", $root + "/store");
     os.setEnv("JVC_BIN", $root + "/bin");
     def loc as app.Locations init app.locations("", ".");
-    app.remember($loc, app.Record{
-        name: "jvc", url: "https://x/jvc.git", version: "9.9.9",
-        ref: "v9.9.9", commit: "abc", entry: "cli/jvc.j"
-    });
+    app.remember(
+        $loc,
+        app.Record{
+            name: "jvc",
+            url: "https://x/jvc.git",
+            version: "9.9.9",
+            ref: "v9.9.9",
+            commit: "abc",
+            entry: "cli/jvc.j",
+            deck: "",
+            spec: ""
+        });
     def out as Outcome init runVersion($loc.store + "/jvc/cli/jvc.j");
     testing.assertContains($out.message, "origin:");
     testing.assertContains($out.message, "https://x/jvc.git");
@@ -524,20 +667,34 @@ func testLockRoundTripsEveryField() {
     def noReqs as map of string to string init {};
     def noCaps as list of string init [];
     def tarball as catalog.Candidate init catalog.Candidate{
-        name: "@acme/alpha", version: "1.2.0", url: "https://x/a.tar.gz",
-        checksum: "sha256:aa", kind: "tar.gz", ref: "", commit: "",
-        description: "", requires: {"@acme/beta": "^1.0.0"},
-        engines: {"jennifer": ">=0.24.0"}, capabilities: ["net"],
-            yanked: false,
-            registry: ""
+        name: "@acme/alpha",
+        version: "1.2.0",
+        url: "https://x/a.tar.gz",
+        checksum: "sha256:aa",
+        kind: "tar.gz",
+        ref: "",
+        commit: "",
+        description: "",
+        requires: {"@acme/beta": "^1.0.0"},
+        engines: {"jennifer": ">=0.24.0"},
+        capabilities: ["net"],
+        yanked: false,
+        registry: ""
     };
     def gitDeck as catalog.Candidate init catalog.Candidate{
-        name: "@acme/beta", version: "1.0.0", url: "https://x/b.git",
-        checksum: "", kind: "git", ref: "v1.0.0", commit: "abc123",
-        description: "", requires: $noReqs, engines: $noReqs,
+        name: "@acme/beta",
+        version: "1.0.0",
+        url: "https://x/b.git",
+        checksum: "",
+        kind: "git",
+        ref: "v1.0.0",
+        commit: "abc123",
+        description: "",
+        requires: $noReqs,
+        engines: $noReqs,
         capabilities: $noCaps,
-            yanked: false,
-            registry: ""
+        yanked: false,
+        registry: ""
     };
     def got as Locked init lockOf($dir, [$tarball, $gitDeck]);
     testing.assertTrue($got.present);
@@ -576,15 +733,15 @@ func testLockIsUsableWhenItCoversTheRoots() {
 
 func testLockIsStaleWhenARootIsMissing() {
     def locked as list of catalog.Candidate init [catalog.candidate("@acme/alpha", "1.2.0")];
-    testing.assertContains(lockStaleReason({"@acme/gamma": "*"}, $locked),
+    testing.assertContains(
+        lockStaleReason({"@acme/gamma": "*"}, $locked),
         "@acme/gamma is required but not locked");
 }
 
 # the constraint was tightened in the manifest after the lock was written
 func testLockIsStaleWhenARootNoLongerSatisfies() {
     def locked as list of catalog.Candidate init [catalog.candidate("@acme/alpha", "1.2.0")];
-    testing.assertContains(lockStaleReason({"@acme/alpha": "^2.0.0"}, $locked),
-        "does not satisfy");
+    testing.assertContains(lockStaleReason({"@acme/alpha": "^2.0.0"}, $locked), "does not satisfy");
 }
 
 # a transitive requirement recorded in the lock must also still hold
@@ -593,7 +750,8 @@ func testLockIsStaleWhenATransitiveNeedIsUnmet() {
         needs("@acme/alpha", "1.2.0", "@acme/beta", "^2.0.0"),
         catalog.candidate("@acme/beta", "1.4.0")
     ];
-    testing.assertContains(lockStaleReason({"@acme/alpha": "*"}, $locked),
+    testing.assertContains(
+        lockStaleReason({"@acme/alpha": "*"}, $locked),
         "@acme/beta is locked at 1.4.0");
 }
 
@@ -601,13 +759,74 @@ func testLockIsStaleWhenATransitiveIsAbsent() {
     def locked as list of catalog.Candidate init [
         needs("@acme/alpha", "1.2.0", "@acme/beta", "^1.0.0")
     ];
-    testing.assertContains(lockStaleReason({"@acme/alpha": "*"}, $locked),
+    testing.assertContains(
+        lockStaleReason({"@acme/alpha": "*"}, $locked),
         "@acme/beta, which is not locked");
 }
 
 func testEmptyLockIsStale() {
     def none as list of catalog.Candidate init [];
     testing.assertContains(lockStaleReason({"@acme/alpha": "*"}, $none), "no decks");
+}
+
+# A project with no requirements locks nothing, and used to re-resolve on every
+# install because of it.
+# The same registry spelled with a trailing slash or another case is the same
+# registry, and a registry deck delivered as git is still that registry's.
+func testLockRegistryConflictsCompareRegistriesNotStrings() {
+    def c as catalog.Candidate init catalog.candidate("@acme/x", "1.0.0");
+    $c.registry = "https://Reg.example/";
+    def none as list of manifest.Dependency init [];
+    testing.assertEqual(len(lockRegistryConflicts([$c], $none, "https://reg.example")), 0);
+    $c.kind = "git";
+    testing.assertEqual(len(lockRegistryConflicts([$c], $none, "https://other.example")), 1);
+}
+
+func testAnEmptyLockWithNoRootsIsCurrent() {
+    def none as list of catalog.Candidate init [];
+    def noRoots as map of string to string init {};
+    testing.assertEqual(lockStaleReason($noRoots, $none), "");
+}
+
+# A removed requirement used to stay locked and vendored for good.
+func testALockedDeckNothingRequiresMakesTheLockStale() {
+    def locked as list of catalog.Candidate init [
+        needs("@acme/alpha", "1.2.0", "@acme/beta", "^1.0.0"),
+        catalog.candidate("@acme/beta", "1.4.0"),
+        catalog.candidate("@acme/gone", "2.0.0")
+    ];
+    testing.assertEqual(lockStaleReason({"@acme/alpha": "*"}, $locked), "");
+    testing.assertContains(lockOrphanReason({"@acme/alpha": "*"}, $locked), "@acme/gone 2.0.0");
+    testing.assertEqual(lockOrphanReason({"@acme/alpha": "*", "@acme/gone": "*"}, $locked), "");
+}
+
+func testOnlyReachableDropsWhatTheRootsNoLongerNeed() {
+    def set as list of catalog.Candidate init [
+        needs("@acme/alpha", "1.2.0", "@acme/beta", "^1.0.0"),
+        catalog.candidate("@acme/beta", "1.4.0"),
+        catalog.candidate("@acme/gone", "2.0.0")
+    ];
+    def kept as list of catalog.Candidate init onlyReachable({"@acme/alpha": "*"}, $set);
+    testing.assertEqual(len($kept), 2);
+    testing.assertEqual($kept[1].name, "@acme/beta");
+}
+
+# A targeted update pins the decks it was not asked to move, and only those the
+# manifest still reaches.
+func testTargetedPinsLeaveTheNamedDeckFree() {
+    def current as list of catalog.Candidate init [
+        needs("@acme/alpha", "1.2.0", "@acme/beta", "^1.0.0"),
+        catalog.candidate("@acme/beta", "1.4.0"),
+        catalog.candidate("@acme/other", "3.0.0")
+    ];
+    def roots as map of string to string init {"@acme/alpha": "^1.0.0", "@acme/other": "*"};
+    def all as map of string to string init pinsFor($roots, $current, ["@acme/alpha"], false);
+    testing.assertEqual($all["@acme/alpha"], "^1.0.0");
+    testing.assertEqual($all["@acme/beta"], "=1.4.0");
+    testing.assertEqual($all["@acme/other"], "=3.0.0");
+    def direct as map of string to string init pinsFor($roots, $current, ["@acme/alpha"], true);
+    testing.assertFalse(maps.has($direct, "@acme/beta"));
+    testing.assertEqual($direct["@acme/other"], "=3.0.0");
 }
 
 # --- install honours the lock -----------------------------------------------
@@ -761,7 +980,8 @@ func testEngineAlternativesOr() {
 func testConflictHit() {
     def conflicts as list of manifest.Dependency init engineList("oldjvc", "<1.0.0");
     def resolved as list of catalog.Candidate init [
-        resolution("oldjvc", "0.9.0"), resolution("ansi", "1.2.0")
+        resolution("oldjvc", "0.9.0"),
+        resolution("ansi", "1.2.0")
     ];
     testing.assertEqual(len(checkConflicts($conflicts, $resolved)), 1);
 }
@@ -803,17 +1023,17 @@ func deckArchive() {
 }
 
 func testSrcSubpath() {
-    testing.assertEqual(srcSubpath("src/routeros.j"), "routeros.j");
-    testing.assertEqual(srcSubpath("./src/routeros.j"), "routeros.j");
-    testing.assertEqual(srcSubpath("pkg-1.0/src/query/words.j"), "query/words.j");
-    testing.assertEqual(srcSubpath("deck.toml"), "");
-    testing.assertEqual(srcSubpath("./README.md"), "");
+    testing.assertEqual(srcSubpath("src/routeros.j", ""), "routeros.j");
+    testing.assertEqual(srcSubpath("./src/routeros.j", ""), "routeros.j");
+    testing.assertEqual(srcSubpath("pkg-1.0/src/query/words.j", "pkg-1.0/"), "query/words.j");
+    testing.assertEqual(srcSubpath("deck.toml", ""), "");
+    testing.assertEqual(srcSubpath("./README.md", ""), "");
 }
 
 func testChecksumMatches() {
     def data as bytes init convert.bytesFromString("hello", "utf-8");
     def sum as string init encoding.toText(hash.compute($data, "sha256"), "hex");
-    testing.assertTrue(checksumMatches($data, ""));                 # empty = unverified
+    testing.assertTrue(checksumMatches($data, "")); # empty = unverified
     testing.assertTrue(checksumMatches($data, $sum));
     testing.assertTrue(checksumMatches($data, "sha256:" + $sum));
     testing.assertFalse(checksumMatches($data, "sha256:00"));
@@ -821,9 +1041,14 @@ func testChecksumMatches() {
 
 func testInstallArchiveVendorsOnlySrc() {
     def dir as string init freshDir("vendor");
-    def vr as VendorResult init installArchive($dir, "@jennifer/routeros", deckArchive(), "", "tar.gz");
+    def vr as VendorResult init installArchive(
+        $dir,
+        "@jennifer/routeros",
+        deckArchive(),
+        "",
+        "tar.gz");
     testing.assertTrue($vr.ok);
-    testing.assertEqual($vr.files, 2);   # only the two src/ files
+    testing.assertEqual($vr.files, 2); # only the two src/ files
     testing.assertTrue(fs.exists($dir + "/vendor/jennifer/routeros/routeros.j"));
     testing.assertTrue(fs.exists($dir + "/vendor/jennifer/routeros/query/words.j"));
     # root-level manifest / docs are ignored - vendor stays pure
@@ -836,8 +1061,13 @@ func testInstallArchiveChecksum() {
     def dir as string init freshDir("vendorsum");
     def data as bytes init deckArchive();
     def sum as string init encoding.toText(hash.compute($data, "sha256"), "hex");
-    testing.assertTrue(installArchive($dir, "@jennifer/routeros", $data, "sha256:" + $sum, "tar.gz").ok);
-    def bad as VendorResult init installArchive($dir, "@jennifer/routeros", $data, "sha256:dead", "tar.gz");
+    testing.assertTrue(installArchive($dir, "@jennifer/routeros", $data, "sha256:" + $sum, "tar.gz").ok); # lint-disable: L203
+    def bad as VendorResult init installArchive(
+        $dir,
+        "@jennifer/routeros",
+        $data,
+        "sha256:dead",
+        "tar.gz");
     testing.assertFalse($bad.ok);
     testing.assertContains($bad.message, "checksum");
     fs.removeAll($dir);
@@ -856,13 +1086,18 @@ func testInstallArchiveRequiresSrc() {
 # half-written tree: everything is staged and swapped in at the end
 func testInstallArchiveLeavesTheOldTreeOnFailure() {
     def dir as string init freshDir("atomic");
-    def good as VendorResult init installArchive($dir, "@jennifer/routeros",
-        deckArchive(), "", "tar.gz");
+    def good as VendorResult init installArchive(
+        $dir,
+        "@jennifer/routeros",
+        deckArchive(),
+        "",
+        "tar.gz");
     testing.assertTrue($good.ok);
     def vendored as string init $dir + "/vendor/jennifer/routeros/routeros.j";
     testing.assertTrue(fs.exists($vendored));
     # a replacement archive with no entrypoint must be refused...
-    def bad as bytes init archive.pack([entry("src/other.j", 'export func f() { return 1; }')],
+    def bad as bytes init archive.pack(
+        [entry("src/other.j", 'export func f() { return 1; }')],
         "tar.gz");
     testing.assertFalse(installArchive($dir, "@jennifer/routeros", $bad, "", "tar.gz").ok);
     # ...and the working install must survive it
@@ -884,7 +1119,9 @@ func testInstallArchiveLeavesNoStagingBehind() {
 
 func testInstallArchiveRequiresEntrypoint() {
     def dir as string init freshDir("noentry");
-    def data as bytes init archive.pack([entry("src/other.j", "export def const X as int init 1;")], "tar.gz");
+    def data as bytes init archive.pack(
+        [entry("src/other.j", "export def const X as int init 1;")],
+        "tar.gz");
     def vr as VendorResult init installArchive($dir, "@jennifer/routeros", $data, "", "tar.gz");
     testing.assertFalse($vr.ok);
     testing.assertContains($vr.message, "entrypoint");
@@ -903,6 +1140,18 @@ func testDispatchHelp() {
     def outcome as Outcome init dispatch(["jvc", "help"]);
     testing.assertTrue($outcome.ok);
     testing.assertContains($outcome.message, "usage");
+}
+
+# A flag may come before the verb: the verb is the first non-flag argument,
+# and a valued flag's value is not mistaken for it.
+func testAFlagBeforeTheVerbIsSkipped() {
+    testing.assertEqual(verbAt(["jvc", "--registry", "http://r.example", "whoami"]), 3);
+    testing.assertEqual(verbAt(["jvc", "--dev", "install"]), 2);
+    testing.assertEqual(verbAt(["jvc", "--version"]), 1);
+    testing.assertEqual(verbAt(["jvc"]), 1);
+    def out as Outcome init dispatch(["jvc", "--registry", "http://r.example", "help"]);
+    testing.assertTrue($out.ok);
+    testing.assertContains($out.message, "usage");
 }
 
 func testDispatchUnknown() {
@@ -924,8 +1173,47 @@ func deviceAuth() {
     return $auth;
 }
 
+# A token pinned to another registry, or a CI identity outside the one request
+# trusted publishing covers, authorises nothing: answering "yes" sent a request
+# certain to be refused, whose 401 then told a pipeline to `jvc login`.
+func testCanAuthoriseAsksWhatGrantForWillDo() {
+    def dir as string init fs.makeTempDir("", "jvc-cred");
+    os.setEnv("JVC_CREDENTIALS", $dir + "/credentials.json");
+    os.setEnv("JVC_TOKEN", "secret");
+    os.setEnv("JVC_TOKEN_REGISTRY", "https://other.example");
+    def auth as registry.Auth init registry.noAuth();
+    testing.assertFalse(canAuthorise("https://r.example", $auth, "https://r.example/v1/yank"));
+    os.setEnv("JVC_TOKEN_REGISTRY", "https://r.example/");
+    testing.assertTrue(canAuthorise("https://r.example", $auth, "https://r.example/v1/yank"));
+    os.setEnv("JVC_TOKEN", "");
+    os.setEnv("JVC_TOKEN_REGISTRY", "");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
 func testAnAbsentAuthBlockIsReportedAsAcceptingNoLogins() {
     testing.assertContains(loginRefusal(registry.noAuth()), "accepts no logins");
+}
+
+# A registry that takes CI publishes but no logins sends an auth block holding
+# only trustedPublishing; its empty flow is not a flow to refuse by name.
+func testAnAuthBlockWithOnlyTrustedPublishingAcceptsNoLogins() {
+    def a as registry.Auth init registry.noAuth();
+    $a.present = true;
+    $a.trustedAudience = "registry.example";
+    $a.trustedProviders = ["github-actions"];
+    def why as string init loginRefusal($a);
+    testing.assertContains($why, "accepts no logins");
+    testing.assertFalse(strings.contains($why, "login flow"));
+}
+
+# Server spec 4.1: the missing flow decides, even beside a deviceUrl.
+func testAMissingFlowAcceptsNoLoginsWhateverElseIsAdvertised() {
+    def a as registry.Auth init deviceAuth();
+    $a.flow = "";
+    def why as string init loginRefusal($a);
+    testing.assertContains($why, "accepts no logins");
+    testing.assertFalse(strings.contains($why, "login flow"));
 }
 
 func testAnUnknownFlowIsRefusedByName() {
@@ -953,10 +1241,8 @@ func testCredentialsRoundTripPerRegistry() {
     def dir as string init fs.makeTempDir("", "jvc-cred");
     def file as string init $dir + "/credentials.json";
     os.setEnv("JVC_CREDENTIALS", $file);
-    writeCredential("http://a.example",
-        Credential{ token: "ta", refresh: "ra", login: "alice" });
-    writeCredential("http://b.example",
-        Credential{ token: "tb", refresh: "", login: "bob" });
+    writeCredential("http://a.example", Credential{token: "ta", refresh: "ra", login: "alice"});
+    writeCredential("http://b.example", Credential{token: "tb", refresh: "", login: "bob"});
     testing.assertEqual(readCredential("http://a.example").token, "ta");
     testing.assertEqual(readCredential("http://a.example").login, "alice");
     testing.assertEqual(readCredential("http://b.example").token, "tb");
@@ -968,10 +1254,8 @@ func testCredentialsRoundTripPerRegistry() {
 func testLogoutForgetsOnlyThatRegistry() {
     def dir as string init fs.makeTempDir("", "jvc-cred");
     os.setEnv("JVC_CREDENTIALS", $dir + "/credentials.json");
-    writeCredential("http://a.example",
-        Credential{ token: "ta", refresh: "", login: "alice" });
-    writeCredential("http://b.example",
-        Credential{ token: "tb", refresh: "", login: "bob" });
+    writeCredential("http://a.example", Credential{token: "ta", refresh: "", login: "alice"});
+    writeCredential("http://b.example", Credential{token: "tb", refresh: "", login: "bob"});
     testing.assertContains(runLogout("http://a.example").message, "discarded");
     testing.assertEqual(readCredential("http://a.example").token, "");
     testing.assertEqual(readCredential("http://b.example").token, "tb");
@@ -989,12 +1273,37 @@ func testLogoutWithoutATokenSaysSo() {
     fs.removeAll($dir);
 }
 
+# Valid JSON that is not an object used to throw at the first write, losing a
+# login the user had just approved.
+func testACredentialFileHoldingAListIsTreatedAsEmpty() {
+    def dir as string init fs.makeTempDir("", "jvc-cred");
+    def file as string init $dir + "/credentials.json";
+    fs.writeString($file, "[]");
+    os.setEnv("JVC_CREDENTIALS", $file);
+    writeCredential("http://a.example", Credential{token: "ta", refresh: "", login: "alice"});
+    testing.assertEqual(readCredential("http://a.example").token, "ta");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+# A refresh answered with no token used to be stored, which erased the entry.
+func testFinishLoginRefusesAnEmptyToken() {
+    def dir as string init fs.makeTempDir("", "jvc-cred");
+    os.setEnv("JVC_CREDENTIALS", $dir + "/credentials.json");
+    def body as string init '{"token":"t","login":"a"}';
+    def reply as registry.TokenReply init registry.parseTokenReply(200, $body);
+    $reply.token = "";
+    testing.assertFalse(finishLogin("http://a.example", $reply).ok);
+    testing.assertFalse(fs.exists($dir + "/credentials.json"));
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
 func testTheCredentialFileIsOwnerOnly() {
     def dir as string init fs.makeTempDir("", "jvc-cred");
     def file as string init $dir + "/credentials.json";
     os.setEnv("JVC_CREDENTIALS", $file);
-    writeCredential("http://a.example",
-        Credential{ token: "ta", refresh: "", login: "alice" });
+    writeCredential("http://a.example", Credential{token: "ta", refresh: "", login: "alice"});
     testing.assertEqual(fs.stat($file).mode & 0o777, 0o600);
     os.setEnv("JVC_CREDENTIALS", "");
     fs.removeAll($dir);
@@ -1019,29 +1328,33 @@ func lockedAt(name as string, version as string, url as string) {
 }
 
 func testTheMapperRoutesByScope() {
-    def mp as Mapper init newMapper(mapped({
-        "@acme/*": "http://internal.example",
-        "*": "http://public.example"
-    }), "http://fallback.example");
+    def mp as Mapper init newMapper(
+        mapped({"@acme/*": "http://internal.example", "*": "http://public.example"}),
+        "http://fallback.example");
     # Routing is decided before any network call, so only the URL is asserted.
-    testing.assertEqual(scopemap.registryFor($mp.registries, "@acme/tool",
-        $mp.fallback), "http://internal.example");
-    testing.assertEqual(scopemap.registryFor($mp.registries, "@other/tool",
-        $mp.fallback), "http://public.example");
+    testing.assertEqual(
+        scopemap.registryFor($mp.registries, "@acme/tool", $mp.fallback),
+        "http://internal.example");
+    testing.assertEqual(
+        scopemap.registryFor($mp.registries, "@other/tool", $mp.fallback),
+        "http://public.example");
 }
 
 func testTheMapperFallsBackWhenNothingIsMapped() {
     def mp as Mapper init newMapper(noRegistries(), "http://fallback.example");
-    testing.assertEqual(scopemap.registryFor($mp.registries, "@acme/tool",
-        $mp.fallback), "http://fallback.example");
+    testing.assertEqual(
+        scopemap.registryFor($mp.registries, "@acme/tool", $mp.fallback),
+        "http://fallback.example");
 }
 
 func testAMovedScopeConflictsWithTheLock() {
     def locked as list of catalog.Candidate init [
         lockedAt("@acme/tool", "1.0.0", "http://public.example")
     ];
-    def conflicts as list of string init lockRegistryConflicts($locked,
-        mapped({"@acme/*": "http://internal.example"}), "http://fallback.example");
+    def conflicts as list of string init lockRegistryConflicts(
+        $locked,
+        mapped({"@acme/*": "http://internal.example"}),
+        "http://fallback.example");
     testing.assertEqual(len($conflicts), 1);
     testing.assertContains($conflicts[0], "http://public.example");
     testing.assertContains($conflicts[0], "http://internal.example");
@@ -1051,18 +1364,24 @@ func testAnAgreeingMappingIsNoConflict() {
     def locked as list of catalog.Candidate init [
         lockedAt("@acme/tool", "1.0.0", "http://internal.example")
     ];
-    testing.assertEqual(len(lockRegistryConflicts($locked,
-        mapped({"@acme/*": "http://internal.example"}), "http://x")), 0);
+    testing.assertEqual(
+        len(lockRegistryConflicts(
+            $locked,
+            mapped({"@acme/*": "http://internal.example"}),
+            "http://x")),
+        0);
 }
 
 func testAnOlderLockWithoutARecordedRegistryIsAccepted() {
     # Lockfiles written before the registry was recorded must keep installing;
     # the next update writes it in.
-    def locked as list of catalog.Candidate init [
-        lockedAt("@acme/tool", "1.0.0", "")
-    ];
-    testing.assertEqual(len(lockRegistryConflicts($locked,
-        mapped({"@acme/*": "http://internal.example"}), "http://x")), 0);
+    def locked as list of catalog.Candidate init [lockedAt("@acme/tool", "1.0.0", "")];
+    testing.assertEqual(
+        len(lockRegistryConflicts(
+            $locked,
+            mapped({"@acme/*": "http://internal.example"}),
+            "http://x")),
+        0);
 }
 
 func testAGitSourcedLockEntryIsNotCheckedAgainstTheMapping() {
@@ -1070,8 +1389,9 @@ func testAGitSourcedLockEntryIsNotCheckedAgainstTheMapping() {
     # nothing to say about it.
     def c as catalog.Candidate init lockedAt("@acme/tool", "1.0.0", "");
     $c.kind = "git";
-    testing.assertEqual(len(lockRegistryConflicts([$c],
-        mapped({"@acme/*": "http://internal.example"}), "http://x")), 0);
+    testing.assertEqual(
+        len(lockRegistryConflicts([$c], mapped({"@acme/*": "http://internal.example"}), "http://x")), # lint-disable: L203
+        0);
 }
 
 func testTheConflictReportSaysHowToResolveIt() {
@@ -1082,8 +1402,7 @@ func testTheConflictReportSaysHowToResolveIt() {
 
 func testTheLockRecordsWhichRegistryADeckCameFrom() {
     def dir as string init fs.makeTempDir("", "jvc-lockreg");
-    def c as catalog.Candidate init lockedAt("@acme/tool", "1.0.0",
-        "http://internal.example");
+    def c as catalog.Candidate init lockedAt("@acme/tool", "1.0.0", "http://internal.example");
     writeLock($dir, [$c]);
     def back as Locked init readLock($dir);
     testing.assertEqual($back.decks[0].registry, "http://internal.example");
@@ -1111,11 +1430,9 @@ func testRegistryVerbSetsAndClears() {
     manifest.save(manifest.empty("@acme/app", "0.1.0"), $path);
     testing.assertTrue(runRegistry($dir, "@acme", "http://internal.example").ok);
     def m as manifest.Manifest init manifest.load($path);
-    testing.assertEqual(manifest.depListGet($m.registries, "@acme/*"),
-        "http://internal.example");
+    testing.assertEqual(manifest.depListGet($m.registries, "@acme/*"), "http://internal.example");
     testing.assertTrue(runRegistry($dir, "@acme", "").ok);
-    testing.assertFalse(manifest.depListHas(
-        manifest.load($path).registries, "@acme/*"));
+    testing.assertFalse(manifest.depListHas(manifest.load($path).registries, "@acme/*"));
     fs.removeAll($dir);
 }
 
@@ -1178,58 +1495,85 @@ func credDir(label as string) {
 
 # okAlways succeeds whatever token it is given.
 func okAlways(req as Request, token as string) {
-    return Reply{ status: 200, body: $token, via: "", refreshNote: "",
-        refreshFatal: false, mechanism: "" };
+    return Reply{
+        status: 200,
+        body: $token,
+        via: "",
+        refreshNote: "",
+        refreshFatal: false,
+        mechanism: ""
+    };
 }
 
 # needsFreshToken rejects the stale token and accepts anything else, which is
 # what a registry does once a refresh has been issued.
 func needsFreshToken(req as Request, token as string) {
     if ($token == "stale") {
-        return Reply{ status: 401, body: "expired", via: "", refreshNote: "",
-            refreshFatal: false, mechanism: "" };
+        return Reply{
+            status: 401,
+            body: "expired",
+            via: "",
+            refreshNote: "",
+            refreshFatal: false,
+            mechanism: ""
+        };
     }
-    return Reply{ status: 200, body: $token, via: "", refreshNote: "",
-        refreshFatal: false, mechanism: "" };
+    return Reply{
+        status: 200,
+        body: $token,
+        via: "",
+        refreshNote: "",
+        refreshFatal: false,
+        mechanism: ""
+    };
 }
 
 # alwaysUnauthorized never accepts, so a second 401 proves the retry is capped.
 func alwaysUnauthorized(req as Request, token as string) {
-    return Reply{ status: 401, body: "no", via: "", refreshNote: "",
-        refreshFatal: false, mechanism: "" };
+    return Reply{
+        status: 401,
+        body: "no",
+        via: "",
+        refreshNote: "",
+        refreshFatal: false,
+        mechanism: ""
+    };
 }
 
 # probeRequest is a stand-in request for the retry tests.
 func probeRequest() {
-    return Request{ url: "http://r.example/v1/claim", body: '{"scope":"x"}' };
+    return Request{url: "http://r.example/v1/claim", body: '{"scope":"x"}'};
 }
 
 # --- which copy of jvc is running -------------------------------------------
 
 func testTheChannelOfAPackagedCopy() {
-    testing.assertEqual(channelOf("/usr/share/jvc/bin/jvc", "/home/u/.local/share/jvc/apps"),
+    testing.assertEqual(
+        channelOf("/usr/share/jvc/bin/jvc", "/home/u/.local/share/jvc/apps"),
         "system package manager");
-    testing.assertEqual(channelOf("/opt/jvc/bin/jvc", "/home/u/.local/share/jvc/apps"),
+    testing.assertEqual(
+        channelOf("/opt/jvc/bin/jvc", "/home/u/.local/share/jvc/apps"),
         "system package manager");
 }
 
 func testTheChannelOfASelfInstalledCopy() {
     testing.assertEqual(
-        channelOf("/home/u/.local/share/jvc/apps/jvc/bin/jvc",
-            "/home/u/.local/share/jvc/apps"),
+        channelOf("/home/u/.local/share/jvc/apps/jvc/bin/jvc", "/home/u/.local/share/jvc/apps"),
         "jvc app install");
 }
 
 # /usr/local is where `jvc app install --scope system` puts a copy, so it is
 # neither packaged nor this user's.
 func testTheChannelOfAUsrLocalCopy() {
-    testing.assertEqual(channelOf("/usr/local/bin/jvc", "/home/u/.local/share/jvc/apps"),
+    testing.assertEqual(
+        channelOf("/usr/local/bin/jvc", "/home/u/.local/share/jvc/apps"),
         "/usr/local (locally administered, not packaged)");
 }
 
 func testTheChannelOfACheckout() {
-    testing.assertEqual(channelOf("/home/u/src/app-jvc/bin/jvc",
-        "/home/u/.local/share/jvc/apps"), "working tree or unpacked tarball");
+    testing.assertEqual(
+        channelOf("/home/u/src/app-jvc/bin/jvc", "/home/u/.local/share/jvc/apps"),
+        "working tree or unpacked tarball");
 }
 
 func testNoChannelWithoutAPath() {
@@ -1258,8 +1602,7 @@ func testAUserInstallIsNotOsManaged() {
 # The warning has one job: say the packaged copy was not replaced, and that
 # PATH now decides. An "upgraded" that did nothing is the failure it prevents.
 func testTheWarningSaysThePackagedCopyIsUntouched() {
-    def w as string init packagedJvcWarning("/usr/share/jvc/bin/jvc",
-        "/home/u/.local/bin");
+    def w as string init packagedJvcWarning("/usr/share/jvc/bin/jvc", "/home/u/.local/bin");
     testing.assertContains($w, "/usr/share/jvc/bin/jvc");
     testing.assertContains($w, "/home/u/.local/bin");
     testing.assertContains($w, "has not been replaced");
@@ -1282,17 +1625,27 @@ func clearAppStore(dir as string) {
 }
 
 func rememberJvc() {
-    app.remember(app.locations("", "."), app.Record{
-        name: "jvc", url: "https://github.com/jennifer-language/jvc",
-        version: "0.2.0", ref: "0.2.0", commit: "abc123", entry: "bin/jvc"
-    });
+    app.remember(
+        app.locations("", "."),
+        app.Record{
+            name: "jvc",
+            url: "https://github.com/jennifer-language/jvc",
+            version: "0.2.0",
+            ref: "0.2.0",
+            commit: "abc123",
+            entry: "bin/jvc",
+            deck: "",
+            spec: ""
+        });
 }
 
 func testInstallingOverAPackagedJvcWarns() {
     def dir as string init appStore("warns");
     rememberJvc();
-    def out as Outcome init withShadowNote(["/usr/share/jvc/bin/jvc", "app",
-        "install", "jvc"], "", ok("installed jvc 0.2.0"));
+    def out as Outcome init withShadowNote(
+        ["/usr/share/jvc/bin/jvc", "app", "install", "jvc"],
+        "",
+        ok("installed jvc 0.2.0"));
     testing.assertTrue($out.ok);
     testing.assertContains($out.message, "installed jvc 0.2.0");
     testing.assertContains($out.message, "system package manager owns");
@@ -1304,8 +1657,10 @@ func testInstallingOverAPackagedJvcWarns() {
 func testASelfInstalledJvcUpdatingItselfIsQuiet() {
     def dir as string init appStore("quiet");
     rememberJvc();
-    def out as Outcome init withShadowNote([$dir + "/apps/jvc/bin/jvc", "app",
-        "update"], "", ok("app update:\n  ok    jvc unchanged"));
+    def out as Outcome init withShadowNote(
+        [$dir + "/apps/jvc/bin/jvc", "app", "update"],
+        "",
+        ok("app update:\n  ok    jvc unchanged"));
     testing.assertFalse(strings.indexOf($out.message, "package manager") >= 0);
     clearAppStore($dir);
 }
@@ -1313,8 +1668,10 @@ func testASelfInstalledJvcUpdatingItselfIsQuiet() {
 # Nothing was installed, so nothing shadows anything.
 func testNoWarningWhenJvcIsNotInTheStore() {
     def dir as string init appStore("absent");
-    def out as Outcome init withShadowNote(["/usr/share/jvc/bin/jvc", "app",
-        "install", "grimoire"], "", ok("installed grimoire 0.1.0"));
+    def out as Outcome init withShadowNote(
+        ["/usr/share/jvc/bin/jvc", "app", "install", "grimoire"],
+        "",
+        ok("installed grimoire 0.1.0"));
     testing.assertFalse(strings.indexOf($out.message, "package manager") >= 0);
     clearAppStore($dir);
 }
@@ -1322,8 +1679,10 @@ func testNoWarningWhenJvcIsNotInTheStore() {
 func testAFailedInstallIsNotDecoratedWithAWarning() {
     def dir as string init appStore("failed");
     rememberJvc();
-    def out as Outcome init withShadowNote(["/usr/share/jvc/bin/jvc", "app",
-        "install", "jvc"], "", fail("cannot reach the repository"));
+    def out as Outcome init withShadowNote(
+        ["/usr/share/jvc/bin/jvc", "app", "install", "jvc"],
+        "",
+        fail("cannot reach the repository"));
     testing.assertFalse($out.ok);
     testing.assertFalse(strings.indexOf($out.message, "package manager") >= 0);
     clearAppStore($dir);
@@ -1349,9 +1708,12 @@ func inGithubJob() {
 
 func testAStoredLoginAuthorisesWhenNothingElseIsSet() {
     def dir as string init credDir("stored");
-    writeCredential("http://r.example",
-        Credential{ token: "stored-token", refresh: "r", login: "alice" });
-    def g as ciauth.Grant init grantFor("http://r.example", deviceAuth(),
+    writeCredential(
+        "http://r.example",
+        Credential{token: "stored-token", refresh: "r", login: "alice"});
+    def g as ciauth.Grant init grantFor(
+        "http://r.example",
+        deviceAuth(),
         "http://r.example/v1/claim");
     testing.assertEqual($g.token, "stored-token");
     testing.assertEqual($g.mechanism, ciauth.BY_STORED);
@@ -1364,10 +1726,13 @@ func testAStoredLoginAuthorisesWhenNothingElseIsSet() {
 # authority and outranks whoever happens to be logged in on the machine.
 func testTheEnvironmentTokenOutranksAStoredLogin() {
     def dir as string init credDir("envwins");
-    writeCredential("http://r.example",
-        Credential{ token: "stored-token", refresh: "r", login: "alice" });
+    writeCredential(
+        "http://r.example",
+        Credential{token: "stored-token", refresh: "r", login: "alice"});
     os.setEnv(ciauth.ENV_TOKEN, "ci-token");
-    def g as ciauth.Grant init grantFor("http://r.example", deviceAuth(),
+    def g as ciauth.Grant init grantFor(
+        "http://r.example",
+        deviceAuth(),
         "http://r.example/v1/claim");
     testing.assertEqual($g.token, "ci-token");
     testing.assertFalse($g.refreshable);
@@ -1378,7 +1743,9 @@ func testTheEnvironmentTokenOutranksAStoredLogin() {
 
 func testNothingSetMeansNoGrant() {
     def dir as string init credDir("nogrant");
-    def g as ciauth.Grant init grantFor("http://r.example", deviceAuth(),
+    def g as ciauth.Grant init grantFor(
+        "http://r.example",
+        deviceAuth(),
         "http://r.example/v1/claim");
     testing.assertFalse($g.found);
     testing.assertEqual($g.error, "");
@@ -1392,9 +1759,12 @@ func testNothingSetMeansNoGrant() {
 func testTrustedPublishingIsOnlyTriedAtTheAdvertisedEndpoint() {
     def dir as string init credDir("elsewhere");
     inGithubJob();
-    writeCredential("http://r.example",
-        Credential{ token: "stored-token", refresh: "r", login: "alice" });
-    def g as ciauth.Grant init grantFor("http://r.example", trustedPublishingAuth(),
+    writeCredential(
+        "http://r.example",
+        Credential{token: "stored-token", refresh: "r", login: "alice"});
+    def g as ciauth.Grant init grantFor(
+        "http://r.example",
+        trustedPublishingAuth(),
         "http://r.example/v1/yank");
     testing.assertEqual($g.mechanism, ciauth.BY_STORED);
     testing.assertEqual($g.error, "");
@@ -1405,9 +1775,13 @@ func testTrustedPublishingIsOnlyTriedAtTheAdvertisedEndpoint() {
 }
 
 func testTheAdvertisedEndpointIsRecognised() {
-    testing.assertTrue(isTrustedTarget("http://r.example", trustedPublishingAuth(),
+    testing.assertTrue(isTrustedTarget(
+        "http://r.example",
+        trustedPublishingAuth(),
         "http://r.example/v1/publish"));
-    testing.assertFalse(isTrustedTarget("http://r.example", deviceAuth(),
+    testing.assertFalse(isTrustedTarget(
+        "http://r.example",
+        deviceAuth(),
         "http://r.example/v1/publish"));
 }
 
@@ -1416,9 +1790,12 @@ func testTheAdvertisedEndpointIsRecognised() {
 func testABrokenIdentityIsReportedRatherThanFallenBackFrom() {
     def dir as string init credDir("brokenid");
     inGithubJob();
-    writeCredential("http://r.example",
-        Credential{ token: "stored-token", refresh: "r", login: "alice" });
-    def g as ciauth.Grant init grantFor("http://r.example", trustedPublishingAuth(),
+    writeCredential(
+        "http://r.example",
+        Credential{token: "stored-token", refresh: "r", login: "alice"});
+    def g as ciauth.Grant init grantFor(
+        "http://r.example",
+        trustedPublishingAuth(),
         "http://r.example/v1/publish");
     testing.assertFalse($g.found);
     testing.assertContains($g.error, "identity provider");
@@ -1433,8 +1810,11 @@ func testABrokenIdentityIsReportedRatherThanFallenBackFrom() {
 func testAnEnvironmentTokenIsNotRefreshedOnAFourOhOne() {
     def dir as string init credDir("envnorefresh");
     os.setEnv(ciauth.ENV_TOKEN, "ci-token");
-    def reply as Reply init withAuth("http://r.example", authWithRefresh(),
-        alwaysUnauthorized, probeRequest());
+    def reply as Reply init withAuth(
+        "http://r.example",
+        authWithRefresh(),
+        alwaysUnauthorized,
+        probeRequest());
     testing.assertEqual($reply.status, 401);
     testing.assertTrue($reply.refreshFatal);
     testing.assertContains($reply.refreshNote, "JVC_TOKEN");
@@ -1447,8 +1827,11 @@ func testAnEnvironmentTokenIsNotRefreshedOnAFourOhOne() {
 func testTheMechanismIsCarriedOutOfWithAuth() {
     def dir as string init credDir("mechanism");
     os.setEnv(ciauth.ENV_TOKEN, "ci-token");
-    def reply as Reply init withAuth("http://r.example", authWithRefresh(),
-        okAlways, probeRequest());
+    def reply as Reply init withAuth(
+        "http://r.example",
+        authWithRefresh(),
+        okAlways,
+        probeRequest());
     testing.assertEqual($reply.mechanism, ciauth.BY_ENVIRONMENT);
     os.setEnv(ciauth.ENV_TOKEN, "");
     os.setEnv("JVC_CREDENTIALS", "");
@@ -1494,7 +1877,9 @@ func testWhoamiNamesTheCiIdentityWhenThereIsOne() {
 func testAnEnvironmentTokenIsNeverWrittenToTheCredentialFile() {
     def dir as string init credDir("neverwritten");
     os.setEnv(ciauth.ENV_TOKEN, "ci-token");
-    def g as ciauth.Grant init grantFor("http://r.example", deviceAuth(),
+    def g as ciauth.Grant init grantFor(
+        "http://r.example",
+        deviceAuth(),
         "http://r.example/v1/claim");
     testing.assertEqual($g.token, "ci-token");
     testing.assertEqual(readCredential("http://r.example").token, "");
@@ -1506,9 +1891,12 @@ func testAnEnvironmentTokenIsNeverWrittenToTheCredentialFile() {
 
 func testAnAcceptedRequestIsNotRetried() {
     def dir as string init credDir("noretry");
-    writeCredential("http://r.example",
-        Credential{ token: "good", refresh: "r", login: "alice" });
-    def reply as Reply init withAuth("http://r.example", authWithRefresh(), okAlways, probeRequest());
+    writeCredential("http://r.example", Credential{token: "good", refresh: "r", login: "alice"});
+    def reply as Reply init withAuth(
+        "http://r.example",
+        authWithRefresh(),
+        okAlways,
+        probeRequest());
     testing.assertEqual($reply.status, 200);
     testing.assertEqual($reply.body, "good");
     os.setEnv("JVC_CREDENTIALS", "");
@@ -1518,10 +1906,12 @@ func testAnAcceptedRequestIsNotRetried() {
 func testAFourOhOneWithoutARefreshTokenIsNotRetried() {
     # Nothing to refresh with, so the 401 stands and the caller says to log in.
     def dir as string init credDir("norefresh");
-    writeCredential("http://r.example",
-        Credential{ token: "stale", refresh: "", login: "alice" });
-    def reply as Reply init withAuth("http://r.example", authWithRefresh(),
-        needsFreshToken, probeRequest());
+    writeCredential("http://r.example", Credential{token: "stale", refresh: "", login: "alice"});
+    def reply as Reply init withAuth(
+        "http://r.example",
+        authWithRefresh(),
+        needsFreshToken,
+        probeRequest());
     testing.assertEqual($reply.status, 401);
     os.setEnv("JVC_CREDENTIALS", "");
     fs.removeAll($dir);
@@ -1529,8 +1919,7 @@ func testAFourOhOneWithoutARefreshTokenIsNotRetried() {
 
 func testARegistryWithNoRefreshEndpointCannotRefresh() {
     def dir as string init credDir("noendpoint");
-    writeCredential("http://r.example",
-        Credential{ token: "stale", refresh: "r", login: "alice" });
+    writeCredential("http://r.example", Credential{token: "stale", refresh: "r", login: "alice"});
     def out as Outcome init refreshCredential("http://r.example", deviceAuth());
     testing.assertFalse($out.ok);
     testing.assertContains($out.message, "no refresh endpoint");
@@ -1551,10 +1940,12 @@ func testASecondFourOhOneIsNotRetriedAgain() {
     # The retry is capped at one: a 401 after a fresh token means the token was
     # never the problem, and retrying would loop.
     def dir as string init credDir("capped");
-    writeCredential("http://r.example",
-        Credential{ token: "stale", refresh: "", login: "alice" });
-    def reply as Reply init withAuth("http://r.example", authWithRefresh(),
-        alwaysUnauthorized, probeRequest());
+    writeCredential("http://r.example", Credential{token: "stale", refresh: "", login: "alice"});
+    def reply as Reply init withAuth(
+        "http://r.example",
+        authWithRefresh(),
+        alwaysUnauthorized,
+        probeRequest());
     testing.assertEqual($reply.status, 401);
     os.setEnv("JVC_CREDENTIALS", "");
     fs.removeAll($dir);
@@ -1597,8 +1988,7 @@ func testADevBuildBypassesAFloorItCouldNotMeet() {
     # The case that started this: 0.24.0-dev refused a deck needing >=0.25.0,
     # while the interpreter itself would have loaded that deck's source without
     # complaint. A gate stricter than the thing it stands in for is a bug.
-    def engines as list of manifest.Dependency init
-        manifest.depListSet([], "jennifer", ">=0.25.0");
+    def engines as list of manifest.Dependency init manifest.depListSet([], "jennifer", ">=0.25.0");
     def out as Outcome init engineSatisfied($engines, "jennifer", "0.24.0-dev+28");
     testing.assertTrue($out.ok);
     testing.assertContains($out.message, "development build");
@@ -1606,8 +1996,7 @@ func testADevBuildBypassesAFloorItCouldNotMeet() {
 }
 
 func testAReleaseBuildIsStillGated() {
-    def engines as list of manifest.Dependency init
-        manifest.depListSet([], "jennifer", ">=0.25.0");
+    def engines as list of manifest.Dependency init manifest.depListSet([], "jennifer", ">=0.25.0");
     def out as Outcome init engineSatisfied($engines, "jennifer", "0.24.0");
     testing.assertFalse($out.ok);
     testing.assertContains($out.message, "does not satisfy");
@@ -1616,8 +2005,7 @@ func testAReleaseBuildIsStillGated() {
 func testADevBuildIsStillHeldToTheAllowlist() {
     # Bypassing the floor is about how new a build is, not about which engine is
     # running: a development build of jennifer-tiny is still not jennifer.
-    def engines as list of manifest.Dependency init
-        manifest.depListSet([], "jennifer", ">=0.1.0");
+    def engines as list of manifest.Dependency init manifest.depListSet([], "jennifer", ">=0.1.0");
     def out as Outcome init engineSatisfied($engines, "jennifer-tiny", "0.24.0-dev+28");
     testing.assertFalse($out.ok);
     testing.assertContains($out.message, "allowlist");
@@ -1630,25 +2018,56 @@ func testTheGraphGateBypassesForADevBuildToo() {
     testing.assertFalse(checkGraphEngines([$c], "jennifer", "0.24.0").ok);
 }
 
-
 # --- polling backs off, but not past the window ------------------------------
 
 func testTheIntervalHoldsSteadyWhenNotAskedToSlowDown() {
-    testing.assertEqual(nextInterval(5, false), 5);
+    testing.assertEqual(nextInterval(5, false, 0), 5);
 }
 
 func testTheIntervalDoublesWhenAskedToSlowDown() {
-    testing.assertEqual(nextInterval(5, true), 10);
-    testing.assertEqual(nextInterval(10, true), 20);
+    testing.assertEqual(nextInterval(5, true, 0), 10);
+    testing.assertEqual(nextInterval(10, true, 0), 20);
 }
 
 func testTheIntervalIsCapped() {
     # A run of server faults would otherwise walk the wait past the code's whole
     # lifetime, so jvc would sleep through the window and report an expiry it
     # never waited for.
-    testing.assertEqual(nextInterval(40, true), MAX_POLL_INTERVAL);
-    testing.assertEqual(nextInterval(MAX_POLL_INTERVAL, true), MAX_POLL_INTERVAL);
+    testing.assertEqual(nextInterval(40, true, 0), MAX_POLL_INTERVAL);
+    testing.assertEqual(nextInterval(MAX_POLL_INTERVAL, true, 0), MAX_POLL_INTERVAL);
+    testing.assertEqual(nextInterval(5, true, 3600), MAX_POLL_INTERVAL);
     testing.assertTrue(MAX_POLL_INTERVAL < 900);
+}
+
+# A Retry-After longer than the doubled interval wins; a shorter one does not.
+func testALongerRetryAfterReplacesTheDoubledInterval() {
+    testing.assertEqual(nextInterval(5, true, 30), 30);
+    testing.assertEqual(nextInterval(5, true, 3), 10);
+}
+
+func testAThrottledStartWaitsItsRetryAfterWithinTheCap() {
+    testing.assertEqual(startRetryWait(12), 12);
+    testing.assertEqual(startRetryWait(0), 5);
+    testing.assertEqual(startRetryWait(MAX_POLL_INTERVAL), MAX_POLL_INTERVAL);
+    testing.assertEqual(startRetryWait(MAX_POLL_INTERVAL + 1), -1);
+}
+
+func testAStillThrottledStartSaysWhenToTryAgain() {
+    def d as registry.DeviceStart init registry.DeviceStart{
+        deviceCode: "",
+        userCode: "",
+        verificationUri: "",
+        expiresIn: 0,
+        interval: 0,
+        throttled: true,
+        retryAfter: 120,
+        detail: ""
+    };
+    def why as string init throttledStart("https://r.example", $d);
+    testing.assertContains($why, "rate-limiting logins");
+    testing.assertContains($why, "try again in 120 seconds");
+    $d.retryAfter = 0;
+    testing.assertContains(throttledStart("https://r.example", $d), "try again later");
 }
 
 # --- a login is abandoned when the registry keeps failing --------------------
@@ -1657,8 +2076,10 @@ func testTheFaultReportCarriesTheRegistrysOwnReason() {
     # The reason is the whole point: it is what says whether the user or the
     # operator has to act, and without it the only way to find out was to go and
     # read the server's log.
-    def r as string init serverFaultReport("http://r.example",
-        "the provider could not be reached: response body exceeds 65536 bytes", 4);
+    def r as string init serverFaultReport(
+        "http://r.example",
+        "the provider could not be reached: response body exceeds 65536 bytes",
+        4);
     testing.assertContains($r, "http://r.example");
     testing.assertContains($r, "65536");
     testing.assertContains($r, "4 times in a row");
@@ -1692,20 +2113,18 @@ func testClaimNeedsAScope() {
 }
 
 func testOwnersNeedsBothArguments() {
-    testing.assertContains(runOwners("http://r.example", "mplx", "", true).message,
-        "usage:");
-    testing.assertContains(runOwners("http://r.example", "", "42", true).message,
-        "usage:");
+    testing.assertContains(runOwners("http://r.example", "mplx", "", true).message, "usage:");
+    testing.assertContains(runOwners("http://r.example", "", "42", true).message, "usage:");
 }
 
 func testTheOwnersBodyDefaultsToAdding() {
     # Adding is the safe direction to get wrong, so it is the default.
-    testing.assertContains(ownersBody("mplx", "42", true), '"action":"add"');
-    testing.assertContains(ownersBody("mplx", "42", false), '"action":"remove"');
+    testing.assertContains(registry.ownersBody("mplx", "42", true), '"action":"add"');
+    testing.assertContains(registry.ownersBody("mplx", "42", false), '"action":"remove"');
 }
 
 func testTheOwnersBodyFoldsTheScope() {
-    testing.assertContains(ownersBody("@MPLX", "42", true), '"scope":"@mplx"');
+    testing.assertContains(registry.ownersBody("@MPLX", "42", true), '"scope":"@mplx"');
 }
 
 func testAnUnknownCommandStillReachesTheFallthrough() {
@@ -1720,8 +2139,7 @@ func testAnUnknownCommandStillReachesTheFallthrough() {
 
 func testTheScopeDispatcherPassesOnForeignVerbs() {
     def none as list of string init [];
-    testing.assertEqual(dispatchScope("install", ["jvc", "install"], $none).message,
-        UNHANDLED);
+    testing.assertEqual(dispatchScope("install", ["jvc", "install"], $none).message, UNHANDLED);
 }
 
 # --- whoami ------------------------------------------------------------------
@@ -1736,10 +2154,15 @@ func testWhoamiWithoutATokenSaysToLogIn() {
 }
 
 func testWhoamiReportsTheAccountTheScopeBindsTo() {
-    def cred as Credential init Credential{ token: "t", refresh: "r", login: "mplx" };
+    def cred as Credential init Credential{token: "t", refresh: "r", login: "mplx"};
     def claims as registry.Claims init registry.Claims{
-        subject: "1986588", login: "mplx", issuedAt: 100, expiresAt: 3700,
-        orgs: ["viverto (305727207)"], orgsAt: 100 };
+        subject: "1986588",
+        login: "mplx",
+        issuedAt: 100,
+        expiresAt: 3700,
+        orgs: ["viverto (305727207)"],
+        orgsAt: 100
+    };
     def r as string init whoamiReport("http://r.example", $cred, $claims, 100);
     testing.assertContains($r, "@mplx");
     testing.assertContains($r, "1986588");
@@ -1748,9 +2171,15 @@ func testWhoamiReportsTheAccountTheScopeBindsTo() {
 }
 
 func testWhoamiSaysWhenATokenHasExpired() {
-    def cred as Credential init Credential{ token: "t", refresh: "", login: "x" };
+    def cred as Credential init Credential{token: "t", refresh: "", login: "x"};
     def claims as registry.Claims init registry.Claims{
-        subject: "1", login: "x", issuedAt: 0, expiresAt: 500, orgs: [], orgsAt: 0 };
+        subject: "1",
+        login: "x",
+        issuedAt: 0,
+        expiresAt: 500,
+        orgs: [],
+        orgsAt: 0
+    };
     def r as string init whoamiReport("http://r.example", $cred, $claims, 900);
     testing.assertContains($r, "expired at");
     # No refresh token held, so the way out is a full login and it should say so.
@@ -1761,10 +2190,17 @@ func testWhoamiSaysWhenATokenHasExpired() {
 func testWhoamiDistinguishesNoOrgsFromSome() {
     # The distinction that matters when a claim is refused: with no orgs, only a
     # scope matching the login is derivable at all.
-    def cred as Credential init Credential{ token: "t", refresh: "r", login: "x" };
+    def cred as Credential init Credential{token: "t", refresh: "r", login: "x"};
     def none as registry.Claims init registry.Claims{
-        subject: "1", login: "x", issuedAt: 0, expiresAt: 0, orgs: [], orgsAt: 0 };
-    testing.assertContains(whoamiReport("http://r.example", $cred, $none, 0),
+        subject: "1",
+        login: "x",
+        issuedAt: 0,
+        expiresAt: 0,
+        orgs: [],
+        orgsAt: 0
+    };
+    testing.assertContains(
+        whoamiReport("http://r.example", $cred, $none, 0),
         "none; only a scope matching your login");
 }
 
@@ -1772,9 +2208,15 @@ func testTheRefreshLineDoesNotPromiseAutomaticRenewal() {
     # It renews nothing on its own: the refresh token is spent only when a
     # command carrying the token is refused. Saying "is renewed" read as though
     # the expiry healed itself, which it never does.
-    def cred as Credential init Credential{ token: "t", refresh: "r", login: "x" };
+    def cred as Credential init Credential{token: "t", refresh: "r", login: "x"};
     def claims as registry.Claims init registry.Claims{
-        subject: "1", login: "x", issuedAt: 0, expiresAt: 500, orgs: [], orgsAt: 0 };
+        subject: "1",
+        login: "x",
+        issuedAt: 0,
+        expiresAt: 500,
+        orgs: [],
+        orgsAt: 0
+    };
     def r as string init whoamiReport("http://r.example", $cred, $claims, 100);
     testing.assertContains($r, "spent when a command is refused");
     testing.assertFalse(strings.contains($r, "is renewed"));
@@ -1787,20 +2229,25 @@ func testTheExpiryLineHandlesATokenWithNoExpiry() {
 # --- who the deckadmin line is actually for ----------------------------------
 
 func testPackagedAdviceDoesNotHandAnOperatorCommandToAnEndUser() {
-    # `deckadmin` edits the repository's store on the repository's own host, so
-    # printing it to whoever ran `jvc publish` gives them a command they cannot
-    # run and reads as an instruction meant for them.
-    def r as publish.Result init publish.Result{ ok: true, message: "packaged x",
-        operatorCommand: "deckadmin add @a/b 1.0.0 ..." };
+    # `deckadmin` runs on the repository's own host, so printing it to whoever ran
+    # `jvc pack` hands them a command they cannot run.
+    def r as publish.Result init publish.Result{
+        ok: true,
+        message: "packaged x",
+        operatorCommand: "deckadmin add @a/b 1.0.0 ..."
+    };
     def out as string init packagedAdvice($r, false);
     testing.assertFalse(strings.contains($out, "deckadmin"));
-    testing.assertContains($out, "operator's to do");
+    testing.assertContains($out, "through its operator");
     testing.assertContains($out, "--operator-command");
 }
 
 func testTheOperatorCommandIsShownWhenAskedFor() {
-    def r as publish.Result init publish.Result{ ok: true, message: "packaged x",
-        operatorCommand: "deckadmin add @a/b 1.0.0 ..." };
+    def r as publish.Result init publish.Result{
+        ok: true,
+        message: "packaged x",
+        operatorCommand: "deckadmin add @a/b 1.0.0 ..."
+    };
     def out as string init packagedAdvice($r, true);
     testing.assertContains($out, "deckadmin add @a/b 1.0.0");
     testing.assertContains($out, "on the repository's own host");
@@ -1826,11 +2273,16 @@ func testPublishWritesNothingEvenWhenItCannotPublish() {
     $m.pkg.urls["deck"] = "https://example.com/thing";
     manifest.save($m, $dir + "/deck.toml");
     fs.mkdirAll($dir + "/src");
-    fs.writeString($dir + "/src/thing.j", strings.join([
-        'export func hi() {', '    return 1;', '}'], "\n"));
+    fs.writeString(
+        $dir + "/src/thing.j",
+        strings.join(['export func hi() {', '    return 1;', '}'], "\n"));
     def out as Outcome init runPublish($dir, false, "http://127.0.0.1:1", "", "", "");
     testing.assertFalse($out.ok);
-    testing.assertContains($out.message, "jvc pack");
+    # An unreachable registry is reported as unreachable, not as one that takes
+    # no publishes: advising `jvc pack` for a network outage sent people to hand
+    # a release to an operator for nothing.
+    testing.assertContains($out.message, "could not reach");
+    testing.assertFalse(strings.contains($out.message, "jvc pack"));
     testing.assertFalse(fs.exists($dir + "/dist"));
     fs.removeAll($dir);
 }
@@ -1862,9 +2314,15 @@ func testAnExpiredTokenWithARefreshSaysItWillRenewItself() {
     # the next publish to refuse. It did not, and was right not to, because the
     # refresh renewed the token mid-command. The report has to carry that
     # consequence or the two lines invite the wrong conclusion.
-    def cred as Credential init Credential{ token: "t", refresh: "r", login: "x" };
+    def cred as Credential init Credential{token: "t", refresh: "r", login: "x"};
     def claims as registry.Claims init registry.Claims{
-        subject: "1", login: "x", issuedAt: 0, expiresAt: 500, orgs: [], orgsAt: 0 };
+        subject: "1",
+        login: "x",
+        issuedAt: 0,
+        expiresAt: 500,
+        orgs: [],
+        orgsAt: 0
+    };
     def r as string init whoamiReport("http://r.example", $cred, $claims, 900);
     testing.assertContains($r, "expired at");
     testing.assertContains($r, "will try to renew it");
@@ -1878,10 +2336,8 @@ func testAMissingRemoteListsTheOnesThatExist() {
     # wrong, so the refusal names the alternatives rather than only complaining.
     def dir as string init fs.makeTempDir("", "jvc-remotes");
     git.run(["git", "-C", $dir, "init", "-q"]);
-    git.run(["git", "-C", $dir, "remote", "add", "github",
-        "git@github.com:mplx/d.git"]);
-    git.run(["git", "-C", $dir, "remote", "add", "codeberg",
-        "https://codeberg.org/mplx/d.git"]);
+    git.run(["git", "-C", $dir, "remote", "add", "github", "git@github.com:mplx/d.git"]);
+    git.run(["git", "-C", $dir, "remote", "add", "codeberg", "https://codeberg.org/mplx/d.git"]);
     def src as Source init publishSource($dir, "0.1.0", "", "", "");
     testing.assertContains($src.error, "no `origin` remote");
     testing.assertContains($src.error, "github");
@@ -1893,10 +2349,8 @@ func testAMissingRemoteListsTheOnesThatExist() {
 func testAChosenRemoteIsUsedInsteadOfOrigin() {
     def dir as string init fs.makeTempDir("", "jvc-pickremote");
     git.run(["git", "-C", $dir, "init", "-q"]);
-    git.run(["git", "-C", $dir, "remote", "add", "origin",
-        "git@gitlab.example:group/d.git"]);
-    git.run(["git", "-C", $dir, "remote", "add", "github",
-        "git@github.com:mplx/d.git"]);
+    git.run(["git", "-C", $dir, "remote", "add", "origin", "git@gitlab.example:group/d.git"]);
+    git.run(["git", "-C", $dir, "remote", "add", "github", "git@github.com:mplx/d.git"]);
     # No tag, so it stops there, but the URL it resolved is in the report.
     def picked as Source init publishSource($dir, "0.1.0", "", "", "github");
     testing.assertEqual($picked.repository, "https://github.com/mplx/d.git");
@@ -1907,23 +2361,23 @@ func testAChosenRemoteIsUsedInsteadOfOrigin() {
 
 func testTheHostOfARemoteIsReadable() {
     testing.assertEqual(git.hostOfRemote("git@github.com:mplx/d.git"), "github.com");
-    testing.assertEqual(git.hostOfRemote("https://gitlab.mplx.eu/g/d.git"),
-        "gitlab.mplx.eu");
+    testing.assertEqual(git.hostOfRemote("https://gitlab.mplx.eu/g/d.git"), "gitlab.mplx.eu");
     testing.assertEqual(git.hostOfRemote("not a url"), "");
 }
 
 func testYankNeedsBothADeckAndAVersion() {
-    testing.assertContains(runYank("http://r.example", "@a/b", "", true).message,
+    testing.assertContains(
+        runYank("http://r.example", "@a/b", "", true).message,
         "usage: jvc yank");
-    testing.assertContains(runYank("http://r.example", "", "1.0.0", true).message,
+    testing.assertContains(
+        runYank("http://r.example", "", "1.0.0", true).message,
         "usage: jvc yank");
 }
 
 func testUnyankNamesItselfInItsUsage() {
     # The two verbs share an implementation, so the usage line has to follow the
     # verb the user actually typed.
-    testing.assertContains(runYank("http://r.example", "", "", false).message,
-        "usage: jvc unyank");
+    testing.assertContains(runYank("http://r.example", "", "", false).message, "usage: jvc unyank");
 }
 
 func testVendoringPreservesTheExecutableBit() {
@@ -1933,13 +2387,14 @@ func testVendoringPreservesTheExecutableBit() {
     # from where the mistake was made.
     def dir as string init fs.makeTempDir("", "jvc-mode");
     def files as list of archive.Entry init [
-        entryWithMode("src/tool.j", strings.join([
-            'export func hi() {', '    return 1;', '}'], "\n"), 0o644),
+        entryWithMode(
+            "src/tool.j",
+            strings.join(['export func hi() {', '    return 1;', '}'], "\n"),
+            0o644),
         entryWithMode("src/tool", '#!/usr/bin/env -S jennifer run', 0o755)
     ];
     def data as bytes init archive.pack($files, "tar.gz");
-    def vr as VendorResult init installArchive($dir, "@acme/tool", $data, "",
-        "tar.gz");
+    def vr as VendorResult init installArchive($dir, "@acme/tool", $data, "", "tar.gz");
     testing.assertTrue($vr.ok);
     def base as string init $dir + "/vendor/acme/tool/";
     testing.assertEqual(fs.stat($base + "tool").mode & 0o111, 0o111);
@@ -1949,8 +2404,12 @@ func testVendoringPreservesTheExecutableBit() {
 
 # entryWithMode builds one archive entry with an explicit permission set.
 func entryWithMode(name as string, body as string, mode as int) {
-    return archive.Entry{ name: $name, data: convert.bytesFromString($body, "utf-8"),
-        mode: $mode, mtime: 0 };
+    return archive.Entry{
+        name: $name,
+        data: convert.bytesFromString($body, "utf-8"),
+        mode: $mode,
+        mtime: 0
+    };
 }
 
 # --- installing an app by registry name --------------------------------------
@@ -2003,31 +2462,111 @@ func testAnUnsatisfiableConstraintNamesTheRegistry() {
     testing.assertContains($s.error, "^9.0.0");
 }
 
+# An archive's group and other write bits are not carried into a vendor tree,
+# and a member nobody could read is made readable; only the executable bit is.
+func testVendoredModesKeepOnlyTheExecutableBit() {
+    testing.assertEqual(vendoredMode(0o664), 0o644);
+    testing.assertEqual(vendoredMode(0o775), 0o755);
+    testing.assertEqual(vendoredMode(0o000), 0o644);
+    testing.assertEqual(vendoredMode(0o4755), 0o755);
+}
+
+# A registry record naming a local path or file:// URL would have jvc read files
+# off this machine on the registry's say-so.
+func testARegistryArchiveUrlMustBeHttp() {
+    testing.assertThrows("fetchRegistryLocal", "fetch");
+}
+
+# A bare archive's `tools/src/b.j` sorts after `src/b.j` and used to be vendored
+# over it, as if `tools` were a wrapper directory.
+func testASiblingSrcFolderDoesNotOverwriteTheDeck() {
+    def dir as string init freshDir("siblingsrc");
+    def data as bytes init rawTar(["src/b.j", "tools/src/b.j"], ["# real\n", "# EVIL\n"]);
+    def vr as VendorResult init installArchive($dir, "@acme/b", $data, "", "tar");
+    testing.assertTrue($vr.ok);
+    testing.assertEqual($vr.files, 1);
+    testing.assertEqual(fs.readString($dir + "/vendor/acme/b/b.j"), "# real\n");
+    fs.removeAll($dir);
+}
+
+func fetchRegistryLocal() {
+    def c as catalog.Candidate init catalog.candidate("@acme/x", "1.0.0");
+    $c.kind = "tar.gz";
+    $c.checksum = "sha256:00";
+    $c.url = "file:///etc/passwd";
+    $c.registry = "https://r.example";
+    fetchArchive($c);
+}
+
+# A template's mapping would let an engine's publisher choose where every scope
+# of the new project resolves.
+func testAFrameManifestDropsTheTemplatesRegistriesAndSources() {
+    def engine as catalog.Candidate init catalog.candidate("@acme/engine", "1.2.0");
+    def doc as string init "[package]\nname = \"site\"\nversion = \"0.1.0\"\n\n" +
+        "[registries]\n\"*\" = \"https://evil.example\"\n\n" +
+        "[sources]\n\"@acme/engine\" = \"https://evil.example/e.git\"\n";
+    def m as manifest.Manifest init frameManifest("site", $engine, "", $doc);
+    testing.assertEqual(len($m.registries), 0);
+    testing.assertEqual(len($m.sources), 0);
+    testing.assertEqual(manifest.depListGet($m.decks, "@acme/engine"), "^1.2.0");
+}
+
+# A prerelease engine has no caret form, so the frame pins it exactly; a caret
+# pin would fail the frame's own manifest check.
+func testAPrereleaseEngineIsPinnedExactly() {
+    testing.assertEqual(enginePin("1.2.0"), "^1.2.0");
+    testing.assertEqual(enginePin("1.0.0-rc.1"), "=1.0.0-rc.1");
+    def engine as catalog.Candidate init catalog.candidate("@acme/engine", "1.0.0-rc.1");
+    def m as manifest.Manifest init frameManifest("site", $engine, "", "");
+    def pin as string init manifest.depListGet($m.decks, "@acme/engine");
+    testing.assertTrue(constraint.isValidConstraint($pin));
+    testing.assertTrue(constraint.satisfies("1.0.0-rc.1", $pin));
+}
+
+func testEveryManifestFormatIsSkippedInAFrame() {
+    for (def name in ["deck.toml", "deck.yaml", "deck.yml", "deck.json"]) {
+        testing.assertTrue(isManifestName($name));
+    }
+    testing.assertFalse(isManifestName("src/deck.toml"));
+}
+
+func testAnAppRecordForAnotherDeckIsRefused() {
+    # A registry asked about one deck that answers with another's repository URL
+    # would otherwise choose what gets cloned and run.
+    def found as list of catalog.Candidate init [
+        published("@evil/tool", "1.0.0", "git", "https://evil/t.git")
+    ];
+    def s as AppSource init pickApp($found, "@acme/tool", "*", "http://r");
+    testing.assertEqual($s.url, "");
+    testing.assertContains($s.error, "refusing it");
+}
+
 func testARefusedRefreshIsReportedNotSwallowed() {
     # The contradiction this fixes: `whoami` says a refresh token is held and
     # will renew automatically, while the command says only "not authenticated".
     # The refresh was tried and refused, and that is the half worth saying.
-    def msg as string init authFailure("http://r.example",
+    def msg as string init authFailure(
+        "http://r.example",
         "http://r.example rejected the stored refresh token; run `jvc login` again");
     testing.assertContains($msg, "not authenticated");
     testing.assertContains($msg, "rejected the stored refresh token");
 }
 
 func testAuthFailureWithNothingToAddStaysShort() {
-    testing.assertEqual(authFailure("http://r.example", ""),
-        reloginAdvice("http://r.example"));
-    testing.assertEqual(authFailure("http://r.example", "   "),
-        reloginAdvice("http://r.example"));
+    testing.assertEqual(authFailure("http://r.example", ""), reloginAdvice("http://r.example"));
+    testing.assertEqual(authFailure("http://r.example", "   "), reloginAdvice("http://r.example"));
 }
 
 func testARefusedRefreshCarriesOutOfWithAuth() {
     def dir as string init credDir("refusednote");
     # A refresh token the stub registry will not accept, and no refresh endpoint
     # advertised, so refreshCredential refuses locally and says why.
-    writeCredential("http://r.example",
-        Credential{ token: "stale", refresh: "r", login: "x" });
-    def reply as Reply init withAuth("http://r.example", deviceAuth(),
-        needsFreshToken, probeRequest());
+    writeCredential("http://r.example", Credential{token: "stale", refresh: "r", login: "x"});
+    def reply as Reply init withAuth(
+        "http://r.example",
+        deviceAuth(),
+        needsFreshToken,
+        probeRequest());
     testing.assertEqual($reply.status, 401);
     testing.assertContains($reply.refreshNote, "no refresh endpoint");
     os.setEnv("JVC_CREDENTIALS", "");
@@ -2039,8 +2578,7 @@ func testARejectedRefreshTokenIsDiscarded() {
     # repeat a doomed round trip, and makes `whoami` promise a renewal that
     # cannot happen. A rejection is final, so the credential goes.
     def dir as string init credDir("discard");
-    writeCredential("http://127.0.0.1:1",
-        Credential{ token: "stale", refresh: "spent", login: "x" });
+    writeCredential("http://127.0.0.1:1", Credential{token: "stale", refresh: "spent", login: "x"});
     # Unreachable, so refreshCredential cannot even ask: the token must survive.
     def out as Outcome init refreshCredential("http://127.0.0.1:1", authWithRefresh());
     testing.assertFalse($out.ok);
@@ -2059,7 +2597,8 @@ func testATransientFailureKeepsTheCredential() {
 func testATransientRefreshFailureDoesNotAdviseALogin() {
     # The token was never refused, so telling the user to replace it is wrong
     # advice: the repository is the thing that failed.
-    def msg as string init authOutcome("http://r.example",
+    def msg as string init authOutcome(
+        "http://r.example",
         "http://r.example could not answer the refresh: it returned a server error",
         false);
     testing.assertContains($msg, "could not authenticate");
@@ -2069,9 +2608,451 @@ func testATransientRefreshFailureDoesNotAdviseALogin() {
 }
 
 func testARefusedTokenDoesAdviseALogin() {
-    def msg as string init authOutcome("http://r.example",
+    def msg as string init authOutcome(
+        "http://r.example",
         "http://r.example rejected the stored refresh token, so it has been discarded",
         true);
     testing.assertContains($msg, "jvc login");
     testing.assertContains($msg, "rejected the stored refresh token");
+}
+
+func testARefusedRefreshCarriesTheRegistrysReason() {
+    # A registry caps a login's age however often it is refreshed; its reason is
+    # the only thing that explains why a daily-refreshed token stopped working.
+    def why as string init "this login is older than 30 days; log in again";
+    def msg as string init refusedRefreshMessage("http://r.example", $why);
+    testing.assertContains($msg, "rejected the stored refresh token");
+    testing.assertContains($msg, "jvc login");
+    testing.assertContains($msg, "older than 30 days");
+    def bare as string init refusedRefreshMessage("http://r.example", "  ");
+    testing.assertFalse(strings.contains($bare, "("));
+    def full as string init authOutcome("http://r.example", $msg, true);
+    testing.assertContains($full, "older than 30 days");
+}
+
+# --- names and constraints are checked where they enter ---------------------
+
+func testANameThatWalksAPathIsNeverVendored() {
+    # `@../src` used to land in vendor/../src, removing the project's own src/
+    def dir as string init freshDir("walk");
+    fs.mkdirAll($dir + "/src");
+    fs.writeString($dir + "/src/main.j", "mine");
+    def data as bytes init archive.pack([entry("src/src.j", "theirs")], "tar.gz");
+    def vr as VendorResult init installArchive($dir, "@../src", $data, "", "tar.gz");
+    testing.assertFalse($vr.ok);
+    testing.assertContains($vr.message, "invalid deck name");
+    testing.assertEqual(fs.readString($dir + "/src/main.j"), "mine");
+    fs.removeAll($dir);
+}
+
+func testALockRecordingAnInvalidNameIsRefused() {
+    def dir as string init freshDir("lockname");
+    fs.writeString(
+        $dir + "/" + LOCK_FILE,
+        '{"decks": {"@../src": {"version": "1.0.0", "url": "https://x/a.tar.gz"}}}');
+    def got as Locked init readLock($dir);
+    testing.assertContains($got.error, "invalid deck name: @../src");
+    testing.assertEqual(len($got.decks), 0);
+    fs.removeAll($dir);
+}
+
+func testARequirementNamingAnInvalidDeckIsNotFetched() {
+    def cat as catalog.Catalog init catalog.empty();
+    def a as catalog.Candidate init catalog.candidate("@acme/alpha", "1.0.0");
+    $a.requires = {"@../src": "*"};
+    $cat = catalog.add($cat, $a);
+    def r as Resolved init resolveRoots(offline(), $cat, {"@acme/alpha": "*"}, noSources());
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.error, "@../src, which is not a valid deck name");
+}
+
+func testManifestProblemsNamesEachBadEntry() {
+    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
+    $m.decks = manifest.depListSet($m.decks, "@acme/ok", "^1.2");
+    $m.decks = manifest.depListSet($m.decks, "@acme/typo", "^ 1.2");
+    $m.conflicts = manifest.depListSet($m.conflicts, "@acme/old", "~>1");
+    $m.engines = manifest.depListSet($m.engines, "jennifer", ">= 0.24.0");
+    $m.registries = manifest.depListSet($m.registries, "@acme/tool", "https://r");
+    # depListSet folds, so the fold-duplicate pair a hand edit can produce is
+    # built directly
+    def regs as list of manifest.Dependency init $m.registries;
+    $regs[] = manifest.Dependency{name: "@Acme/*", constraint: "https://a"};
+    $regs[] = manifest.Dependency{name: "@acme/*", constraint: "https://b"};
+    $m.registries = $regs;
+    def got as list of string init manifestProblems($m);
+    testing.assertEqual(len($got), 5);
+    testing.assertContains($got[0], "[decks] @acme/typo");
+    testing.assertContains($got[1], "[conflicts] @acme/old");
+    testing.assertContains($got[2], "[engines] jennifer");
+    testing.assertContains($got[3], "[registries] @acme/tool");
+    testing.assertContains($got[4], "name the same scope");
+}
+
+func testACleanManifestHasNoProblems() {
+    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
+    $m.decks = manifest.depListSet($m.decks, "@jennifer-language/routeros", "");
+    $m.devDecks = manifest.depListSet($m.devDecks, "@acme/testkit", ">=0.2.0-dev");
+    $m.engines = manifest.depListSet($m.engines, "jennifer", ">=0.24.0");
+    $m.registries = manifest.depListSet($m.registries, "*", "https://r");
+    testing.assertEqual(len(manifestProblems($m)), 0);
+}
+
+func testInstallRefusesAManifestWithABadConstraint() {
+    def dir as string init freshDir("badcons");
+    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
+    $m.decks = manifest.depListSet($m.decks, "@acme/tool", "^abc");
+    manifest.save($m, $dir + "/" + INIT_MANIFEST);
+    def r as Outcome init runInstall($dir, "http://127.0.0.1:1", false, false);
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.message, "not a valid constraint");
+    fs.removeAll($dir);
+}
+
+func testAddRefusesWhatInstallWouldRefuse() {
+    def dir as string init freshDir("addbad");
+    manifest.save(manifest.empty("@acme/app", "0.1.0"), $dir + "/" + INIT_MANIFEST);
+    testing.assertFalse(runAdd($dir, "@acme/tool", "^ 1", false).ok);
+    testing.assertFalse(runAdd($dir, "@con/tool", "", false).ok);
+    testing.assertTrue(runAdd($dir, "@jennifer-language/tool", "^1", false).ok);
+    fs.removeAll($dir);
+}
+
+# --- paths out of an archive stay inside it ---------------------------------
+
+func testSrcSubpathRefusesEverythingThatWalks() {
+    # archive.unpack checks the cleaned path but hands back the raw name, and
+    # this one cleans to `PWNED.txt` while stripping to `../../../../PWNED.txt`
+    testing.assertEqual(srcSubpath("a/src/../../../../PWNED.txt", "a/"), "");
+    testing.assertEqual(srcSubpath("w/src/../x.j", "w/"), "");
+    testing.assertEqual(srcSubpath("src//x.j", ""), "");
+    testing.assertEqual(srcSubpath("src/", ""), "");
+}
+
+func testSrcSubpathTakesOneWrapperOnly() {
+    # an example's own src/ deeper in the tree is not the deck's
+    testing.assertEqual(srcSubpath("examples/x/src/a.j", ""), "");
+    testing.assertEqual(srcSubpath("pkg-1.0/src/a.j", "pkg-1.0/"), "a.j");
+    # A bare archive's sibling folder is not a wrapper: `tools/src/b.j` used to
+    # be vendored as `b.j`, over the deck's own module.
+    testing.assertEqual(srcSubpath("tools/src/b.j", ""), "");
+}
+
+# octalField renders n as the zero-padded octal a tar header field holds,
+# NUL-terminated, width bytes in all.
+func octalField(n as int, width as int) {
+    def digits as string init convert.toString($n, 8);
+    return strings.repeat("0", $width - 1 - len($digits)) + $digits + "\0";
+}
+
+# rawTar writes a ustar archive by hand. `archive.pack` refuses a member name
+# with a `..` segment (as of 0.24.0-dev+126), so this is the only way a test can
+# hand jvc the archive a hostile publisher would. Names and bodies are ASCII.
+func rawTar(names as list of string, bodies as list of string) {
+    def out as string init "";
+    def i as int init 0;
+    while ($i < len($names)) {
+        def name as string init $names[$i];
+        def body as string init $bodies[$i];
+        def head as string init $name + strings.repeat("\0", 100 - len($name)) +
+            octalField(420, 8) + octalField(0, 8) + octalField(0, 8) +
+            octalField(len($body), 12) + octalField(0, 12);
+        def rest as string init "0" + strings.repeat("\0", 100) + "ustar\0" + "00";
+        def sum as int init 0;
+        for (def c in strings.chars($head + "        " + $rest)) {
+            $sum = $sum + convert.toCodepoint($c);
+        }
+        def header as string init $head + octalField($sum, 7) + " " + $rest;
+        $header = $header + strings.repeat("\0", 512 - len($header));
+        def pad as int init (512 - len($body) % 512) % 512;
+        $out = $out + $header + $body + strings.repeat("\0", $pad);
+        $i = $i + 1;
+    }
+    return convert.bytesFromString($out + strings.repeat("\0", 1024), "utf-8");
+}
+
+# The interpreter now refuses the whole archive; srcSubpath's own segment check
+# (tested above) is what stood between this and the filesystem before.
+func testAnEscapingEntryIsNotWrittenOutsideTheProject() {
+    def dir as string init freshDir("escape");
+    def data as bytes init rawTar(
+        ["src/routeros.j", "a/b/c/d/src/../../../../PWNED.txt"],
+        ['export func f() { return 1; }', "x"]);
+    def vr as VendorResult init installArchive($dir, "@jennifer/routeros", $data, "", "tar");
+    testing.assertFalse($vr.ok);
+    testing.assertContains($vr.message, "cannot unpack @jennifer/routeros");
+    testing.assertFalse(fs.exists(path.join($dir, "..", "..", "PWNED.txt")));
+    testing.assertFalse(fs.exists(path.join($dir, "vendor", "PWNED.txt")));
+    testing.assertFalse(fs.exists(path.join($dir, "vendor", "jennifer", "routeros")));
+    fs.removeAll($dir);
+}
+
+func testAVendoredDeckIsReadableByOthers() {
+    # makeTempDir is owner-only, and the rename used to keep that mode
+    def dir as string init freshDir("vmode");
+    installArchive($dir, "@jennifer/routeros", deckArchive(), "", "tar.gz");
+    testing.assertEqual(fs.stat($dir + "/vendor/jennifer/routeros").mode & 0o777, 0o755);
+    fs.removeAll($dir);
+}
+
+func testOnlyTheDecksOwnManifestNamesItsCommand() {
+    testing.assertEqual(manifestEntry("deck.toml", ""), "deck.toml");
+    testing.assertEqual(manifestEntry("pkg-1.0/deck.json", "pkg-1.0/"), "deck.json");
+    testing.assertEqual(manifestEntry("deck.yml", ""), "deck.yml");
+    testing.assertEqual(manifestEntry("tests/fixtures/deck.toml", ""), "");
+    testing.assertEqual(manifestEntry("app/deck.toml", ""), "");
+    testing.assertEqual(manifestEntry("deck.txt", ""), "");
+}
+
+# Any of the four manifest names may name the command; two name none.
+func testAVendoredDecksCommandComesFromAnyManifestFormat() {
+    def json as list of archive.Entry init [
+        entry("deck.json", '{"package":{"name":"@x/y","version":"1.0.0","bin":"src/bin/y"}}')
+    ];
+    testing.assertEqual(vendoredBin($json, "@x/y"), "bin/y");
+    def yaml as list of archive.Entry init [
+        entry("deck.yaml", "package:\n  name: \"@x/y\"\n  version: \"1.0.0\"\n  bin: src/bin/y\n")
+    ];
+    testing.assertEqual(vendoredBin($yaml, "@x/y"), "bin/y");
+    def both as list of archive.Entry init [
+        entry("deck.toml", 'bin = "src/bin/y"' + "\n"),
+        entry("deck.json", '{"package":{"bin":"src/bin/z"}}')
+    ];
+    testing.assertEqual(vendoredBin($both, "@x/y"), "");
+}
+
+# D: a git remote whose tags are all skipped says why, not "no SemVer tags".
+func testAGitSourceWithOnlySkippedTagsSaysWhy() {
+    def none as list of string init [];
+    testing.assertContains(noGitRelease("@a/b", "https://g/x.git", $none), "no SemVer tags");
+    def why as string init noGitRelease(
+        "@a/b",
+        "https://g/x.git",
+        ["0.1.0: deck.toml declares \"@old/b\"", "0.0.1: no deck manifest"]);
+    testing.assertFalse(strings.contains($why, "SemVer"));
+    testing.assertContains($why, "no version tag is a release of it");
+    testing.assertContains($why, "0.1.0: deck.toml declares \"@old/b\"; 0.0.1: no deck manifest");
+}
+
+func testAPackageBinThatWalksIsNotACommand() {
+    def data as list of archive.Entry init [
+        entry("deck.toml", 'bin = "src/../../../../usr/bin/env"' + "\n")
+    ];
+    testing.assertEqual(vendoredBin($data, "@x/y"), "");
+}
+
+func testBinDirMustStayInsideTheProject() {
+    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
+    $m.pkg.binDir = "../.local/bin";
+    testing.assertContains(manifestProblems($m)[0], "bin-dir");
+    $m.pkg.binDir = "/usr/local/bin";
+    testing.assertEqual(len(manifestProblems($m)), 1);
+    $m.pkg.binDir = "tools/bin";
+    testing.assertEqual(len(manifestProblems($m)), 0);
+}
+
+func testATarballWithoutAChecksumIsNotFetched() {
+    def c as catalog.Candidate init catalog.candidate("@acme/tool", "1.0.0");
+    $c.url = "http://127.0.0.1:1/tool.tar.gz";
+    $c.kind = "tar.gz";
+    testing.assertThrows("fetchUnverified", "fetch");
+}
+
+func fetchUnverified() {
+    def c as catalog.Candidate init catalog.candidate("@acme/tool", "1.0.0");
+    $c.url = "http://127.0.0.1:1/tool.tar.gz";
+    $c.kind = "tar.gz";
+    fetchArchive($c);
+}
+
+# --- writes go where reads go -----------------------------------------------
+
+func testAWriteFollowsTheScopeMapping() {
+    def regs as list of manifest.Dependency init manifest.depListSet(
+        [],
+        "@acme/*",
+        "https://private.example");
+    def t as Target init writeTarget([], $regs, "@acme/tool");
+    testing.assertEqual($t.url, "https://private.example");
+    testing.assertEqual(writeTarget([], $regs, "@other/tool").error, "");
+}
+
+func testARegistryFlagThatContradictsTheMappingIsRefused() {
+    def regs as list of manifest.Dependency init manifest.depListSet(
+        [],
+        "@acme/*",
+        "https://private.example");
+    def t as Target init writeTarget(
+        ["publish", "--registry", "https://public.example"],
+        $regs,
+        "@acme/tool");
+    testing.assertContains($t.error, "refusing");
+    def same as Target init writeTarget(
+        ["publish", "--registry", "https://PRIVATE.example/"],
+        $regs,
+        "@acme/tool");
+    testing.assertEqual($same.error, "");
+}
+
+func testScopeNameAcceptsEitherSpelling() {
+    testing.assertEqual(scopeName("acme"), "@acme/x");
+    testing.assertEqual(scopeName("@acme"), "@acme/x");
+}
+
+func testACredentialRemoteIsPublishedWithoutItsCredentials() {
+    def dir as string init freshDir("credremote");
+    git.run(["git", "init", "-q", $dir]);
+    git.run([
+        "git",
+        "-C",
+        $dir,
+        "remote",
+        "add",
+        "origin",
+        "https://x-access-token:SECRET@github.com/acme/foo.git"
+    ]);
+    def got as Source init publishSource($dir, "0.1.0", "", "", "");
+    testing.assertEqual($got.repository, "https://github.com/acme/foo.git");
+    def flagged as Source init publishSource(
+        $dir,
+        "0.1.0",
+        "https://u:p@github.com/acme/foo.git",
+        "",
+        "");
+    testing.assertEqual($flagged.repository, "https://github.com/acme/foo.git");
+    def local as Source init publishSource($dir, "0.1.0", "/srv/git/foo.git", "", "");
+    testing.assertContains($local.error, "not a URL a registry can read");
+    fs.removeAll($dir);
+}
+
+# --- the credential store ----------------------------------------------------
+
+func testCredentialKeysAreNormalised() {
+    testing.assertEqual(credentialKey("https://Reg.Example/"), "https://reg.example");
+    testing.assertEqual(credentialKey("HTTPS://reg.example/Sub/"), "https://reg.example/Sub");
+    def dir as string init fs.makeTempDir("", "jvc-cred");
+    os.setEnv("JVC_CREDENTIALS", $dir + "/jvc/credentials.json");
+    writeCredential("https://Reg.example/", Credential{token: "t", refresh: "", login: ""});
+    testing.assertEqual(readCredential("https://reg.example").token, "t");
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testTheCredentialFileIsNeverOpenToOthers() {
+    def dir as string init fs.makeTempDir("", "jvc-cred");
+    def file as string init $dir + "/jvc/credentials.json";
+    os.setEnv("JVC_CREDENTIALS", $file);
+    writeCredential("https://r.example", Credential{token: "t", refresh: "", login: ""});
+    testing.assertEqual(fs.stat($file).mode & 0o777, 0o600);
+    testing.assertEqual(fs.stat($dir + "/jvc").mode & 0o777, 0o700);
+    # rewritten in place, it stays owner-only and no temporary file is left
+    writeCredential("https://r.example", Credential{token: "u", refresh: "", login: ""});
+    testing.assertEqual(fs.stat($file).mode & 0o777, 0o600);
+    testing.assertEqual(len(fs.list($dir + "/jvc")), 1);
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testADamagedCredentialFileDoesNotCrashLogout() {
+    def dir as string init fs.makeTempDir("", "jvc-cred");
+    def file as string init $dir + "/credentials.json";
+    os.setEnv("JVC_CREDENTIALS", $file);
+    fs.writeString($file, '{"https://r.example": {"token": "trunc');
+    testing.assertEqual(readCredential("https://r.example").token, "");
+    writeCredential("https://r.example", Credential{token: "", refresh: "", login: ""});
+    testing.assertEqual(fs.readString($file) == "", false);
+    os.setEnv("JVC_CREDENTIALS", "");
+    fs.removeAll($dir);
+}
+
+func testAMapperKeepsWhatItLearned() {
+    # a struct argument is a copy, so the old mapFor never kept its cache
+    def mp as Mapper init newMapper(noRegistries(), "http://127.0.0.1:1");
+    def known as Mapper init learn($mp, "@acme/a");
+    testing.assertEqual(len($known.failed), 1);
+    testing.assertEqual(len(learn($known, "@acme/b").failed), 1);
+}
+
+# --- the lock against the manifest ------------------------------------------
+
+func gitLocked(name as string, url as string) {
+    def c as catalog.Candidate init catalog.candidate($name, "1.0.0");
+    $c.kind = "git";
+    $c.url = $url;
+    return $c;
+}
+
+func testChangingSourcesMakesTheLockStale() {
+    def regLocked as catalog.Candidate init catalog.candidate("@acme/a", "1.0.0");
+    $regLocked.kind = "tar.gz";
+    $regLocked.url = "https://r/a.tar.gz";
+    $regLocked.registry = "https://r";
+    def srcs as list of manifest.Dependency init manifest.depListSet(
+        [],
+        "@acme/a",
+        "https://git.example/a.git");
+    testing.assertContains(sourceStaleReason($srcs, [$regLocked]), "[sources] now names");
+    def moved as catalog.Candidate init gitLocked("@acme/a", "https://old.example/a.git");
+    testing.assertContains(sourceStaleReason($srcs, [$moved]), "now names");
+    testing.assertContains(sourceStaleReason([], [$moved]), "no longer names");
+    def same as catalog.Candidate init gitLocked("@acme/a", "https://git.example/a.git");
+    testing.assertEqual(sourceStaleReason($srcs, [$same]), "");
+    testing.assertEqual(sourceStaleReason([], [$regLocked]), "");
+}
+
+func testADroppedDeckLeavesVendorAndItsCommand() {
+    def dir as string init freshDir("prune");
+    installArchive($dir, "@jennifer/routeros", deckArchive(), "", "tar.gz");
+    fs.mkdirAll($dir + "/bin");
+    fs.symlink("../vendor/jennifer/routeros/routeros.j", $dir + "/bin/routeros");
+    fs.writeString($dir + "/bin/mine", "#!/bin/sh\n");
+    def old as catalog.Candidate init catalog.candidate("@jennifer/routeros", "0.1.0");
+    def lines as list of string init pruneVendor($dir, "bin", [$old], []);
+    testing.assertEqual(len($lines), 2);
+    testing.assertFalse(fs.exists($dir + "/vendor/jennifer/routeros"));
+    testing.assertFalse(fs.exists($dir + "/bin/routeros"));
+    testing.assertTrue(fs.exists($dir + "/bin/mine"));
+    # a deck still in the set is left alone
+    installArchive($dir, "@jennifer/routeros", deckArchive(), "", "tar.gz");
+    testing.assertEqual(len(pruneVendor($dir, "bin", [$old], [$old])), 0);
+    testing.assertTrue(fs.exists($dir + "/vendor/jennifer/routeros"));
+    fs.removeAll($dir);
+}
+
+# the scope's folder goes with its last deck, and stays while another deck is in it
+func testPruningTheLastDeckOfAScopeRemovesTheScopeFolder() {
+    def dir as string init freshDir("prunescope");
+    installArchive($dir, "@jennifer/routeros", deckArchive(), "", "tar.gz");
+    fs.mkdirAll($dir + "/vendor/jennifer/other");
+    fs.writeString($dir + "/vendor/jennifer/other/other.j", "export def const N as int init 1;\n");
+    def first as catalog.Candidate init catalog.candidate("@jennifer/routeros", "0.1.0");
+    def second as catalog.Candidate init catalog.candidate("@jennifer/other", "0.1.0");
+    pruneVendor($dir, "bin", [$first, $second], [$second]);
+    testing.assertTrue(fs.exists($dir + "/vendor/jennifer/other"));
+    pruneVendor($dir, "bin", [$second], []);
+    testing.assertFalse(fs.exists($dir + "/vendor/jennifer"));
+    testing.assertTrue(fs.exists($dir + "/vendor"));
+    fs.removeAll($dir);
+}
+
+# --- jvc new and jvc add -----------------------------------------------------
+
+func testAFrameNameIsAPlainSegment() {
+    testing.assertTrue(isFrameName("mysite"));
+    testing.assertTrue(isFrameName("my-site.v2"));
+    testing.assertFalse(isFrameName("../x"));
+    testing.assertFalse(isFrameName("-rf"));
+    testing.assertFalse(isFrameName('a"b'));
+    testing.assertFalse(isFrameName('{x}'));
+    testing.assertContains(
+        runNew(freshDir("newname") + "/x", 'a{b}', "@acme/engine", "", "", "http://127.0.0.1:1").message, # lint-disable: L203
+        "not a usable frame name");
+}
+
+func testAddStoresTheFoldedName() {
+    def dir as string init freshDir("addfold");
+    manifest.save(manifest.empty("@acme/app", "0.1.0"), $dir + "/" + INIT_MANIFEST);
+    testing.assertTrue(runAdd($dir, "@Acme/Tool", "^1", false).ok);
+    def m as manifest.Manifest init manifest.load($dir + "/" + INIT_MANIFEST);
+    testing.assertEqual($m.decks[0].name, "@acme/tool");
+    fs.removeAll($dir);
 }

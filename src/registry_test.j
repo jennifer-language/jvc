@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
 # pragma-jennifer-version: >=0.25.0
 #
-# White-box tests for registry.j (the pure URL / parsing halves; the network
-# calls are not exercised here). Run with:
+# White-box tests for registry.j: URL building and response parsing, the
+# readers fed fake `http.Response`s. No request is sent. Run with:
 #
-#     JENNIFER_SYSMODDIR=../jennifer-lang/modules jennifer test cli/registry_test.j
+#     jennifer test src/registry_test.j
 
 use testing;
+use maps;
 
 func testPercentEncodeUnreserved() {
     testing.assertEqual(percentEncode("ansi"), "ansi");
@@ -60,7 +61,8 @@ func testParseResolutionMissingFoundDefaultsFalse() {
 # --- discovery and version negotiation --------------------------------------
 
 func testDiscoveryUrlIsTheFixedWellKnownPath() {
-    testing.assertEqual(discoveryUrl("http://localhost:8080/"),
+    testing.assertEqual(
+        discoveryUrl("http://localhost:8080/"),
         "http://localhost:8080/.well-known/jennifer-registry");
 }
 
@@ -100,8 +102,7 @@ func testHasFeature() {
 # an unrecognised field must be ignored: that is what makes an additive change
 # to the document non-breaking
 func testParseDiscoveryIgnoresUnknownFields() {
-    def d as Discovery init parseDiscovery(
-        '{"registry":"x","somethingNew":42,"apis":[{"version":1,"basePath":"/v1"}]}');
+    def d as Discovery init parseDiscovery('{"registry":"x","somethingNew":42,"apis":[{"version":1,"basePath":"/v1"}]}'); # lint-disable: L203
     testing.assertEqual($d.registry, "x");
     testing.assertEqual(len($d.apis), 1);
     # an absent `deprecated` reads as false
@@ -109,8 +110,7 @@ func testParseDiscoveryIgnoresUnknownFields() {
 }
 
 func testNegotiatePicksTheHighestSharedVersion() {
-    def d as Discovery init parseDiscovery(
-        '{"apis":[{"version":1,"basePath":"/v1"},{"version":2,"basePath":"/v2"}]}');
+    def d as Discovery init parseDiscovery('{"apis":[{"version":1,"basePath":"/v1"},{"version":2,"basePath":"/v2"}]}'); # lint-disable: L203
     def n as Negotiated init negotiate($d, [1, 2]);
     testing.assertTrue($n.ok);
     testing.assertEqual($n.version, 2);
@@ -118,8 +118,7 @@ func testNegotiatePicksTheHighestSharedVersion() {
 }
 
 func testNegotiateFallsBackToAnOlderSharedVersion() {
-    def d as Discovery init parseDiscovery(
-        '{"apis":[{"version":1,"basePath":"/v1"},{"version":2,"basePath":"/v2"}]}');
+    def d as Discovery init parseDiscovery('{"apis":[{"version":1,"basePath":"/v1"},{"version":2,"basePath":"/v2"}]}'); # lint-disable: L203
     def n as Negotiated init negotiate($d, [1]);
     testing.assertTrue($n.ok);
     testing.assertEqual($n.version, 1);
@@ -128,8 +127,7 @@ func testNegotiateFallsBackToAnOlderSharedVersion() {
 
 # no shared version must name both sides, not fail later as a puzzling 404
 func testNegotiateWithNoSharedVersionExplainsBothSides() {
-    def d as Discovery init parseDiscovery(
-        '{"apis":[{"version":2,"basePath":"/v2"},{"version":3,"basePath":"/v3"}]}');
+    def d as Discovery init parseDiscovery('{"apis":[{"version":2,"basePath":"/v2"},{"version":3,"basePath":"/v3"}]}'); # lint-disable: L203
     def n as Negotiated init negotiate($d, [1]);
     testing.assertFalse($n.ok);
     testing.assertContains($n.error, "v2, v3");
@@ -138,8 +136,7 @@ func testNegotiateWithNoSharedVersionExplainsBothSides() {
 }
 
 func testNegotiateWarnsOnADeprecatedVersion() {
-    def d as Discovery init parseDiscovery(
-        '{"apis":[{"version":1,"basePath":"/v1","deprecated":true,"sunset":"2027-01-01"}]}');
+    def d as Discovery init parseDiscovery('{"apis":[{"version":1,"basePath":"/v1","deprecated":true,"sunset":"2027-01-01"}]}'); # lint-disable: L203
     def n as Negotiated init negotiate($d, [1]);
     testing.assertTrue($n.ok);
     testing.assertContains($n.warning, "deprecated");
@@ -169,7 +166,8 @@ func testSupportedVersionsIsNotEmpty() {
 
 func testDeckUrlPassesTheNameAsAQueryParameter() {
     # a scoped name holds a "/", so it must not become a path segment
-    testing.assertEqual(deckUrl("http://localhost:8080", "@jennifer/routeros"),
+    testing.assertEqual(
+        deckUrl("http://localhost:8080", "@jennifer/routeros"),
         "http://localhost:8080/deck?name=%40jennifer%2Frouteros");
 }
 
@@ -217,10 +215,10 @@ func testParseDeckDocOfAnErrorBodyIsEmpty() {
 # a registry entry may name a git repository and a commit instead of a tarball;
 # the client then fetches by cloning at that commit rather than downloading
 func testParseDeckDocReadsGitCoordinates() {
-    def cands as list of catalog.Candidate init parseDeckDoc(
-        '{"name":"@acme/tool","versions":{"1.0.0":{' +
+    def doc as string init '{"name":"@acme/tool","versions":{"1.0.0":{' +
         '"kind":"git","url":"https://github.com/acme/deck-tool.git",' +
-        '"ref":"v1.0.0","commit":"9f2c1d4e5a6b7c8d9e0f1a2b3c4d5e6f70819293"}}}');
+        '"ref":"v1.0.0","commit":"9f2c1d4e5a6b7c8d9e0f1a2b3c4d5e6f70819293"}}}';
+    def cands as list of catalog.Candidate init parseDeckDoc($doc);
     testing.assertEqual(len($cands), 1);
     testing.assertEqual($cands[0].kind, "git");
     testing.assertEqual($cands[0].ref, "v1.0.0");
@@ -228,16 +226,14 @@ func testParseDeckDocReadsGitCoordinates() {
 }
 
 func testParseDeckDocDefaultsKindToTarGz() {
-    def cands as list of catalog.Candidate init
-        parseDeckDoc('{"name":"a","versions":{"1.0.0":{"url":"u"}}}');
+    def cands as list of catalog.Candidate init parseDeckDoc('{"name":"a","versions":{"1.0.0":{"url":"u"}}}'); # lint-disable: L203
     testing.assertEqual($cands[0].kind, "tar.gz");
 }
 
 # --- login: what the discovery document says about it ------------------------
 
 func testDiscoveryWithoutAuthMeansNoLogins() {
-    def d as Discovery init parseDiscovery(
-        '{"spec":"1.3","apis":[{"version":1,"basePath":"/v1"}],"features":["deck"]}');
+    def d as Discovery init parseDiscovery('{"spec":"1.3","apis":[{"version":1,"basePath":"/v1"}],"features":["deck"]}'); # lint-disable: L203
     testing.assertFalse($d.auth.present);
     testing.assertEqual($d.auth.flow, "");
 }
@@ -256,8 +252,8 @@ func testDiscoveryCarriesTheAuthEndpoints() {
     testing.assertEqual($d.auth.refreshUrl, "/v1/auth/refresh");
 }
 
-# The reference registry serves the trusted-publishing fields as flat keys with
-# a dot in the name, which is what production actually answers with.
+# Registries from before 2026-10-22 serve the trusted-publishing fields as flat
+# keys with a dot in the name.
 func testTrustedPublishingIsReadFromFlatKeys() {
     def d as Discovery init parseDiscovery('{"spec":"0.1.0",' +
         '"apis":[{"version":1,"basePath":"/v1"}],"features":["publish"],' +
@@ -272,8 +268,7 @@ func testTrustedPublishingIsReadFromFlatKeys() {
     testing.assertTrue(offersTrustedPublishing($d.auth));
 }
 
-# The specification spells the same fields as a nested object, so both are read
-# rather than one being declared the right one.
+# The specification and the current reference registry nest the same fields.
 func testTrustedPublishingIsReadFromANestedObject() {
     def d as Discovery init parseDiscovery('{"spec":"0.1.0",' +
         '"apis":[{"version":1,"basePath":"/v1"}],"features":["publish"],' +
@@ -293,6 +288,43 @@ func testSeveralProvidersInOneFlatString() {
         '"trustedPublishing.audience":"r","trustedPublishing.url":"/v1/publish"}}');
     testing.assertEqual(len($d.auth.trustedProviders), 2);
     testing.assertEqual($d.auth.trustedProviders[1], "gitea-actions");
+}
+
+# An empty providers array is no providers, not a crash: the flat-key fallback
+# must not read the array as a string.
+func testAnEmptyProvidersArrayIsRead() {
+    def d as Discovery init parseDiscovery('{"spec":"0.1.0",' +
+        '"apis":[{"version":1,"basePath":"/v1"}],"features":["publish"],' +
+        '"auth":{"trustedPublishing":{"audience":"r","providers":[],"url":"/v1/publish"}}}');
+    testing.assertEqual(len($d.auth.trustedProviders), 0);
+    testing.assertEqual($d.auth.trustedAudience, "r");
+    def one as Discovery init parseDiscovery('{"spec":"0.1.0",' +
+        '"apis":[{"version":1,"basePath":"/v1"}],"features":["publish"],' +
+        '"auth":{"trustedPublishing":{"audience":"r","providers":["github-actions"]}}}');
+    testing.assertEqual(len($one.auth.trustedProviders), 1);
+    testing.assertEqual($one.auth.trustedProviders[0], "github-actions");
+}
+
+# A JWT has three parts; anything else is not a token.
+func testATokenWithoutThreePartsIsRefused() {
+    testing.assertThrows("twoPartToken", "registry");
+}
+
+func twoPartToken() {
+    return decodeClaims("header.payload");
+}
+
+# What a registry taking CI publishes but no logins serves: an auth block with
+# no flow and no deviceUrl, holding only trustedPublishing.
+func testAnAuthBlockHoldingOnlyTrustedPublishing() {
+    def d as Discovery init parseDiscovery('{"spec":"0.1.0",' +
+        '"apis":[{"version":1,"basePath":"/v1"}],"features":["publish"],' +
+        '"auth":{"trustedPublishing":{"audience":"registry.example",' +
+        '"providers":["github-actions"],"url":"/v1/publish"}}}');
+    testing.assertTrue($d.auth.present);
+    testing.assertEqual($d.auth.flow, "");
+    testing.assertEqual($d.auth.deviceUrl, "");
+    testing.assertTrue(offersTrustedPublishing($d.auth));
 }
 
 # An endpoint with no audience is not an offer: a client would have to choose an
@@ -329,19 +361,66 @@ func testALegacyRegistryHasNothingToLogInTo() {
 
 func testAuthUrlHangsAPathOffTheRegistryBase() {
     def c as Client init newClient("http://reg.example");
-    testing.assertEqual(authUrl($c, "/v1/auth/device"),
-        "http://reg.example/v1/auth/device");
+    testing.assertEqual(authUrl($c, "/v1/auth/device"), "http://reg.example/v1/auth/device");
 }
 
-func testAuthUrlLeavesAnAbsoluteEndpointAlone() {
-    def c as Client init newClient("http://reg.example");
-    testing.assertEqual(authUrl($c, "https://elsewhere.example/device"),
-        "https://elsewhere.example/device");
+func testAuthUrlLeavesAnAbsoluteEndpointOnTheSameOriginAlone() {
+    def c as Client init newClient("https://reg.example");
+    testing.assertEqual(
+        authUrl($c, "https://REG.example/v1/auth/device"),
+        "https://REG.example/v1/auth/device");
+}
+
+func testAuthUrlRefusesAnEndpointOnAnotherOrigin() {
+    # a refresh token is POSTed here, so a spoofed or mis-served discovery
+    # document must not be able to send it to another host, or downgrade it
+    testing.assertThrows("otherHostProbe", "registry");
+    testing.assertThrows("downgradeProbe", "registry");
+}
+
+func otherHostProbe() {
+    authUrl(newClient("https://reg.example"), "https://elsewhere.example/device");
+}
+
+func downgradeProbe() {
+    authUrl(newClient("https://reg.example"), "http://reg.example/device");
+}
+
+func testAuthUrlRootsARelativeEndpoint() {
+    # concatenated bare, `auth/token` turned reg.example into reg.exampleauth
+    testing.assertEqual(
+        authUrl(newClient("https://reg.example"), "auth/token"),
+        "https://reg.example/auth/token");
+}
+
+func testADiscoveryMountThatIsNotRootedIsIgnored() {
+    def d as Discovery init parseDiscovery('{"apis":[{"version":1,"basePath":"@evil.example"},{"version":1,"basePath":"/v1"}]}'); # lint-disable: L203
+    testing.assertEqual(len($d.apis), 1);
+    testing.assertEqual($d.apis[0].basePath, "/v1");
+}
+
+func testBodiesEscapeWhatTheyCarry() {
+    def b as string init publishBody("https://x/r.git", '1.0.0","repository":"https://evil');
+    def doc as json.Value init json.decode($b);
+    testing.assertEqual(json.asString($doc, "/repository"), "https://x/r.git");
+    testing.assertEqual(json.asString($doc, "/tag"), '1.0.0","repository":"https://evil');
+    testing.assertEqual(json.asString(json.decode(yankBody("@a/b", 'v\')), "/version"), 'v\');
+    testing.assertEqual(
+        json.asString(json.decode(ownersBody("@Acme", 'u"1', true)), "/subject"),
+        'u"1');
+    testing.assertContains(scopeBody("@Acme"), '"scope":"@acme"');
+}
+
+func testARecordAndItsRequirementsAreFolded() {
+    def doc as string init '{"name":"@Acme/App","versions":{"1.0.0":{"url":"u","checksum":"c",' +
+        '"requires":{"@Pub/Y":"^1"}}}}';
+    def got as list of catalog.Candidate init parseDeckDoc($doc);
+    testing.assertEqual($got[0].name, "@acme/app");
+    testing.assertTrue(maps.has($got[0].requires, "@pub/y"));
 }
 
 func testDeviceStartUsesTheSpecDefaultsWhenTermsAreAbsent() {
-    def s as DeviceStart init parseDeviceStart(
-        '{"deviceCode":"abc","userCode":"WXYZ-1234",' +
+    def s as DeviceStart init parseDeviceStart('{"deviceCode":"abc","userCode":"WXYZ-1234",' +
         '"verificationUri":"https://example/device"}');
     testing.assertEqual($s.userCode, "WXYZ-1234");
     testing.assertEqual($s.interval, 5);
@@ -365,14 +444,26 @@ func testAFourTwoNineMeansWaitLonger() {
 }
 
 func testATwoHundredCarriesTheToken() {
-    def r as TokenReply init parseTokenReply(200,
+    def r as TokenReply init parseTokenReply(
+        200,
         '{"token":"eyJ...","refreshToken":"def502","expiresIn":3600,' +
-        '"login":"alice","accountId":1234567}');
+            '"login":"alice","subject":"9f3c-77a1"}');
     testing.assertTrue($r.done);
     testing.assertEqual($r.token, "eyJ...");
     testing.assertEqual($r.refreshToken, "def502");
     testing.assertEqual($r.login, "alice");
-    testing.assertEqual($r.accountId, 1234567);
+    testing.assertEqual($r.subject, "9f3c-77a1");
+}
+
+# An older registry sends only the numeric accountId; it is the same subject.
+func testANumericAccountIdIsReadAsTheSubject() {
+    def r as TokenReply init parseTokenReply(200, '{"token":"t","accountId":1234567}');
+    testing.assertEqual($r.subject, "1234567");
+    def both as TokenReply init parseTokenReply(
+        200,
+        '{"token":"t","subject":"1234567","accountId":1234567}');
+    testing.assertEqual($both.subject, "1234567");
+    testing.assertEqual(parseTokenReply(200, '{"token":"t"}').subject, "");
 }
 
 func testADenialIsTerminal() {
@@ -389,11 +480,78 @@ func testAnExpiredCodeIsTerminal() {
     testing.assertContains($r.error, "expired");
 }
 
-func testAnUnexpectedClientStatusIsTerminal() {
-    def r as TokenReply init parseTokenReply(418, "");
+# A status that says nothing about the token (a wrong route, a timeout) used to
+# be a refusal, and a refresh then discarded a login that was still good.
+func testAStatusThatIsNotARefusalLeavesTheLoginOpen() {
+    for (def status in [404, 405, 408, 418]) {
+        def r as TokenReply init parseTokenReply($status, "");
+        testing.assertFalse($r.done);
+        testing.assertTrue($r.pending);
+        testing.assertTrue($r.slowDown);
+        testing.assertTrue($r.fault);
+        testing.assertEqual($r.error, "");
+        testing.assertContains($r.detail, convert.toString($status));
+    }
+}
+
+func testOnlyTheRefusalStatusesAreTerminal() {
+    for (def status in [400, 401, 403, 410]) {
+        def r as TokenReply init parseTokenReply($status, "");
+        testing.assertFalse($r.done);
+        testing.assertFalse($r.pending);
+        testing.assertFalse($r.error == "");
+    }
+}
+
+func testARefusalCarriesTheRegistrysDetail() {
+    def r as TokenReply init parseTokenReply(401, '{"error":"refresh token revoked"}');
+    testing.assertEqual($r.detail, "refresh token revoked");
+    testing.assertContains($r.error, "401");
+    testing.assertContains($r.error, "refresh token revoked");
+    testing.assertEqual(parseTokenReply(403, '{"error":"nope"}').detail, "nope");
+}
+
+func testANotFoundCarriesTheRegistrysDetail() {
+    def r as TokenReply init parseTokenReply(404, '{"error":"no such route"}');
+    testing.assertContains($r.detail, "no such route");
+}
+
+# A 429 and a 5xx both back off, and `fault` is what tells them apart.
+func testOnlyAServerFaultIsAFault() {
+    testing.assertFalse(parseTokenReply(429, "").fault);
+    testing.assertTrue(parseTokenReply(429, "").slowDown);
+    testing.assertTrue(parseTokenReply(503, "").fault);
+    testing.assertTrue(parseTokenReply(503, "").slowDown);
+    testing.assertFalse(parseTokenReply(202, "").fault);
+    testing.assertFalse(parseTokenReply(403, "").fault);
+    # A status the flow does not define counts as a fault, so a login loop
+    # polling a misrouted endpoint gives up instead of waiting out the code.
+    testing.assertTrue(parseTokenReply(404, "").fault);
+}
+
+func testAServerFaultCarriesItsDetail() {
+    def r as TokenReply init parseTokenReply(502, '{"error":"github timed out"}');
+    testing.assertEqual($r.detail, "github timed out");
+}
+
+# A 200 with no token used to be "done" with an empty bearer token.
+func testATwoHundredWithoutATokenIsAnError() {
+    def r as TokenReply init parseTokenReply(200, '{"login":"alice"}');
     testing.assertFalse($r.done);
-    testing.assertFalse($r.pending);
-    testing.assertContains($r.error, "418");
+    testing.assertEqual($r.token, "");
+    testing.assertEqual($r.error, "");
+    testing.assertTrue($r.fault);
+    testing.assertEqual($r.detail, "the registry issued no token");
+}
+
+# A proxy's page on a 200 used to throw out of json.decode.
+func testATwoHundredThatIsNotJsonIsNotAnAnswer() {
+    def r as TokenReply init parseTokenReply(200, "<html>captive portal</html>");
+    testing.assertFalse($r.done);
+    testing.assertTrue($r.pending);
+    testing.assertEqual($r.error, "");
+    testing.assertContains($r.detail, "not JSON");
+    testing.assertContains($r.detail, "captive portal");
 }
 
 # --- a server-side fault is not an answer about the login --------------------
@@ -431,8 +589,7 @@ func testBearerHeaderIsOmittedWithoutAToken() {
 
 func testAScopedNameIsFoldedBeforeItIsSent() {
     testing.assertContains(deckUrl("http://r", "@Acme/Tool"), "%40acme%2Ftool");
-    testing.assertContains(resolveUrl("http://r", "@Acme/Tool", "^1.0.0"),
-        "%40acme%2Ftool");
+    testing.assertContains(resolveUrl("http://r", "@Acme/Tool", "^1.0.0"), "%40acme%2Ftool");
 }
 
 # --- scopes ------------------------------------------------------------------
@@ -463,9 +620,10 @@ func testAClaimReplyCarriesTheScopeAndOwner() {
 }
 
 func testAnOwnersReplyCarriesEveryOwner() {
-    def r as ScopeReply init parseScopeReply(200,
+    def r as ScopeReply init parseScopeReply(
+        200,
         '{"scope":"mplx","provider":"github","kind":"user",' +
-        '"owners":["1986588","42"]}');
+            '"owners":["1986588","42"]}');
     testing.assertEqual(len($r.owners), 2);
     testing.assertEqual($r.owners[0], "1986588");
 }
@@ -473,8 +631,10 @@ func testAnOwnersReplyCarriesEveryOwner() {
 func testARefusalKeepsTheRegistrysOwnWords() {
     # The registry distinguishes reserved from claimed from name-mismatch, and
     # each points at a different next step, so the text is the useful part.
-    def r as ScopeReply init parseScopeReply(403, '{"error":' +
-        '"@acme does not match your github username (mplx); ask an operator"}');
+    def r as ScopeReply init parseScopeReply(
+        403,
+        '{"error":' +
+            '"@acme does not match your github username (mplx); ask an operator"}');
     testing.assertContains($r.error, "does not match your github username");
     testing.assertEqual($r.scope, "");
 }
@@ -494,8 +654,7 @@ func tokenWith(payloadJson as string) {
 }
 
 func testClaimsAreReadFromTheToken() {
-    def c as Claims init decodeClaims(tokenWith(
-        '{"sub":"1986588","login":"mplx","iat":1786991417,"exp":1786995017}'));
+    def c as Claims init decodeClaims(tokenWith('{"sub":"1986588","login":"mplx","iat":1786991417,"exp":1786995017}')); # lint-disable: L203
     testing.assertEqual($c.subject, "1986588");
     testing.assertEqual($c.login, "mplx");
     testing.assertEqual($c.issuedAt, 1786991417);
@@ -504,20 +663,27 @@ func testClaimsAreReadFromTheToken() {
 
 func testAnOrgClaimAsAListOfIds() {
     # The shape the deployed registry emitted: ids only, no names.
-    def c as Claims init decodeClaims(tokenWith(
-        '{"login":"mplx","orgs":["305727207","42"]}'));
+    def c as Claims init decodeClaims(tokenWith('{"login":"mplx","orgs":["305727207","42"]}'));
     testing.assertEqual(len($c.orgs), 2);
     testing.assertEqual($c.orgs[0], "305727207");
 }
 
 func testAnOrgClaimAsLoginToId() {
     # The shape the source mints: far more useful, so the login leads.
-    def c as Claims init decodeClaims(tokenWith(
-        '{"login":"mplx","orgs":{"viverto":"305727207"},"orgsAt":1786991417}'));
+    def c as Claims init decodeClaims(tokenWith('{"login":"mplx","orgs":{"viverto":"305727207"},"orgsAt":1786991417}')); # lint-disable: L203
     testing.assertEqual(len($c.orgs), 1);
     testing.assertContains($c.orgs[0], "viverto");
     testing.assertContains($c.orgs[0], "305727207");
     testing.assertEqual($c.orgsAt, 1786991417);
+}
+
+# GitHub's ids are numbers, and json.asString throws on one.
+func testNumericOrgIdsAreRendered() {
+    def c as Claims init decodeClaims(tokenWith('{"login":"mplx","orgs":[305727207,42]}'));
+    testing.assertEqual(len($c.orgs), 2);
+    testing.assertEqual($c.orgs[0], "305727207");
+    def m as Claims init decodeClaims(tokenWith('{"login":"mplx","orgs":{"viverto":305727207}}'));
+    testing.assertEqual($m.orgs[0], "viverto (305727207)");
 }
 
 func testATokenWithNoOrgs() {
@@ -551,10 +717,11 @@ func testThePublishBodyNamesARepositoryAndTag() {
 
 func testAPublishReplyCarriesTheCommitNotTheTag() {
     # The commit is what the lockfile pins, so it is the part worth reporting.
-    def r as PublishReply init parsePublishReply(201,
+    def r as PublishReply init parsePublishReply(
+        201,
         '{"name":"@mplx/clispinner","version":"0.1.0","kind":"git",' +
-        '"url":"https://github.com/mplx/d.git","ref":"v0.1.0",' +
-        '"commit":"7d50f9d0b683c5972a4906f6d6d3de1df3f5b035"}');
+            '"url":"https://github.com/mplx/d.git","ref":"v0.1.0",' +
+            '"commit":"7d50f9d0b683c5972a4906f6d6d3de1df3f5b035"}');
     testing.assertEqual($r.name, "@mplx/clispinner");
     testing.assertEqual($r.version, "0.1.0");
     testing.assertEqual($r.commit, "7d50f9d0b683c5972a4906f6d6d3de1df3f5b035");
@@ -562,7 +729,8 @@ func testAPublishReplyCarriesTheCommitNotTheTag() {
 }
 
 func testAPublishRefusalKeepsTheRegistrysWords() {
-    def r as PublishReply init parsePublishReply(403,
+    def r as PublishReply init parsePublishReply(
+        403,
         '{"error":"@mplx is not a registered scope"}');
     testing.assertContains($r.error, "not a registered scope");
 }
@@ -575,7 +743,8 @@ func testAServerFaultOnPublishIsNotCalledARefusal() {
     # A 4xx is the registry answering; a 5xx is it failing to answer. Calling
     # the second a refusal points the reader at their own request when the
     # fault is on the far side.
-    def r as PublishReply init parsePublishReply(502,
+    def r as PublishReply init parsePublishReply(
+        502,
         '{"error":"could not read https://github.com/mplx/d.git at v0.1.0: timeout"}');
     testing.assertContains($r.error, "could not complete");
     testing.assertContains($r.error, "502");
@@ -584,7 +753,8 @@ func testAServerFaultOnPublishIsNotCalledARefusal() {
 }
 
 func testAFourOhThreeIsStillARefusal() {
-    def r as PublishReply init parsePublishReply(403,
+    def r as PublishReply init parsePublishReply(
+        403,
         '{"error":"@mplx is not a registered scope"}');
     testing.assertEqual($r.error, "@mplx is not a registered scope");
 }
@@ -592,7 +762,8 @@ func testAFourOhThreeIsStillARefusal() {
 func testANonJsonBodyIsReportedRatherThanDiscarded() {
     # The registry answers failures with JSON, so an HTML body means something
     # in front of it replied instead. That is the diagnosis, not noise.
-    def r as PublishReply init parsePublishReply(502,
+    def r as PublishReply init parsePublishReply(
+        502,
         "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>");
     testing.assertContains($r.error, "502 Bad Gateway");
 }
@@ -602,11 +773,41 @@ func testAVeryLongForeignBodyIsTrimmed() {
     testing.assertTrue(len(parsePublishReply(500, $long).error) < 200);
 }
 
+# The registry's own `error` text is foreign too, and was shown in full.
+func testAVeryLongJsonErrorIsTrimmed() {
+    def body as string init '{"error":"' + strings.repeat("y", 400) + '"}';
+    def why as string init errorDetail($body);
+    testing.assertEqual(len($why), 123);
+    testing.assertTrue(strings.endsWith($why, "..."));
+}
+
+# Server text reaches the terminal, so an escape sequence in it must not.
+func testControlCharactersAreStrippedFromServerText() {
+    def esc as string init convert.fromCodepoint(27);
+    def csi as string init convert.fromCodepoint(155);
+    def bel as string init convert.fromCodepoint(7);
+    def del as string init convert.fromCodepoint(127);
+    def hostile as string init "bad" + $esc + "]0;owned" + $bel + "\nnext\tcol" + $csi + "2J" +
+        $del + "end";
+    def body as string init json.encode(json.set(json.map(), "/error", $hostile));
+    def why as string init errorDetail($body);
+    testing.assertEqual($why, "bad]0;owned next col2Jend");
+    testing.assertEqual(snippet("a" + $esc + "[31mred\r\nb"), "a[31mred  b");
+    # The plain-text branch is cleaned by the same helper.
+    testing.assertEqual(errorDetail("x" + $esc + "y"), "xy");
+}
+
+func testCleaningKeepsOrdinaryText() {
+    testing.assertEqual(snippet("  caf\u00e9 \u65e5\u672c  "), "caf\u00e9 \u65e5\u672c");
+}
+
 func testAProxyBodyIsAttributed() {
     # Cloudflare answers with `error code: 502` in plain text; the registry
     # answers with JSON. Naming the responder is the difference between the
     # registry saying no and the registry never answering.
-    def tagged as string init withResponder(502, "error code: 502",
+    def tagged as string init withResponder(
+        502,
+        "error code: 502",
         "cloudflare, request a2cb1da45a8125c0-VIE");
     testing.assertContains($tagged, "answered by cloudflare");
     testing.assertContains($tagged, "a2cb1da45a8125c0-VIE");
@@ -625,9 +826,8 @@ func testNoResponderMeansNoTag() {
 func testANonAsciiClaimSurvivesDecoding() {
     # The payload is utf-8, so decoding it as a single-byte codec would mangle
     # any login or organisation name outside ASCII.
-    def c as Claims init decodeClaims("h." + encoding.toText(
-        convert.bytesFromString('{"login":"日本","sub":"1"}', "utf-8"),
-        "base64-url") + ".s");
+    def payload as bytes init convert.bytesFromString('{"login":"日本","sub":"1"}', "utf-8");
+    def c as Claims init decodeClaims("h." + encoding.toText($payload, "base64-url") + ".s");
     testing.assertEqual($c.login, "日本");
 }
 
@@ -638,7 +838,8 @@ func testASuccessfulReplyIsNeverTagged() {
     def body as string init '{"name":"@mplx/clispinner","version":"0.1.0",' +
         '"commit":"42ffcf4d9b3afe4c13bca53e1d5139a32e36800b"}';
     testing.assertEqual(withResponder(201, $body, "cloudflare, request abc"), $body);
-    def r as PublishReply init parsePublishReply(201,
+    def r as PublishReply init parsePublishReply(
+        201,
         withResponder(201, $body, "cloudflare, request abc"));
     testing.assertEqual($r.name, "@mplx/clispinner");
     testing.assertEqual($r.error, "");
@@ -653,8 +854,7 @@ func testTheYankBodyNamesTheDeckAndVersion() {
 }
 
 func testTheYankBodyFoldsTheName() {
-    testing.assertContains(yankBody("@MPLX/CliSpinner", "0.1.0"),
-        '"name":"@mplx/clispinner"');
+    testing.assertContains(yankBody("@MPLX/CliSpinner", "0.1.0"), '"name":"@mplx/clispinner"');
 }
 
 func testYankAndUnyankAreDifferentEndpoints() {
@@ -664,7 +864,8 @@ func testYankAndUnyankAreDifferentEndpoints() {
 }
 
 func testAYankReplyCarriesTheResultingState() {
-    def r as YankReply init parseYankReply(200,
+    def r as YankReply init parseYankReply(
+        200,
         '{"name":"@mplx/clispinner","version":"0.1.0","yanked":true}');
     testing.assertEqual($r.name, "@mplx/clispinner");
     testing.assertTrue($r.yanked);
@@ -672,14 +873,119 @@ func testAYankReplyCarriesTheResultingState() {
 }
 
 func testAnUnyankReplyReportsTheVersionSelectableAgain() {
-    def r as YankReply init parseYankReply(200,
+    def r as YankReply init parseYankReply(
+        200,
         '{"name":"@mplx/clispinner","version":"0.1.0","yanked":false}');
     testing.assertFalse($r.yanked);
     testing.assertEqual($r.error, "");
 }
 
 func testYankingAVersionThatIsNotThere() {
-    def r as YankReply init parseYankReply(404,
+    def r as YankReply init parseYankReply(
+        404,
         '{"error":"no such version: @mplx/clispinner@9.9.9"}');
     testing.assertContains($r.error, "no such version");
+}
+
+# --- a status is read before a body -----------------------------------------
+
+func outage() {
+    def none as map of string to string init {};
+    requireSuccess(
+        http.Response{
+            status: 503,
+            statusText: "Service Unavailable",
+            headers: $none,
+            body: '{"error":"maintenance"}'
+        },
+        "deck lookup for @a/b");
+}
+
+func testAnOutageIsAnErrorNotAnEmptyAnswer() {
+    # a 503 used to parse as "no versions", reported as "no such deck"
+    testing.assertThrows("outage", "registry");
+    try {
+        outage();
+    } catch (e) {
+        testing.assertContains($e.message, "HTTP 503");
+        testing.assertContains($e.message, "maintenance");
+    }
+}
+
+# A failure on these used to be parsed as an answer: an outage on /resolve read
+# as "not found", one on /scopes as "no scopes", and one on the device start as
+# a blank code.
+func testResolveScopesAndDeviceStartCheckTheStatus() {
+    testing.assertThrows("resolveOutage", "registry");
+    testing.assertThrows("scopesOutage", "registry");
+    testing.assertThrows("deviceOutage", "registry");
+}
+
+# replyOf is a response as the http client would hand it over.
+func replyOf(status as int, body as string) {
+    def none as map of string to string init {};
+    return http.Response{status: $status, statusText: "", headers: $none, body: $body};
+}
+
+func resolveOutage() {
+    resolutionOf(replyOf(503, '{"error":"maintenance"}'), "@a/b");
+}
+
+func scopesOutage() {
+    scopesOf(replyOf(503, '{"error":"maintenance"}'));
+}
+
+func deviceOutage() {
+    deviceStartOf(replyOf(503, '{"error":"maintenance"}'));
+}
+
+func replyWithRetryAfter(status as int, value as string) {
+    def headers as map of string to string init {"retry-after": $value};
+    return http.Response{status: $status, statusText: "", headers: $headers, body: ""};
+}
+
+func testRetryAfterReadsOnlyDeltaSeconds() {
+    testing.assertEqual(retryAfterOf(replyWithRetryAfter(429, "30")), 30);
+    testing.assertEqual(retryAfterOf(replyWithRetryAfter(429, " 7 ")), 7);
+    testing.assertEqual(retryAfterOf(replyWithRetryAfter(429, "Wed, 21 Oct 2026 07:28:00 GMT")), 0);
+    testing.assertEqual(retryAfterOf(replyWithRetryAfter(429, "-5")), 0);
+    testing.assertEqual(retryAfterOf(replyWithRetryAfter(429, "")), 0);
+    testing.assertEqual(retryAfterOf(replyOf(429, "")), 0);
+}
+
+# A 429 on /auth/device is a start to retry, not an error.
+func testAThrottledDeviceStartIsNotAnError() {
+    def resp as http.Response init replyWithRetryAfter(429, "12");
+    $resp.body = '{"error":"too many login attempts"}';
+    def d as DeviceStart init deviceStartOf($resp);
+    testing.assertTrue($d.throttled);
+    testing.assertEqual($d.retryAfter, 12);
+    testing.assertEqual($d.detail, "too many login attempts");
+    testing.assertEqual($d.deviceCode, "");
+    testing.assertFalse(deviceStartOf(replyOf(200, '{"deviceCode":"d"}')).throttled);
+}
+
+func testATokenReplyCarriesRetryAfterOnlyOnA429() {
+    testing.assertEqual(tokenReplyOf(replyWithRetryAfter(429, "20")).retryAfter, 20);
+    testing.assertTrue(tokenReplyOf(replyWithRetryAfter(429, "20")).slowDown);
+    testing.assertEqual(tokenReplyOf(replyWithRetryAfter(503, "20")).retryAfter, 0);
+}
+
+# The not-found 404 is still an answer, and a success still parses.
+func testANotFoundResolutionIsStillAnAnswer() {
+    def r as Resolution init resolutionOf(
+        replyOf(404, '{"found":false,"name":"@a/b","error":"no match"}'),
+        "@a/b");
+    testing.assertFalse($r.found);
+    testing.assertEqual($r.name, "@a/b");
+    testing.assertEqual(len(scopesOf(replyOf(200, '{"scopes":[]}'))), 0);
+    testing.assertEqual(deviceStartOf(replyOf(200, '{"deviceCode":"d"}')).deviceCode, "d");
+}
+
+func testASuccessWhoseBodyIsNotJsonSaysSo() {
+    # a proxy's HTML page on a 200 used to surface as "could not reach"
+    def p as PublishReply init parsePublishReply(200, "<html>ok</html>");
+    testing.assertContains($p.error, "not JSON");
+    testing.assertContains(parseYankReply(200, "<html>").error, "not JSON");
+    testing.assertContains(parseScopeReply(201, "").error, "not JSON");
 }

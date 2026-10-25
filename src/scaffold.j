@@ -39,6 +39,7 @@
 use strings;
 use convert;
 use archive;
+import "./safepath.j" as safepath;
 
 /**
  * One file to write into a new frame.
@@ -73,12 +74,7 @@ export func vars(name as string, deck as string, version as string) {
     if ($slash >= 0) {
         $namespace = strings.substring($deck, $slash + 1, len($deck));
     }
-    return {
-        "name": $name,
-        "deck": $deck,
-        "namespace": $namespace,
-        "version": $version
-    };
+    return {"name": $name, "deck": $deck, "namespace": $namespace, "version": $version};
 }
 
 /**
@@ -100,26 +96,32 @@ export func substitute(text as string, bindings as map of string to string) {
 
 /**
  * Return an archive entry's path relative to the deck's `template/` directory,
- * or "" when the entry is not under one. Mirrors the `src/` rule the vendor
- * installer uses: a leading `./` and one wrapping directory are tolerated, so
- * `template/main.j`, `./template/main.j`, and `cms-1.0/template/main.j` all
- * yield `main.j`.
+ * or "" when the entry is not under it. `root` is the archive's layout root
+ * (`safepath.archiveRoot` over every member name), so `template/` matches only
+ * there: `template/main.j` and `./template/main.j` in a bare archive, and
+ * `cms-1.0/template/main.j` in one wrapped in `cms-1.0/`, all yield `main.j`.
+ * A `template/` any deeper (`src/template/`, a vendored dependency's) is not
+ * the deck's template, and neither is one under a top-level directory when the
+ * archive has more than one.
+ *
+ * The result is joined onto the new frame's directory, so anything that is not
+ * a safe relative path (`safepath.isSafeRelative`) also yields "": an archive
+ * hands back the raw member name, and `template/../../x` must not become
+ * `../../x`. A directory entry (trailing `/`) yields "" for the same reason.
  * @param entryName {string} the archive member name
- * @return {string} the path under template/, or "" when not under one
+ * @param root {string} the archive's layout root, "" or `<w>/`
+ * @return {string} the path under template/, or "" when not under it or unsafe
  */
-export func templateSubpath(entryName as string) {
-    def n as string init $entryName;
-    if (strings.startsWith($n, "./")) {
-        $n = strings.substring($n, 2, len($n));
+export func templateSubpath(entryName as string, root as string) {
+    def n as string init safepath.underRoot($entryName, $root);
+    if (not strings.startsWith($n, "template/")) {
+        return "";
     }
-    if (strings.startsWith($n, "template/")) {
-        return strings.substring($n, 9, len($n));
+    def sub as string init strings.substring($n, 9, len($n));
+    if (not safepath.isSafeRelative($sub)) {
+        return "";
     }
-    def marker as int init strings.indexOf($n, "/template/");
-    if ($marker >= 0) {
-        return strings.substring($n, $marker + 10, len($n));
-    }
-    return "";
+    return $sub;
 }
 
 # stampBytes substitutes into a file's contents when they are text, and copies
@@ -138,7 +140,9 @@ func stampBytes(data as bytes, bindings as map of string to string) {
  * Extract a deck archive's `template/` tree as the files to stamp, with every
  * placeholder substituted in **both** each file's path and its text contents.
  * An archive with no `template/` directory yields an empty list, which is the
- * caller's signal to fall back to `builtin`.
+ * caller's signal to fall back to `builtin`. Every returned path is a safe
+ * relative path: an entry whose raw name, or whose name once its placeholders
+ * are substituted, would leave the frame directory is skipped.
  * @param data {bytes} the deck archive bytes
  * @param format {string} the archive format, "tar.gz" or "tar"
  * @param bindings {map of string to string} the placeholder bindings
@@ -147,19 +151,24 @@ func stampBytes(data as bytes, bindings as map of string to string) {
  */
 export func fromArchive(data as bytes, format as string, bindings as map of string to string) {
     def out as list of File init [];
-    for (def e in archive.unpack($data, $format)) {
-        def sub as string init templateSubpath($e.name);
+    def entries as list of archive.Entry init safepath.unpack($data, $format);
+    def names as list of string init [];
+    for (def e in $entries) {
+        $names[] = $e.name;
+    }
+    def root as string init safepath.archiveRoot($names);
+    for (def e in $entries) {
+        def sub as string init templateSubpath($e.name, $root);
         if ($sub == "") {
             continue;
         }
-        # A directory entry carries no content and needs no file of its own.
-        if (strings.endsWith($sub, "/")) {
+        # A placeholder value may carry a `/` or spell `..`, so the rendered
+        # name is checked again: it is what the caller joins onto the frame.
+        def rendered as string init substitute($sub, $bindings);
+        if (not safepath.isSafeRelative($rendered)) {
             continue;
         }
-        $out[] = File{
-            path: substitute($sub, $bindings),
-            data: stampBytes($e.data, $bindings)
-        };
+        $out[] = File{path: $rendered, data: stampBytes($e.data, $bindings)};
     }
     return $out;
 }
@@ -171,10 +180,7 @@ export func fromArchive(data as bytes, format as string, bindings as map of stri
 # readable, with no escaping at all.
 func text(path as string, lines as list of string, bindings as map of string to string) {
     def body as string init strings.join($lines, "\n") + "\n";
-    return File{
-        path: $path,
-        data: convert.bytesFromString(substitute($body, $bindings), "utf-8")
-    };
+    return File{path: $path, data: convert.bytesFromString(substitute($body, $bindings), "utf-8")};
 }
 
 # --- the built-in frame -----------------------------------------------------
@@ -276,7 +282,8 @@ def const PUBLIC_TEMPLATE as list of string init [
  * Produces a runnable `main.j`, a secret-free `config.toml`, a `.gitignore` that
  * keeps `vendor/` and `public/` out of the repository, a README explaining who
  * owns what, and the `content/` and `public/` directories seeded so both exist
- * in a fresh checkout.
+ * in the new frame (`public/` is ignored by git, so only `content/` survives a
+ * clone).
  * @param bindings {map of string to string} the placeholder bindings (see `vars`)
  * @return {list of File} the frame files
  */

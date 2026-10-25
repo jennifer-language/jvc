@@ -33,7 +33,7 @@
  * @module ciauth
  * @example
  * import "./ciauth.j" as ciauth;
- * def g as ciauth.Grant init ciauth.trustedGrant("registry.example");
+ * def g as ciauth.Grant init ciauth.trustedGrant($auth.trustedAudience);
  * if ($g.found) { io.printf("authorised by %s\n", $g.mechanism); }
  */
 
@@ -43,6 +43,7 @@ use strings;
 use convert;
 import "http.j" as http;
 import "./registry.j" as registry;
+import "./scopemap.j" as scopemap;
 
 /**
  * The environment variable a CI token is read from. The name is conventional
@@ -50,10 +51,16 @@ import "./registry.j" as registry;
  */
 export def const ENV_TOKEN as string init "JVC_TOKEN";
 
+/**
+ * The environment variable that pins `$JVC_TOKEN` to one registry base URL.
+ * See `environmentGrantFor`.
+ */
+export def const ENV_TOKEN_REGISTRY as string init "JVC_TOKEN_REGISTRY";
+
 # GitHub Actions hands a job the coordinates for minting an identity token in
 # these two variables, and sets neither unless the workflow asked for
-# `id-token: write`. Their absence is therefore how a client tells "not in CI"
-# and "in CI without the permission" apart from a misconfiguration.
+# `id-token: write`. Absent, there is no identity to mint, whether or not this
+# is CI.
 def const GH_URL_VAR as string init "ACTIONS_ID_TOKEN_REQUEST_URL";
 def const GH_TOKEN_VAR as string init "ACTIONS_ID_TOKEN_REQUEST_TOKEN";
 
@@ -61,8 +68,15 @@ def const GH_TOKEN_VAR as string init "ACTIONS_ID_TOKEN_REQUEST_TOKEN";
 # looks like. `CI` is the near-universal one; the rest are here because a job
 # may unset it.
 def const CI_VARS as list of string init [
-    "CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI",
-    "TF_BUILD", "TEAMCITY_VERSION", "JENKINS_URL", "WOODPECKER_CI"
+    "CI",
+    "GITHUB_ACTIONS",
+    "GITLAB_CI",
+    "BUILDKITE",
+    "CIRCLECI",
+    "TF_BUILD",
+    "TEAMCITY_VERSION",
+    "JENKINS_URL",
+    "WOODPECKER_CI"
 ];
 
 /** How a grant was obtained, as it appears in a build log. */
@@ -102,20 +116,18 @@ export def struct Grant {
  * @return {Grant} an empty grant
  */
 export func noGrant() {
-    return Grant{ token: "", mechanism: "", found: false, refreshable: false,
-        error: "" };
+    return Grant{token: "", mechanism: "", found: false, refreshable: false, error: ""};
 }
 
 /**
  * A grant that should have worked and did not, which stops the search rather
- * than falling through: a misconfigured CI identity is worth reporting, not
- * worth silently replacing with a standing secret.
+ * than falling through: a misconfigured CI identity is reported, not silently
+ * replaced with a standing secret.
  * @param message {string} what went wrong
  * @return {Grant} a failed grant
  */
 export func failedGrant(message as string) {
-    return Grant{ token: "", mechanism: "", found: false, refreshable: false,
-        error: $message };
+    return Grant{token: "", mechanism: "", found: false, refreshable: false, error: $message};
 }
 
 /**
@@ -126,8 +138,13 @@ export func failedGrant(message as string) {
  * @return {Grant} the grant
  */
 export func heldGrant(token as string, mechanism as string, refreshable as bool) {
-    return Grant{ token: $token, mechanism: $mechanism, found: true,
-        refreshable: $refreshable, error: "" };
+    return Grant{
+        token: $token,
+        mechanism: $mechanism,
+        found: true,
+        refreshable: $refreshable,
+        error: ""
+    };
 }
 
 /**
@@ -179,6 +196,49 @@ export func identityProvider() {
         return "";
     }
     return "github-actions";
+}
+
+/**
+ * Report whether a registry accepts identity tokens from this CI provider.
+ *
+ * The registry advertises the issuers it accepts as
+ * `auth.trustedPublishing.providers` (`registry.Auth.trustedProviders`). An
+ * empty list is read as "not restricted", since a registry that names no
+ * provider has said nothing to refuse on. Names are compared by provider family
+ * rather than spelling, case-insensitively and with an `-actions` or `-ci`
+ * suffix dropped, because the same issuer is written both ways: this module
+ * calls GitHub's `github-actions` and the reference registry agrees, but a
+ * registry may say `github`, and GitLab's is `gitlab-ci` or `gitlab`.
+ * @param providers {list of string} the providers the registry accepts
+ * @param provider {string} this job's provider, as `identityProvider` names it
+ * @return {bool} true when the list is empty or names the provider's family
+ */
+export func providerAccepted(providers as list of string, provider as string) {
+    if (len($providers) == 0) {
+        return true;
+    }
+    def mine as string init providerFamily($provider);
+    if ($mine == "") {
+        return false;
+    }
+    for (def name in $providers) {
+        if (providerFamily($name) == $mine) {
+            return true;
+        }
+    }
+    return false;
+}
+
+# providerFamily reduces a provider name to the forge it belongs to:
+# `GitHub-Actions`, `github_actions` and `github` are all `github`.
+func providerFamily(name as string) {
+    def out as string init strings.replace(strings.lower(strings.trim($name)), "_", "-");
+    for (def suffix in ["-actions", "-ci"]) {
+        if (strings.endsWith($out, $suffix)) {
+            return strings.substring($out, 0, len($out) - len($suffix));
+        }
+    }
+    return $out;
 }
 
 /**
@@ -249,8 +309,8 @@ export func trustedGrant(audience as string) {
     }
     if (not ($resp.status == 200)) {
         return failedGrant("this job's identity provider refused to mint a " +
-            "token (HTTP " + convert.toString($resp.status) + "); the workflow " +
-            "needs `permissions: id-token: write`");
+            "token (HTTP " + convert.toString($resp.status) + "); check the audience " +
+            "the repository advertises");
     }
     def token as string init parseMintReply($resp.body);
     if ($token == "") {
@@ -262,8 +322,7 @@ export func trustedGrant(audience as string) {
 # emptyResponse is the zero value the try block above starts from.
 func emptyResponse() {
     def headers as map of string to string init {};
-    return http.Response{ status: 0, statusText: "", headers: $headers,
-        body: "" };
+    return http.Response{status: 0, statusText: "", headers: $headers, body: ""};
 }
 
 /**
@@ -280,6 +339,26 @@ export func environmentGrant() {
         return noGrant();
     }
     return heldGrant($token, BY_ENVIRONMENT, false);
+}
+
+/**
+ * The CI token held in the environment, if it may be sent to this registry.
+ *
+ * `$JVC_TOKEN` names no registry, so a project spanning two would hand one
+ * registry's secret to the other. Setting `$JVC_TOKEN_REGISTRY` pins it: the
+ * token is then offered only to that base URL, compared as `[registries]`
+ * compares them (`scopemap.sameRegistry`: trailing slashes dropped, scheme and
+ * host case-insensitive, path case kept). Unset, the token is offered to
+ * whichever registry the write targets.
+ * @param base {string} the registry the request is going to
+ * @return {Grant} the token, or nothing when unset or pinned elsewhere
+ */
+export func environmentGrantFor(base as string) {
+    def pinned as string init strings.trim(os.getEnv(ENV_TOKEN_REGISTRY));
+    if (not ($pinned == "") and not scopemap.sameRegistry($pinned, $base)) {
+        return noGrant();
+    }
+    return environmentGrant();
 }
 
 /**

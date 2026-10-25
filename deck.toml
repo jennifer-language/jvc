@@ -6,41 +6,38 @@ license = "LGPL-3.0-only"
 authors = ["mplx <jennifer@mplx.dev>"]
 keywords = ["package-manager", "decks", "jvc", "version-control", "jennifer"]
 
-# Host capabilities this deck's code needs. Declared even though no file in
-# src/ carries a `# pragma-jennifer-capability` of its own: jvc reaches the
-# network through the bundled http.j, which declares `net` itself, so the
-# interpreter already refuses jvc on a build without it. Saying so here makes
-# the requirement visible before anything is run, and the publish gate accepts
-# a manifest that declares more than its sources do (it only refuses one that
-# declares less).
-capabilities = ["net"]
+# Host capabilities jvc needs. No file in src/ carries its own
+# `# pragma-jennifer-capability`: `net` comes through the bundled http.j, which
+# declares it, and `exec` is for `os.run` (git, and the interpreter the publish
+# gate runs). Declaring them here shows the requirements before anything runs;
+# the publish gate accepts a manifest that declares more than its sources use.
+capabilities = ["net", "exec"]
 
 # jvc is an *app*, not a deck: an unscoped name and a runnable entry script, so
 # it is installed onto PATH rather than vendored, and `jvc publish` refuses it
 # (a published deck must be scoped). Its releases are built by
 # scripts/build-tarball.sh and scripts/build-deb.sh, not by `jvc pack`.
 #
-# jvc ships as its own OS package and is not bundled with the interpreter.
-# `jvc app install <jvc-url>` still works and installs a second copy, which
-# shadows a packaged one by PATH order rather than replacing it; jvc says so
-# when that happens. See docs/cli.md.
+# jvc ships as its own OS package, not with the interpreter.
+# `jvc app install <jvc-url>` installs a second copy, and PATH order decides
+# which one runs; jvc says so when that happens. See docs/cli.md.
 bin = "bin/jvc"
 
-# Project URLs by role. `deck` (the deck's own manifest / registry
-# location) is mandatory; `homepage` and `manual` are optional.
+# Project URLs by role. `deck` (where the manifest lives) is required to
+# publish; `homepage` and `manual` are optional.
 [package.urls]
 deck = "https://raw.githubusercontent.com/jennifer-language/jvc/main/deck.toml"
 homepage = "https://jennifer-lang.dev"
 manual = "https://jvc.jennifer-lang.dev/"
 
 # Jennifer engines that can run this deck: engine = version range. jvc uses only
-# bundled stdlib modules (toml, yaml, json, flatdb, http, semver, web, ...), so
-# its runtime dependency is the engine itself - hence [engines], not [decks].
+# bundled modules (archive, http, json, toml, yaml, semver, docblock, hash, ...),
+# so its runtime dependency is the engine itself: [engines], not [decks].
 #
-# A floor, not a caret: jvc needs the @vendor/deck resolver, the http bytes body,
-# and brace-escaped string literals, and the language is pre-1.0, so pinning one
-# minor would need a jvc release per interpreter minor.
-# jennifer-tiny is absent by design - jvc needs net.
+# A floor, not a caret: 0.25.0 is the first release with
+# `archive.UnpackOptions.skipSpecial` and `jennifer test --allow-empty`, and a
+# caret on a pre-1.0 language would need a jvc release per interpreter minor.
+# jennifer-tiny is absent: jvc needs `net` and `exec`.
 [engines]
 jennifer = ">=0.25.0"
 

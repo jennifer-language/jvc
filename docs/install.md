@@ -1,8 +1,11 @@
 # Installing jvc
 
-Every tagged release publishes three artifacts, each with a sidecar `.sha256`.
-All of them need the `jennifer` interpreter at the floor jvc's own `[engines]`
-table declares, and every package states that floor as a dependency.
+Each release publishes three artifacts, each with a sidecar `.sha256`. All
+need `jennifer` at jvc's `[engines]` floor (0.25.0). The `.deb` declares that
+floor. The Arch packages cannot: the interpreter packages provide an
+unversioned `jennifer`, so a versioned dependency would be unsatisfiable, and
+they depend on it bare. The interpreter still enforces the floor at load time,
+from the `# pragma-jennifer-version` header in each shipped source file.
 
 ```sh
 # Debian / Ubuntu
@@ -12,27 +15,26 @@ sudo apt install ./jvc_0.1.0_all.deb
 sudo pacman -U jvc-0.1.0-1-any.pkg.tar.zst
 
 # anywhere else: unpack and put the launcher on PATH
-tar xzf jvc-0.1.0.tar.gz && ./jvc-0.1.0/bin/jvc version
+tar xzf jvc-0.1.0.tar.gz
+ln -s "$PWD/jvc-0.1.0/bin/jvc" ~/.local/bin/jvc
+jvc version
 ```
 
-The tarball is the **runtime tree**, not a source archive: it carries what an
-installed jvc needs and nothing else, which is also what the Arch package is
-built from, so the artifacts cannot disagree about their contents. It is
-reproducible, so rebuilding a tag yields the same bytes and the published
-checksum stays meaningful.
+The tarball is the **runtime tree**, not a source archive, and the Arch
+package is built from it. It is reproducible: rebuilding a tag yields the same
+bytes, so the published checksum can be checked.
 
-`bin/` and `src/` must stay siblings wherever jvc is unpacked. The launcher
-reaches its modules through a relative `import "../src/cli.j"`, so moving one
-without the other breaks the command.
+`bin/` and `src/` must stay siblings: the launcher imports
+`"../src/cli.j"` relative to its own location (a symlink to it is fine).
 
 ## Installing jvc with jvc
 
-jvc is itself an app, so `jvc app install <jvc-url>` works and is how you run
-ahead of a release. It does **not** upgrade a packaged copy and cannot: those
-files belong to the system package manager. It writes a second copy under
-`~/.local/share/jvc/apps`, puts its command in `~/.local/bin`, and PATH order
-then decides which one runs. jvc says so when that is what just happened, and
-`jvc version` names both. See [the CLI reference](cli.md#jvc-installs-jvc).
+jvc is itself an app, so `jvc app install <jvc-url>` runs it ahead of a
+release. It does **not** upgrade a packaged copy, whose files belong to the
+system package manager. It writes a second copy under
+`~/.local/share/jvc/apps`, links its command into `~/.local/bin`, and PATH
+order decides which one runs. jvc says so when that happens, and `jvc version`
+names both. See [the CLI reference](cli.md#jvc-installs-jvc).
 
 ## Shell completion
 
@@ -52,8 +54,8 @@ itself:
 They complete verbs and per-verb flags, and read the project to complete
 arguments: `jvc remove` offers what the manifest requires, `jvc update` offers
 what `camcorder.lock` pins, `jvc registry` offers the scopes in play, and `jvc
-app uninstall` offers what is installed. Nothing there runs jvc, because a
-completion that starts an interpreter on every Tab stops being used.
+app uninstall` offers what is installed. They never run jvc, so Tab does not
+start an interpreter.
 
 ## Building the artifacts yourself
 
@@ -62,14 +64,13 @@ scripts/build-tarball.sh 0.1.0 release   # runtime tree, reproducible
 scripts/build-deb.sh     0.1.0 release   # .deb, floor read from [engines]
 ```
 
-The Debian dependency floor is not written into the control file. It is read
-out of `[engines]` at build time, because that table is the compatibility
-contract: a package floor that drifted from it would promise an interpreter the
-code then refuses at read time.
+`build-deb.sh` reads the Debian dependency floor from `[engines]`, so the
+package cannot promise an interpreter the code refuses. It needs `dpkg-deb`.
 
 `packaging/archlinux/` holds two PKGBUILDs. `PKGBUILD` packages the release
 tarball; `PKGBUILD-git` builds from the tip of main. There is no `-bin`
 variant, because nothing is compiled.
 
-`.github/workflows/release.yml` runs all of it on a tag and publishes the
-result, with the test suite as a gate in front.
+`.github/workflows/release.yml` runs the test suite, checks that the tag
+matches `VERSION` in `src/cli.j` and `version` in `deck.toml`, builds all
+three, and publishes them.

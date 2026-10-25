@@ -3,45 +3,54 @@
 # pragma-jennifer-version: >=0.25.0
 
 /**
- * The `jvc publish` flow: turn a local deck (its `deck.toml` plus `src/` tree)
- * into a publishable release and register it with a deck repository. Publishing
- * has two halves:
+ * The local half of `jvc publish` and `jvc pack`: checking a deck (its
+ * `deck.toml` plus `src/` tree) is fit to release, and packaging it into a
+ * checksummed tarball. Two entry points:
  *
- *   - **package** - validate the manifest, tar.gz the deck (`deck.toml` + the
- *     `src/` subtree - the only part `jvc install` vendors), and checksum it;
- *   - **hand off** - emit what the registry needs to record the version: a
- *     `publish.json` beside the tarball, and the exact `deckadmin add` command
- *     for the registry operator to run.
+ *   - **`check`** - validate the manifest (scoped name, dependency tables as
+ *     install checks them, a usable SemVer version, `[package.urls] deck`, the
+ *     entrypoint, an honest capability declaration, no contradicted
+ *     `jennifer-tiny` claim) and run the quality gate (`verify.j`: lint, every
+ *     overlay, docblocks);
+ *   - **`pack`** - tar.gz the deck (its manifest, `src/` and `template/`),
+ *     checksum it, write a `publish.json` beside it, and return the exact
+ *     `deckadmin add` command for a repository operator.
  *
- * Publishing deliberately does **not** write a registry's database itself. The
- * registry is a separate program with its own storage; a CLI reaching into its
- * files would couple the two and bypass every check the registry owns. Once the
- * registry has an authenticated write API, `publish` gains a network path.
- *
- * The registry stores metadata and an external artifact URL; hosting the
- * `.tar.gz` itself is out of band, so `--url` names where the tarball will live.
+ * Nothing here talks to a network. The publish request itself, which hands a
+ * registry a repository and a tag to read the code from, lives in `cli.j`
+ * (`runPublish`) over `registry.j`; `pack` serves the paths that need an
+ * artifact, such as self-hosting or a repository that accepts no publishes.
+ * Neither writes a registry's database: the registry is a separate program
+ * with its own storage, and reaching into its files would bypass every check
+ * it owns.
  * @module publish
  * @example
  * import "./publish.j" as publish;
- * def r as publish.Result init publish.publish(".", "https://x/d-1.0.0.tar.gz", "", "dist", "0");
+ * def gate as publish.Result init publish.check(".", true);
+ * if ($gate.ok) {
+ *     def url as string init "https://x/d-1.0.0.tar.gz";
+ *     def r as publish.Result init publish.pack(".", $url, "dist", $gate.message);
+ * }
  */
 
 use fs;
 use json;
 use strings;
+use lists;
 use path;
 use hash;
 use encoding;
 use archive;
 import "./manifest.j" as manifest;
 import "./deckname.j" as deckname;
+import "./constraint.j" as constraint;
 import "./pragma.j" as pragma;
 import "./verify.j" as verify;
 import "semver.j" as semver;
 
 /**
- * The outcome of packaging a release.
- * @field ok {bool} whether packaging and the gate succeeded
+ * The outcome of `check` or `pack`.
+ * @field ok {bool} whether the step succeeded
  * @field message {string} the human-facing report
  * @field operatorCommand {string} the `deckadmin add` line **for whoever runs the
  *     repository**, which is not normally the person publishing: it edits the
@@ -55,11 +64,11 @@ export def struct Result {
 };
 
 func ok(message as string) {
-    return Result{ ok: true, message: $message, operatorCommand: "" };
+    return Result{ok: true, message: $message, operatorCommand: ""};
 }
 
 func fail(message as string) {
-    return Result{ ok: false, message: $message, operatorCommand: "" };
+    return Result{ok: false, message: $message, operatorCommand: ""};
 }
 
 # hexSha256 returns the lowercase hex SHA-256 of data.
@@ -68,18 +77,29 @@ func hexSha256(data as bytes) {
 }
 
 /**
- * Package a deck directory into a `.tar.gz`: its `deck.toml` plus every file
+ * Package a deck directory into a `.tar.gz`: its manifest (`deck.toml`,
+ * `deck.yaml`, `deck.yml` or `deck.json`) plus every file
  * under `src/` (the code, which is what gets vendored) and `template/` (the
  * frame template `jvc new` stamps, which is read from the release but never
- * vendored). Nothing else - `vendor/`, `dist/`, tests, VCS metadata are left
- * out. Returns the archive bytes.
+ * vendored). Nothing else: `vendor/`, `dist/`, a README, VCS metadata and
+ * anything else at the top level are left out. The `_test.j` overlays under
+ * `src/` are **kept**, because `jvc install --runtests` runs them against the
+ * installed copy.
+ *
+ * Reproducible: every member has mtime 0, and its mode is `0o755` when the
+ * source file has any execute bit (so a deck's `[package] bin` stays runnable
+ * once installed) and `0o644` otherwise.
  * @param dir {string} the deck's root directory
  * @return {bytes} the `.tar.gz` archive bytes
  */
 export func packDeck(dir as string) {
     def entries as list of archive.Entry init [];
-    def prefix as string init $dir + "/";
-    for (def st in fs.walk($dir)) {
+    # Cleaned first: given "deck/", the prefix would be "deck//", which no
+    # walked path starts with, so every name kept its directory and nothing
+    # matched `src/` or `deck.toml`.
+    def root as string init path.clean($dir);
+    def prefix as string init $root + "/";
+    for (def st in fs.walk($root)) {
         if ($st.isDir) {
             continue;
         }
@@ -90,10 +110,14 @@ export func packDeck(dir as string) {
         if ($rel == "deck.toml" or $rel == "deck.yaml" or $rel == "deck.yml" or
             $rel == "deck.json" or strings.startsWith($rel, "src/") or
             strings.startsWith($rel, "template/")) {
+            def mode as int init 0o644;
+            if (($st.mode & 0o111) != 0) {
+                $mode = 0o755;
+            }
             $entries[] = archive.Entry{
                 name: $rel,
                 data: fs.readBytes($st.path),
-                mode: 0o644,
+                mode: $mode,
                 mtime: 0
             };
         }
@@ -151,15 +175,32 @@ export func enginesSpecOf(m as manifest.Manifest) {
 }
 
 /**
+ * Quote one argument for a POSIX shell: wrap it in single quotes, inside which
+ * nothing is special, and spell each embedded `'` as `'\''` (close the quote,
+ * an escaped quote, reopen). The result is always exactly one word with exactly
+ * the input's text, whatever the input holds: `$(...)`, backticks, `"`, `\`
+ * and newlines all arrive literally.
+ * @param arg {string} the argument
+ * @return {string} the quoted word
+ */
+export func shellQuote(arg as string) {
+    return "'" + strings.replace($arg, "'", "'\\''") + "'";
+}
+
+/**
  * Render the `deckadmin add` command a repository operator runs to register this
  * version.
  *
  * The argument order is deckadmin's, not this module's convenience: the
  * positionals are deck, version, and URL, the description is the optional
- * fourth, and the checksum is a **flag**. Emitting the checksum as a positional
- * put it in the description's slot and pushed the real description off the end,
- * so the printed command died with `unexpected extra argument` and none of it
- * was obvious from reading the output.
+ * fourth, and the checksum is a **flag**: as a positional it would land in the
+ * description's slot and the command would fail with `unexpected extra
+ * argument`.
+ *
+ * **Every argument is single-quoted** (`shellQuote`). The command is meant to be
+ * pasted into a shell by somebody other than the author, and the description
+ * and URL are the author's free text: inside double quotes, a description
+ * holding `$(...)` would run on the operator's machine.
  * @param name {string} the deck name
  * @param version {string} the version
  * @param url {string} the artifact URL
@@ -170,19 +211,26 @@ export func enginesSpecOf(m as manifest.Manifest) {
  * @param capabilitiesSpec {string} the capabilities spec ("" for none)
  * @return {string} the ready-to-run command
  */
-export func publishCommand(name as string, version as string, url as string,
-    checksum as string, description as string, requiresSpec as string,
-    enginesSpec as string, capabilitiesSpec as string) {
-    def cmd as string init "deckadmin add " + $name + " " + $version + " " +
-        $url + " \"" + $description + "\" --checksum " + $checksum;
+export func publishCommand(
+    name as string,
+    version as string,
+    url as string,
+    checksum as string,
+    description as string,
+    requiresSpec as string,
+    enginesSpec as string,
+    capabilitiesSpec as string) {
+    def cmd as string init "deckadmin add " + shellQuote($name) + " " +
+        shellQuote($version) + " " + shellQuote($url) + " " +
+        shellQuote($description) + " --checksum " + shellQuote($checksum);
     if (not ($requiresSpec == "")) {
-        $cmd = $cmd + " --requires \"" + $requiresSpec + "\"";
+        $cmd = $cmd + " --requires " + shellQuote($requiresSpec);
     }
     if (not ($enginesSpec == "")) {
-        $cmd = $cmd + " --engines \"" + $enginesSpec + "\"";
+        $cmd = $cmd + " --engines " + shellQuote($enginesSpec);
     }
     if (not ($capabilitiesSpec == "")) {
-        $cmd = $cmd + " --capabilities \"" + $capabilitiesSpec + "\"";
+        $cmd = $cmd + " --capabilities " + shellQuote($capabilitiesSpec);
     }
     return $cmd;
 }
@@ -220,30 +268,47 @@ export func capabilitiesOf(dir as string) {
 # runs on tiny perfectly well, and a `use` declaration cannot tell the two
 # apart. Refusing on `use crypto;` would fail honest decks, so this checks the
 # five whole-library cases and leaves the partial one to the run-time stub.
-def const DEFAULT_ONLY as list of string init [
-    "term", "serial", "spi", "i2c", "gpio"
-];
+def const DEFAULT_ONLY as list of string init ["term", "serial", "spi", "i2c", "gpio"];
 
 /**
  * The library names a Jennifer source file declares with `use`.
  *
  * Line-based, which is what the language allows: a `use` is a declaration at
  * the top level of a file, one per line. A docblock line mentioning one begins
- * with its own ` * `, so it does not match once trimmed.
+ * with its own ` * `, so it does not match once trimmed. A trailing `#` comment
+ * is dropped first, and an alias is ignored, so `use term as t;` and
+ * `use term; # tty` both yield `term`.
  * @param source {string} the file's text
- * @return {list of string} the names declared, in order, with repeats kept
+ * @return {list of string} the library names declared, in order, with repeats kept
  */
 export func usesOf(source as string) {
     def out as list of string init [];
     for (def line in strings.split($source, "\n")) {
-        def t as string init strings.trim($line);
+        def t as string init $line;
+        def cut as int init strings.indexOf($t, "#");
+        if ($cut >= 0) {
+            $t = strings.substring($t, 0, $cut);
+        }
+        $t = strings.trim($t);
         if (not strings.startsWith($t, "use ") or not strings.endsWith($t, ";")) {
             continue;
         }
-        def name as string init strings.trim(
-            strings.substring($t, 4, len($t) - 1));
+        def rest as string init strings.trim(strings.substring($t, 4, len($t) - 1));
+        def name as string init firstWord($rest);
         if (not ($name == "")) {
             $out[] = $name;
+        }
+    }
+    return $out;
+}
+
+# firstWord returns the text up to the first space or tab.
+func firstWord(text as string) {
+    def out as string init $text;
+    for (def sep in [" ", "\t"]) {
+        def at as int init strings.indexOf($out, $sep);
+        if ($at >= 0) {
+            $out = strings.substring($out, 0, $at);
         }
     }
     return $out;
@@ -261,10 +326,9 @@ export func defaultOnlyUses(dir as string) {
             continue;
         }
         for (def name in usesOf(fs.readString($st.path))) {
-            for (def only in DEFAULT_ONLY) {
-                if ($name == $only) {
-                    $found = pragma.merge($found, [$name]);
-                }
+            if (lists.contains(DEFAULT_ONLY, $name) and
+                not lists.contains($found, $name)) {
+                $found[] = $name;
             }
         }
     }
@@ -291,10 +355,10 @@ func tinyProblem(m as manifest.Manifest, dir as string) {
 }
 
 # capabilityProblem compares a manifest's declared capability set against what
-# the source actually needs, returning "" when the manifest is honest. Both
-# directions matter: an undeclared capability would surprise a consumer whose
-# build cannot provide it, and an unknown name is rejected by the interpreter
-# itself at read time.
+# the source needs, returning "" when the manifest is honest: every name is a
+# known capability (the interpreter refuses an unknown one at read time), and
+# everything the source declares is in the manifest (an undeclared one would
+# surprise a consumer whose build lacks it). Declared but unused is allowed.
 func capabilityProblem(m as manifest.Manifest, dir as string) {
     for (def name in $m.pkg.capabilities) {
         if (not pragma.isKnown($name)) {
@@ -302,13 +366,49 @@ func capabilityProblem(m as manifest.Manifest, dir as string) {
                 "Jennifer capability (known: " + strings.join(pragma.known(), ", ") + ")";
         }
     }
-    def undeclared as list of string init
-        pragma.missing(capabilitiesOf($dir), $m.pkg.capabilities);
+    def declared as list of string init capabilitiesOf($dir);
+    for (def name in $declared) {
+        if (not pragma.isKnown($name)) {
+            return "src/ declares the capability pragma \"" + $name + "\", which " +
+                "is not a Jennifer capability, so the interpreter refuses to load " +
+                "the file (a trailing `# note` on a pragma line is read as more " +
+                "names, not as a comment)";
+        }
+    }
+    def undeclared as list of string init pragma.missing($declared, $m.pkg.capabilities);
     if (len($undeclared) > 0) {
         return "src/ declares the capability pragma " + strings.join($undeclared, ", ") +
             " but [package] capabilities does not list it; add capabilities = [\"" +
             strings.join($undeclared, "\", \"") + "\"] so consumers can see what " +
             "this deck needs";
+    }
+    return "";
+}
+
+# requirementProblem checks the dependency tables as install does
+# (`cli.manifestProblems`), so a release cannot carry a `requires` that no
+# consumer could resolve: deck names in [decks], [dev-decks] and [conflicts]
+# must be scoped and valid, and every constraint, [engines] included, must be
+# inside the grammar. Returns "" when all are.
+func requirementProblem(m as manifest.Manifest) {
+    def tables as list of string init ["decks", "dev-decks", "conflicts"];
+    def tableDeps as list of list of manifest.Dependency init [$m.decks, $m.devDecks, $m.conflicts];
+    for (def i as int init 0; $i < len($tables); $i = $i + 1) {
+        for (def dep in $tableDeps[$i]) {
+            if (not deckname.isScoped($dep.name) or not deckname.isValid($dep.name)) {
+                return "[" + $tables[$i] + "] " + $dep.name + ": not a valid deck name";
+            }
+            if (not constraint.isValidConstraint($dep.constraint)) {
+                return "[" + $tables[$i] + "] " + $dep.name + " = \"" + $dep.constraint +
+                    "\": not a valid constraint";
+            }
+        }
+    }
+    for (def dep in $m.engines) {
+        if (not constraint.isValidConstraint($dep.constraint)) {
+            return "[engines] " + $dep.name + " = \"" + $dep.constraint +
+                "\": not a valid constraint";
+        }
     }
     return "";
 }
@@ -329,8 +429,13 @@ func validate(m as manifest.Manifest, dir as string) {
                 "@scope/deck (a bundled module belongs in [engines], a local module is not a dep)";
         }
     }
-    if (not semver.isValid($m.pkg.version)) {
-        return "version is not valid SemVer: " + $m.pkg.version;
+    def reqs as string init requirementProblem($m);
+    if (not ($reqs == "")) {
+        return $reqs;
+    }
+    if (not constraint.isUsableVersion($m.pkg.version)) {
+        return "version is not valid SemVer (or has a numeric part over 18 digits): " +
+            $m.pkg.version;
     }
     if (manifest.getUrl($m, "deck") == "") {
         return "deck.toml needs a [package.urls] deck = <manifest url>";
@@ -350,8 +455,13 @@ func validate(m as manifest.Manifest, dir as string) {
 }
 
 # writePlanJson records the release metadata beside the tarball for tooling.
-func writePlanJson(outDir as string, name as string, version as string,
-    url as string, checksum as string, requiresSpec as string) {
+func writePlanJson(
+    outDir as string,
+    name as string,
+    version as string,
+    url as string,
+    checksum as string,
+    requiresSpec as string) {
     def doc as json.Value init json.map();
     $doc = json.set($doc, "/name", $name);
     $doc = json.set($doc, "/version", $version);
@@ -363,12 +473,9 @@ func writePlanJson(outDir as string, name as string, version as string,
     return $planPath;
 }
 
-# prereleaseNote warns an author that an unreleased version will not be picked
-# up. Publishing a beta is legitimate and is not blocked: it is stored like any
-# other version, and a consumer reaches it by naming it. What is worth saying
-# is that no ordinary constraint will, because the alternative is an author
-# tagging `0.2.0-rc.1`, publishing it, and concluding the registry is broken
-# when `jvc update` does not move.
+# prereleaseNote warns an author that a prerelease will not be picked up.
+# Publishing one is not blocked, and a consumer reaches it by naming it, but no
+# ordinary constraint selects it, so `jvc update` will not move to it.
 func prereleaseNote(version as string) {
     if (not semver.isValid($version)) {
         return "";
@@ -386,7 +493,8 @@ func prereleaseNote(version as string) {
  * Validate the deck at `dir` and, unless told not to, run the quality gate
  * over it.
  *
- * Validation is about the manifest: a scoped name, scoped dependencies, a
+ * Validation is about the manifest: a scoped name, dependency tables that
+ * install would accept (scoped names, constraints in the grammar), a usable
  * SemVer version, a `[package.urls] deck`, a `src/` with the entrypoint in it,
  * an honest capability declaration, and no `jennifer-tiny` claim the code
  * contradicts. The gate is about the code: lint, every module's overlay, and
@@ -405,11 +513,13 @@ export func check(dir as string, runChecks as bool) {
     if (not ($problem == "")) {
         return fail($problem);
     }
-    # The ecosystem quality gate. A deck that cannot pass its own lint, tests,
-    # and docblock checks does not get published.
     if (not $runChecks) {
-        return Result{ ok: true, message: "\n  checks:   SKIPPED (--no-verify)" +
-            prereleaseNote($m.pkg.version), operatorCommand: "" };
+        return Result{
+            ok: true,
+            message: "\n  checks:   SKIPPED (--no-verify)" +
+                prereleaseNote($m.pkg.version),
+            operatorCommand: ""
+        };
     }
     def report as verify.Report init verify.verify($dir);
     if (not $report.ok) {
@@ -417,38 +527,36 @@ export func check(dir as string, runChecks as bool) {
             verify.reportText($report) +
             "\n\nfix these, or pass --no-verify to publish anyway");
     }
-    return Result{ ok: true,
+    return Result{
+        ok: true,
         message: "\n  checks:   passed" + verify.reportText($report) +
             prereleaseNote($m.pkg.version),
-        operatorCommand: "" };
+        operatorCommand: ""
+    };
 }
 
 /**
  * Package a checked deck into a tarball, for the paths that need an artifact.
  *
- * **Only the operator path needs this.** A repository that accepts publishes is
- * told a repository and a tag and reads the code from the forge itself, so
- * building a tarball for it writes a file into the project that nothing will
- * ever fetch and computes a checksum nothing will ever verify. Packaging is
- * therefore a separate step the caller reaches for, not part of publishing.
+ * A registry that accepts publishes reads the code from the forge, so it needs
+ * no tarball; packing is a separate step, for self-hosting or an operator.
  * @param dir {string} the deck's root directory
  * @param url {string} the artifact URL an operator will host it at
  * @param outDir {string} where to write the tarball and the plan
- * @param now {string} the publish timestamp (Unix seconds as text)
  * @param gate {string} the gate's report, to head the summary
  * @return {Result} the outcome, carrying the operator command
  */
-export func pack(dir as string, url as string, outDir as string,
-    now as string, gate as string) {
+export func pack(dir as string, url as string, outDir as string, gate as string) {
     def manifestPath as string init manifest.findManifest($dir);
     def m as manifest.Manifest init manifest.load($manifestPath);
     def name as string init $m.pkg.name;
     def version as string init $m.pkg.version;
 
-    # Package src/ + deck.toml into <deck>-<version>.tar.gz and checksum it.
+    # Package the deck into <deck>-<version>.tar.gz and checksum it.
     fs.mkdirAll($outDir);
     def data as bytes init packDeck($dir);
-    def tarPath as string init path.join($outDir,
+    def tarPath as string init path.join(
+        $outDir,
         deckname.deckOf($name) + "-" + $version + ".tar.gz");
     fs.writeBytes($tarPath, $data);
     def checksum as string init "sha256:" + hexSha256($data);
@@ -460,13 +568,20 @@ export func pack(dir as string, url as string, outDir as string,
         $url = "<host the tarball and put its URL here>";
     }
     writePlanJson($outDir, $name, $version, $url, $checksum, $requiresSpec);
-    def cmd as string init publishCommand($name, $version, $url, $checksum,
-        $m.pkg.description, $requiresSpec, $enginesSpec, $capabilitiesSpec);
+    def cmd as string init publishCommand(
+        $name,
+        $version,
+        $url,
+        $checksum,
+        $m.pkg.description,
+        $requiresSpec,
+        $enginesSpec,
+        $capabilitiesSpec);
     def report as string init "packaged " + $name + "@" + $version +
         "\n  tarball:  " + $tarPath + "\n  checksum: " + $checksum + $gate;
     # The operator command is returned rather than appended, because whether it
     # is the right instruction depends on something this module cannot see: a
     # repository that accepts publishes makes it not just redundant but
     # contradictory, telling the user to do by hand what jvc is about to do.
-    return Result{ ok: true, message: $report, operatorCommand: $cmd };
+    return Result{ok: true, message: $report, operatorCommand: $cmd};
 }

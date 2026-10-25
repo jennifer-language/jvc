@@ -6,9 +6,9 @@
 # jvc - the jennifer deck manager. A thin launcher over the `cli` module, which
 # holds all the logic and its tests. Run it directly:
 #
-#     ./jvc install
+#     ./bin/jvc install
 #
-# or through the interpreter: `jennifer run jvc install`.
+# or through the interpreter: `jennifer run bin/jvc install`.
 
 use os;
 import "../src/cli.j" as cli;

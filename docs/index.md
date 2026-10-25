@@ -1,9 +1,8 @@
 # jvc - jennifer vendor console
 
 `jvc` is the package manager for the [Jennifer
-language](https://jennifer-lang.dev/), written in Jennifer. It is the Jennifer
-counterpart to Python's requirements files or Composer's `composer.json` and
-Packagist: it reads a manifest, resolves a dependency graph against a deck
+language](https://jennifer-lang.dev/), written in Jennifer. Like Composer or
+Cargo, it reads a manifest, resolves a dependency graph against a deck
 repository, vendors the result, and pins it so a fresh checkout rebuilds the
 same tree.
 
@@ -12,12 +11,13 @@ same tree.
 - **Packages are called *decks*** (singular: *deck*).
 - **The manifest is `deck.toml`** (or `deck.yaml` / `deck.yml` / `deck.json`);
   the resolved, installed set is pinned in `camcorder.lock`.
-- **A deck is a *scoped* `@jennifer/routeros`**: a `.tar.gz` vendored into
-  `vendor/` and imported as `import "@jennifer/routeros/";`. Bare names
-  (`ansi`, `http`) are engine-bundled or local modules, **not** registry decks.
-  A bundled module is required via `[engines]`; a local one needs no entry.
-- Everything is built on Jennifer's own libraries and modules (`toml`, `json`,
-  `web`, `flatdb`, `http`, `semver`, `archive`, `hash`, and the rest).
+- **A deck has a scoped name** such as `@jennifer/routeros`. It comes from a
+  registry or a git repository, is vendored into `vendor/`, and is imported as
+  `import "@jennifer/routeros/";`. Bare names (`ansi`, `http`) are bundled or
+  local modules, **not** decks. A bundled module is required via `[engines]`;
+  a local one needs no entry.
+- jvc uses only the interpreter's bundled libraries and modules (`archive`,
+  `http`, `json`, `toml`, `yaml`, `semver`, `docblock`, `hash`, and others).
 
 ## Three shapes
 
@@ -57,8 +57,9 @@ app-jvc/
 │   ├── gitsource.j #   a git remote as a deck source
 │   ├── scaffold.j  #   stamping an app frame from an engine deck
 │   ├── app.j       #   installing runnable apps onto PATH
-│   ├── pragma.j    #   reading the interpreter's capability pragmas
+│   ├── pragma.j    #   reading the version and capability pragmas
 │   ├── publish.j   #   the publish and pack paths
+│   ├── safepath.j  #   path-segment checks and safe archive unpacking
 │   └── verify.j    #   the publish quality gate
 ├── completions/    # bash and fish
 ├── packaging/      # debian and archlinux
@@ -67,5 +68,4 @@ app-jvc/
 └── deck.toml       # this project's own manifest
 ```
 
-The launcher is a thin adapter: all the logic, and all the tests, live in
-`src/`.
+The launcher is a thin adapter; the logic and the tests live in `src/`.

@@ -35,24 +35,24 @@ func inGithubJob() {
 # --- the mint request --------------------------------------------------------
 
 func testTheAudienceIsAppendedToAnExistingQuery() {
-    testing.assertEqual(mintUrl("https://t.example/?api-version=2.0", "reg.example"),
+    testing.assertEqual(
+        mintUrl("https://t.example/?api-version=2.0", "reg.example"),
         "https://t.example/?api-version=2.0&audience=reg.example");
 }
 
 func testTheAudienceStartsAQueryWhenThereIsNone() {
-    testing.assertEqual(mintUrl("https://t.example/token", "reg.example"),
+    testing.assertEqual(
+        mintUrl("https://t.example/token", "reg.example"),
         "https://t.example/token?audience=reg.example");
 }
 
 func testAnAudienceThatIsAUrlIsEncoded() {
-    def url as string init mintUrl("https://t.example/?v=1",
-        "https://registry.example");
+    def url as string init mintUrl("https://t.example/?v=1", "https://registry.example");
     testing.assertContains($url, "audience=https%3A%2F%2Fregistry.example");
 }
 
 func testTheMintReplyCarriesTheToken() {
-    testing.assertEqual(parseMintReply('{"value":"eyJhbGc.body.sig"}'),
-        "eyJhbGc.body.sig");
+    testing.assertEqual(parseMintReply('{"value":"eyJhbGc.body.sig"}'), "eyJhbGc.body.sig");
 }
 
 func testAMintReplyWithoutAValueYieldsNothing() {
@@ -77,6 +77,33 @@ func testAnIdentityProviderNeedsBothVariables() {
 func testNoIdentityProviderOutsideAJob() {
     clearEnv();
     testing.assertEqual(identityProvider(), "");
+}
+
+# --- which providers the registry accepts -----------------------------------
+
+func testAnEmptyProviderListAcceptsAnyProvider() {
+    def none as list of string init [];
+    testing.assertTrue(providerAccepted($none, "github-actions"));
+}
+
+func testTheReferenceSpellingIsAccepted() {
+    testing.assertTrue(providerAccepted(["github-actions", "gitlab-ci"], "github-actions"));
+}
+
+# The same issuer is spelled with and without its CI suffix.
+func testSpellingDifferencesAreTolerated() {
+    testing.assertTrue(providerAccepted(["github"], "github-actions"));
+    testing.assertTrue(providerAccepted(["GitHub-Actions"], "github-actions"));
+    testing.assertTrue(providerAccepted(["gitlab"], "gitlab-ci"));
+    testing.assertTrue(providerAccepted(["gitlab-ci"], "gitlab"));
+    testing.assertTrue(providerAccepted([" github_actions "], "github-actions"));
+}
+
+func testAnotherProviderIsNotAccepted() {
+    testing.assertFalse(providerAccepted(["gitlab-ci", "gitea-actions"], "github-actions"));
+    # Not a prefix match: a family is compared whole.
+    testing.assertFalse(providerAccepted(["git"], "github-actions"));
+    testing.assertFalse(providerAccepted(["github-actions"], ""));
 }
 
 # A job with no identity is not a failure: it means "try the next mechanism".
@@ -153,8 +180,7 @@ func testNothingIsReportedForAnEmptyGrant() {
 }
 
 func testTheMechanismIsReported() {
-    testing.assertContains(describe(heldGrant("secret", BY_TRUSTED, false)),
-        BY_TRUSTED);
+    testing.assertContains(describe(heldGrant("secret", BY_TRUSTED, false)), BY_TRUSTED);
 }
 
 # The whole point of reporting the mechanism is that it is not the token.
@@ -168,4 +194,15 @@ func testAFailedGrantIsNotAFoundOne() {
     testing.assertFalse($g.found);
     testing.assertEqual($g.token, "");
     testing.assertContains($g.error, "said no");
+}
+
+# A pinned token is matched the way [registries] matches a URL: host case and a
+# trailing slash do not matter, path case does.
+func testAPinnedTokenComparesRegistriesAsTheMappingDoes() {
+    os.setEnv(ENV_TOKEN, "ci-token");
+    os.setEnv(ENV_TOKEN_REGISTRY, "https://R.example/Reg/");
+    testing.assertTrue(environmentGrantFor("https://r.example/Reg").found);
+    testing.assertFalse(environmentGrantFor("https://r.example/reg").found);
+    os.setEnv(ENV_TOKEN, "");
+    os.setEnv(ENV_TOKEN_REGISTRY, "");
 }

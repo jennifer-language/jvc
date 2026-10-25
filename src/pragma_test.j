@@ -6,7 +6,7 @@
 # headers. Every case here was checked against the real interpreter first, so
 # these lock in what it actually enforces, not what the docs imply. Run with:
 #
-#     jennifer test cli/pragma_test.j
+#     jennifer test src/pragma_test.j
 
 use testing;
 
@@ -78,32 +78,141 @@ func testDuplicatesCollapse() {
     testing.assertEqual(len($caps), 1);
 }
 
+# the interpreter splits on whitespace as well as commas
+func testSpaceSeparatedCapabilities() {
+    def caps as list of string init capabilities(src([
+        '# pragma-jennifer-capability: net exec',
+        'use io;'
+    ]));
+    testing.assertEqual(len($caps), 2);
+    testing.assertEqual($caps[0], "net");
+    testing.assertEqual($caps[1], "exec");
+}
+
+func testMixedSeparatorsAndEmptyItems() {
+    def caps as list of string init capabilities(src([
+        "#pragma-jennifer-capability:net,,exec\t sql",
+        'use io;'
+    ]));
+    testing.assertEqual(len($caps), 3);
+    testing.assertEqual($caps[2], "sql");
+}
+
+# There is no trailing comment: the interpreter reads `#` and `why` as names
+# and refuses them, so they are returned for the caller to reject.
+func testATrailingCommentIsMoreNames() {
+    def caps as list of string init capabilities(src([
+        '# pragma-jennifer-capability: net # why',
+        'use io;'
+    ]));
+    testing.assertEqual(len($caps), 3);
+    testing.assertEqual($caps[0], "net");
+    testing.assertEqual($caps[1], "#");
+    testing.assertFalse(isKnown($caps[1]));
+}
+
+func testWhitespaceBeforeTheColonAndTheHash() {
+    def caps as list of string init capabilities(src([
+        "  #\tpragma-jennifer-capability : net",
+        'use io;'
+    ]));
+    testing.assertEqual(len($caps), 1);
+    testing.assertEqual($caps[0], "net");
+}
+
+# a docblock above the pragmas does not end the header
+func testCapabilityAfterADocblock() {
+    def caps as list of string init capabilities(src([
+        '#!/usr/bin/env -S jennifer run',
+        '/**',
+        ' * The module.',
+        ' */',
+        '/* one line */',
+        '',
+        '# pragma-jennifer-capability: net',
+        'use io;'
+    ]));
+    testing.assertEqual(len($caps), 1);
+    testing.assertEqual($caps[0], "net");
+}
+
+# Block comments nest exactly as in the lexer (as of 0.24.0-dev+126), and the
+# rest of a line is read once every level has closed. The cases are the
+# interpreter's own (`reqcheck_test.go`, TestHeaderNestedBlockComments).
+func testBlockCommentsNestLikeTheLexer() {
+    def pragma as string init "# pragma-jennifer-capability: net";
+    # inside a nested comment
+    testing.assertEqual(len(capabilities(src(["/* a /* b */", $pragma, "*/", "use io;"]))), 0);
+    # inside a plain comment
+    testing.assertEqual(len(capabilities(src(["/*", $pragma, "*/", "use io;"]))), 0);
+    # after a nested comment closes
+    testing.assertEqual(len(capabilities(src(["/* a /* b */ c */", $pragma, "use io;"]))), 1);
+    # after a multi-line nest
+    testing.assertEqual(
+        len(capabilities(src(["/* a", "/* b", "*/", "*/", $pragma, "use io;"]))),
+        1);
+    # after a comment on the same line
+    testing.assertEqual(len(capabilities(src(["/* note */ " + $pragma, "use io;"]))), 1);
+    # code after a comment ends the header
+    testing.assertEqual(len(capabilities(src(["/* note */ use io;", $pragma]))), 0);
+}
+
+# A comment closed and another opened on one line: the second is tracked, and
+# the pragma after it closes counts.
+func testACommentReopenedOnTheClosingLineIsTracked() {
+    def pragma as string init "# pragma-jennifer-capability: net";
+    testing.assertEqual(len(capabilities(src(["/* a */ /* b", "*/", $pragma, "use io;"]))), 1);
+    testing.assertEqual(len(capabilities(src(["/* a */ /* b", $pragma, "*/", "use io;"]))), 0);
+}
+
+# a lone slash-star-slash opens a comment, it does not close itself
+func testASlashStarSlashOpensAComment() {
+    testing.assertEqual(
+        len(capabilities(src(['/*/', '# pragma-jennifer-capability: net', '*/', 'use io;']))),
+        0);
+}
+
+# A leading BOM is skipped, as the lexer strips it (the interpreter honours the
+# pragmas after one as of 0.24.0-dev+126; jvc always did).
+func testALeadingBomIsSkipped() {
+    def caps as list of string init capabilities("\uFEFF" +
+        src(['# pragma-jennifer-capability: net', 'use io;']));
+    testing.assertEqual(len($caps), 1);
+    testing.assertEqual($caps[0], "net");
+    testing.assertEqual(
+        versionFloor("\uFEFF" + src(['# pragma-jennifer-version: >=0.25.0'])),
+        ">=0.25.0");
+}
+
+func testKeysAreCaseSensitive() {
+    testing.assertEqual(
+        len(capabilities(src(['# PRAGMA-JENNIFER-CAPABILITY: net', 'use io;']))),
+        0);
+    testing.assertEqual(
+        len(capabilities(src(['# pragma-jennifer-capabilityx: net', 'use io;']))),
+        0);
+}
+
 # --- what does NOT count (verified against the interpreter) -----------------
 
 # a pragma below the first real line is ignored by the interpreter
 func testPragmaBelowTheHeaderIsIgnored() {
-    testing.assertEqual(len(capabilities(src([
-        'use io;',
-        '# pragma-jennifer-capability: net'
-    ]))), 0);
+    testing.assertEqual(
+        len(capabilities(src(['use io;', '# pragma-jennifer-capability: net']))),
+        0);
 }
 
 func testPragmaAtEndOfFileIsIgnored() {
-    testing.assertEqual(len(capabilities(src([
-        'use io;',
-        'io.printf("x");',
-        '# pragma-jennifer-capability: net'
-    ]))), 0);
+    testing.assertEqual(
+        len(capabilities(src(['use io;', 'io.printf("x");', '# pragma-jennifer-capability: net']))),
+        0);
 }
 
 # a docblock is not a `#` comment, so the header ends at it
 func testPragmaInsideADocblockIsIgnored() {
-    testing.assertEqual(len(capabilities(src([
-        '/**',
-        ' * pragma-jennifer-capability: net',
-        ' */',
-        'use io;'
-    ]))), 0);
+    testing.assertEqual(
+        len(capabilities(src(['/**', ' * pragma-jennifer-capability: net', ' */', 'use io;']))),
+        0);
 }
 
 func testSourceWithNoPragmas() {
@@ -127,14 +236,19 @@ func testUnknownCapabilityIsReturnedNotDropped() {
 # --- the version floor ------------------------------------------------------
 
 func testVersionFloorIsReturnedVerbatim() {
-    testing.assertEqual(versionFloor(src([
-        '# pragma-jennifer-version: >=0.25.0',
-        'use io;'
-    ])), ">=0.25.0");
+    testing.assertEqual(
+        versionFloor(src(['# pragma-jennifer-version: >=0.25.0', 'use io;'])),
+        ">=0.25.0");
 }
 
 func testVersionFloorAbsent() {
     testing.assertEqual(versionFloor(src(['use io;'])), "");
+}
+
+func testVersionFloorAfterADocblock() {
+    testing.assertEqual(
+        versionFloor(src(['/** doc */', '# pragma-jennifer-version: >=0.25.0', 'use io;'])),
+        ">=0.25.0");
 }
 
 func testVersionFloorIgnoredBelowTheHeader() {
@@ -176,4 +290,38 @@ func testMissingAgainstATinyBuild() {
 func testADeckNeedingNothingRunsAnywhere() {
     def none as list of string init [];
     testing.assertEqual(len(missing($none, $none)), 0);
+}
+
+# --- the block scan itself ---------------------------------------------------
+
+# Pairs are taken left to right, so the star of an opener is never the start
+# of a closer: a slash, a star and a slash is one opener and a stray slash.
+func testAnOpenerDoesNotLendItsStarToACloser() {
+    def at as Skipped init skipBlock("/*/ x", 1);
+    testing.assertEqual($at.depth, 2);
+    testing.assertEqual($at.rest, "");
+}
+
+func testTheTextAfterTheLastCloserIsKept() {
+    def at as Skipped init skipBlock("a /* b */ c */ # tail", 1);
+    testing.assertEqual($at.depth, 0);
+    testing.assertEqual($at.rest, " # tail");
+}
+
+func testADepthStillOpenIsCarried() {
+    def at as Skipped init skipBlock("a /* b /* c */", 1);
+    testing.assertEqual($at.depth, 2);
+}
+
+# The scan used to step one character at a time through `strings.substring`,
+# quadratic in the line: a 50 KB one-line comment took about three seconds.
+func testAVeryLongOneLineCommentIsScanned() {
+    def body as string init "/* " + strings.repeat("ab", 100000) + " */";
+    def caps as list of string init capabilities(src([
+        $body,
+        '# pragma-jennifer-capability: net',
+        'use io;'
+    ]));
+    testing.assertEqual(len($caps), 1);
+    testing.assertEqual($caps[0], "net");
 }

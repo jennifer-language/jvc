@@ -10,34 +10,28 @@
 #     /usr/share/bash-completion/completions/jvc
 #     ~/.local/share/bash-completion/completions/jvc
 #
-# Nothing here runs jvc. Completing a deck name would otherwise start an
-# interpreter on every Tab, so the manifest and the lockfile are read directly:
-# a wrong guess costs a keystroke, a slow one costs the habit.
+# Nothing here runs jvc, so Tab never starts an interpreter: the manifest and
+# the lockfile are read directly.
 
-# _jvc_manifest walks up from the current directory to the manifest jvc would
-# use, matching how the CLI locates one. Prints nothing when there is none.
+# _jvc_manifest prints the manifest in the current directory (deck.toml,
+# deck.yaml, deck.yml or deck.json), or nothing. Like jvc, it does not look in
+# parent directories.
 _jvc_manifest() {
-    local dir="$PWD" name
-    while [[ -n $dir ]]; do
-        for name in deck.toml deck.yaml deck.yml deck.json; do
-            if [[ -f "$dir/$name" ]]; then
-                printf '%s\n' "$dir/$name"
-                return 0
-            fi
-        done
-        [[ $dir == / ]] && break
-        dir="${dir%/*}"
-        [[ -z $dir ]] && dir=/
+    local name
+    for name in deck.toml deck.yaml deck.yml deck.json; do
+        if [[ -f "$PWD/$name" ]]; then
+            printf '%s\n' "$PWD/$name"
+            return 0
+        fi
     done
     return 1
 }
 
 # _jvc_table prints the keys of one manifest table.
 #
-# Both patterns are anchored at the start of the line, which is not fussiness:
-# an unanchored `"decks"` also matches `"dev-decks"`, so the two tables would
-# bleed into each other and the section name itself would be offered as a deck.
-# The JSON arm assumes the pretty-printed form jvc writes, one key per line.
+# Both patterns are anchored at line start: unanchored, `"decks"` also matches
+# `"dev-decks"`, and the section name itself would be offered as a deck. The
+# JSON arm assumes the pretty-printed form jvc writes, one key per line.
 _jvc_table() {
     local file=$1 table=$2
     [[ -f $file ]] || return 0
@@ -63,8 +57,7 @@ _jvc_decks() {
     { _jvc_table "$m" decks; _jvc_table "$m" dev-decks; } | sort -u
 }
 
-# _jvc_self prints this project's own deck name, which is the one `yank` is
-# almost always about.
+# _jvc_self prints this project's own deck name, the usual target of `yank`.
 _jvc_self() {
     local m
     m=$(_jvc_manifest) || return 0
@@ -72,8 +65,8 @@ _jvc_self() {
         "$m" | head -n1
 }
 
-# _jvc_locked prints the decks camcorder.lock pins, which is what `update`
-# actually operates on, transitive ones included.
+# _jvc_locked prints the decks camcorder.lock pins, transitive ones included:
+# what `update` operates on.
 #
 # The names are the keys at exactly one level inside "decks", which the pretty
 # printer puts at four spaces. Matching any `"key": {` instead would also return
@@ -88,13 +81,9 @@ _jvc_locked() {
         | sed 's/[[:space:]]*:[[:space:]]*{$//; s/^ *"//; s/"$//'
 }
 
-# _jvc_scopes prints the mapping keys `jvc registry` accepts: the scopes this
-# project already depends on, whatever the manifest maps today, and the
-# catch-all.
-# Everything is normalised to the wildcard form the manifest actually stores, so
-# a scope is offered once rather than as two spellings of the same key. `jvc
-# registry` accepts the bare scope too, but completing to the canonical form
-# means what lands in the manifest is what was on screen.
+# _jvc_scopes prints the mapping keys `jvc registry` accepts (mapped scopes,
+# depended-on scopes, and `*`), in the `@scope/*` form the manifest stores, so
+# each appears once.
 _jvc_scopes() {
     local m
     m=$(_jvc_manifest) || { printf '*\n'; return 0; }
@@ -120,15 +109,23 @@ _jvc_apps() {
         | sed 's/[[:space:]]*:[[:space:]]*{$//; s/^ *"//; s/"$//'
 }
 
-# _jvc_offer fills COMPREPLY from a word list with globbing off. The scope list
-# contains a literal `*`, and compgen expands its word list, so without this the
-# catch-all silently becomes a listing of the current directory.
+# _jvc_offer fills COMPREPLY from a word list with globbing off: compgen expands
+# its word list, and the scope list holds a literal `*`.
 _jvc_offer() {
     local restore=0
     case $- in *f*) ;; *) set -f; restore=1 ;; esac
     COMPREPLY=($(compgen -W "$1" -- "$2"))
     (( restore )) && set +f
     return 0
+}
+
+# _jvc_ltrim strips the part of each URL candidate before the last colon in the
+# current word: bash splits words on `:` (COMP_WORDBREAKS), so `https:` would
+# otherwise be inserted twice.
+_jvc_ltrim() {
+    if declare -F __ltrim_colon_completions >/dev/null 2>&1; then
+        __ltrim_colon_completions "$1"
+    fi
 }
 
 _jvc() {
@@ -143,6 +140,8 @@ _jvc() {
         cword=$COMP_CWORD
     fi
 
+    # bash shows no descriptions, so verbs are listed bare; `jvc help` has one
+    # line each.
     local commands="init add remove list check conflict engine source
         query install update new publish pack app registry yank unyank whoami scopes
         claim owners login logout version help"
@@ -151,6 +150,7 @@ _jvc() {
     case $prev in
         --registry)
             _jvc_offer "$JVC_REGISTRY https://registry.jennifer-lang.dev http://localhost:8080" "$cur"
+            _jvc_ltrim "$cur"
             return
             ;;
         --scope)
@@ -159,8 +159,8 @@ _jvc() {
             COMPREPLY+=($(compgen -d -- "$cur"))
             return
             ;;
-        --manifest|--out|--prefix)
-            COMPREPLY=($(compgen -f -- "$cur"))
+        --out)
+            COMPREPLY=($(compgen -d -- "$cur"))
             return
             ;;
         --from|--version|--source|--url|--repository|--tag|--remote)
@@ -174,7 +174,7 @@ _jvc() {
         local w=${words[i]}
         if (( skip )); then skip=0; continue; fi
         case $w in
-            --registry|--manifest|--from|--version|--source|--url|--out|--prefix|--scope\
+            --registry|--from|--version|--source|--url|--out|--scope\
                 |--repository|--tag|--remote)
                 skip=1; continue ;;
             -*) continue ;;
@@ -187,16 +187,22 @@ _jvc() {
 
     if [[ -z $verb ]]; then
         if [[ $cur == -* ]]; then
-            _jvc_offer "--registry --manifest --version --help" "$cur"
+            _jvc_offer "--help --version" "$cur"
         else
             _jvc_offer "$commands" "$cur"
         fi
         return
     fi
 
-    # Flags, per verb. Every verb also accepts --registry and --manifest.
+    # Flags, per verb. --registry only where the verb talks to a repository:
+    # the manifest verbs, pack, check and version never read it.
     if [[ $cur == -* ]]; then
-        local flags="--registry --manifest"
+        local flags=""
+        case $verb in
+            query|search|install|sync|update|upgrade|new|publish|yank|unyank\
+                |whoami|scopes|claim|owners|login|logout|app)
+                flags="--registry" ;;
+        esac
         case $verb in
             add|remove|rm|install|sync|update|upgrade) flags="$flags --dev" ;;
         esac
@@ -205,20 +211,19 @@ _jvc() {
             publish) flags="$flags --no-verify --repository --tag --remote" ;;
             pack) flags="$flags --out --url --no-verify --operator-command" ;;
             new) flags="$flags --from --version --source" ;;
-            app) flags="$flags --scope --prefix --version" ;;
+            app) flags="$flags --scope --system --version" ;;
             owners) flags="$flags --remove" ;;
         esac
         _jvc_offer "$flags" "$cur"
         return
     fi
 
-    # The aliases the dispatch accepts are matched here but deliberately not
-    # suggested above: `rm` completing its argument matters, `rm` cluttering the
-    # verb menu next to `remove` does not.
+    # Aliases (`rm`, `search`, `upgrade`, ...) are matched here but not offered
+    # as verbs, to keep the verb list short.
     case $verb in
-        remove|rm|conflict|source)
-            # Only what the manifest actually requires can be removed or
-            # re-pointed, so offering anything else would be noise.
+        remove|rm|conflict|source|query|search)
+            # What the manifest requires: the only decks remove, conflict and
+            # source can act on, and the likely ones for query.
             _jvc_offer "$(_jvc_decks)" "$cur"
             ;;
         update|upgrade)
@@ -232,6 +237,8 @@ _jvc() {
         registry)
             if (( argc == 0 )); then
                 _jvc_offer "$(_jvc_scopes)" "$cur"
+            elif (( argc == 1 )); then
+                _jvc_offer "https://registry.jennifer-lang.dev http://localhost:8080" "$cur"
             fi
             ;;
         claim|owners)
@@ -255,16 +262,9 @@ _jvc() {
                 esac
             fi
             ;;
-        help)
-            _jvc_offer "$commands" "$cur"
-            ;;
     esac
 
-    # A scoped name contains a colon-free slash but bash still splits on the
-    # colon in some setups; keep the scope prefix from being repeated.
-    if declare -F __ltrim_colon_completions >/dev/null 2>&1; then
-        __ltrim_colon_completions "$cur"
-    fi
+    _jvc_ltrim "$cur"
 }
 
 complete -F _jvc jvc

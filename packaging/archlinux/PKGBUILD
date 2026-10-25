@@ -3,11 +3,18 @@
 # AUR PKGBUILD for `jvc`: installs the release tarball published with each
 # tag. Pair to `PKGBUILD-git`, which builds from the tip of main.
 #
-# There is no `-bin` variant because there is nothing to compile: jvc is
-# architecture-independent Jennifer source, and the release tarball is
-# already the runtime tree. `arch=('any')` accordingly.
+# There is no `-bin` variant: jvc is architecture-independent Jennifer
+# source, and the release tarball is already the runtime tree.
 
+# `_tag` is the release tag exactly as published (SemVer, so a prerelease is
+# `0.2.0-rc.1`); it names the download and the directory it unpacks to.
+# `pkgver` is the same version in pacman's spelling, which cannot hold a `-`.
+# The hyphen is dropped (`0.2.0rc.1`) rather than turned into `_` or `.`,
+# because vercmp orders `0.2.0rc.1` before `0.2.0` and either separator after
+# it, and a prerelease must sort below its release. The release pipeline
+# stamps both lines from the tag.
 pkgname=jvc
+_tag=0.1.0
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='The Jennifer deck manager: dependency resolution, vendoring, and publishing for Jennifer projects'
@@ -15,50 +22,41 @@ arch=('any')
 url='https://github.com/jennifer-language/jvc'
 license=('LGPL-3.0-only')
 
-# Unversioned on purpose. jvc needs `jennifer >= 0.25.0` and says so in its
-# own `[engines]`, but `jennifer-bin` and `jennifer-git` both declare a bare
-# `provides=('jennifer')` with no version attached, so `jennifer>=0.25.0`
-# here would be *unsatisfiable* rather than merely unmet and pacman would
-# refuse the package outright. The floor is still enforced, one layer down:
-# every jvc source file carries `# pragma-jennifer-version: >=0.25.0` and the
-# interpreter checks it at read time. Add the version back here as soon as
-# the interpreter packages advertise `provides=("jennifer=$pkgver")`.
+# Unversioned on purpose. jvc needs `jennifer >= 0.25.0`, but `jennifer-bin`
+# and `jennifer-git` provide an unversioned `jennifer`, so the versioned form
+# would be unsatisfiable and pacman would refuse the package. The interpreter
+# enforces the floor at load time from each source file's
+# `# pragma-jennifer-version`. Add the version here once the interpreter
+# packages declare `provides=("jennifer=$pkgver")`.
 depends=('jennifer')
 optdepends=(
-    'git: decks resolved from a [sources] git remote, `jvc app install`, and publishing'
+    'git: [sources] decks, registry decks of kind git, `jvc app install`, and publishing'
 )
 provides=("jvc=$pkgver")
 conflicts=('jvc-git')
 
-# The curated runtime tarball built by scripts/build-tarball.sh and attached
-# to the release, not GitHub's auto-generated source archive: the latter
-# carries the test overlays, packaging, and CI config, none of which belong
-# in an installed tree.
-source=("$pkgname-$pkgver.tar.gz::$url/releases/download/$pkgver/$pkgname-$pkgver.tar.gz")
+# The runtime tarball from scripts/build-tarball.sh, not GitHub's source
+# archive, which carries the tests, packaging and CI config.
+source=("$pkgname-$_tag.tar.gz::$url/releases/download/$_tag/$pkgname-$_tag.tar.gz")
 
-# The release pipeline writes a sidecar .sha256 for the tarball and publishes
-# a pre-filled copy of this PKGBUILD as a release asset. AUR maintainer note:
-# take the filled-in sums from there, or run `updpkgsums`, when bumping
-# pkgver.
+# The release publishes a copy of this PKGBUILD with the sums filled in; take
+# them from there, or run `updpkgsums`, when bumping pkgver.
 sha256sums=('SKIP')
 
 package() {
-	cd "${srcdir}/${pkgname}-${pkgver}"
+	cd "${srcdir}/${pkgname}-${_tag}"
 
-	# The launcher resolves `import "../src/cli.j"` relative to its own
-	# file, so `bin/` and `src/` must stay siblings. `/usr/share` is right
-	# for an architecture-independent tree, and it matches the layout jvc
-	# itself uses when it installs an app into a prefix
-	# (`<prefix>/share/jvc/apps/<name>`).
+	# The launcher imports "../src/cli.j" relative to its own file, so
+	# `bin/` and `src/` stay siblings, under `/usr/share` as an
+	# architecture-independent tree.
 	install -Dm755 bin/jvc "${pkgdir}/usr/share/jvc/bin/jvc"
 	install -Dm644 deck.toml "${pkgdir}/usr/share/jvc/deck.toml"
 
 	install -dm755 "${pkgdir}/usr/share/jvc/src"
 	install -m644 src/*.j "${pkgdir}/usr/share/jvc/src/"
 
-	# A symlink rather than a wrapper, which is also how `jvc app install`
-	# puts a command on PATH: `ls -l` then shows where jvc really lives, and
-	# the interpreter resolves the relative import through the link.
+	# A symlink, as `jvc app install` writes: the interpreter resolves the
+	# relative import through it.
 	install -dm755 "${pkgdir}/usr/bin"
 	ln -s /usr/share/jvc/bin/jvc "${pkgdir}/usr/bin/jvc"
 

@@ -6,12 +6,9 @@
 # Arch package install, laid out so it can be unpacked anywhere and run
 # in place.
 #
-# This is deliberately *not* GitHub's auto-generated source archive.
-# That one carries the test overlays, the packaging directory, and the
-# CI config, none of which a running jvc needs; this one carries exactly
-# the files that make a working install, which is what the Arch package
-# consumes and what somebody unpacking into /opt or a container layer
-# wants.
+# Not GitHub's source archive, which carries the tests, packaging and CI
+# config: this one holds only what a working install needs, and the Arch
+# package is built from it.
 #
 # Usage:
 #   scripts/build-tarball.sh <version> <out-dir>
@@ -63,23 +60,29 @@ mkdir -p "$OUT"
 OUT_ABS="$(cd "$OUT" && pwd)"
 
 # Reproducible: a fixed member order, no uid/gid or user names from the
-# build host, and one timestamp for every entry. Two builds of the same
-# commit then produce the same bytes and the same checksum, which is what
-# makes the sidecar .sha256 worth publishing.
+# build host, and one timestamp for every entry, so two builds of one
+# commit give the same bytes and checksum.
 #
-# SOURCE_DATE_EPOCH is honoured when the caller sets it (the release
-# pipeline passes the tag's commit date); otherwise the tree's own newest
-# file decides, never "now".
+# The timestamp is SOURCE_DATE_EPOCH when set (the release pipeline passes
+# the tag's commit date), else the HEAD commit's date. Outside git the
+# newest staged file decides, which is not reproducible: `install` stamps
+# each copy with the time it ran.
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    SOURCE_DATE_EPOCH="$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || true)"
+fi
 if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
     SOURCE_DATE_EPOCH="$(
         find "$TREE" -type f -printf '%T@\n' | cut -d. -f1 | sort -n | tail -1
     )"
 fi
 
+# --mode pins permissions as well: the staged directories were made
+# under the caller's umask, which is a property of the build host.
 tar --create --gzip \
     --directory "$STAGE" \
     --sort=name \
     --owner=0 --group=0 --numeric-owner \
+    --mode='u+rwX,go+rX,go-w' \
     --mtime="@$SOURCE_DATE_EPOCH" \
     --file "$OUT_ABS/$NAME.tar.gz" \
     "$NAME"

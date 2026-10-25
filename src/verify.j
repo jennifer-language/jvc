@@ -6,25 +6,31 @@
  * The publish quality gate: the checks a deck must pass before it may be
  * released.
  *
- * The ecosystem is only as trustworthy as what enters it, so `jvc publish`
- * refuses a deck that fails any of these rather than leaving them to a
- * convention nobody enforces:
+ * `jvc publish` refuses a deck that fails any of these:
  *
- *   - **lint** - `jennifer lint` over the deck's `src/`. Its exit code already
- *     draws the line in the right place: non-zero for a warning or an error,
- *     zero when only advisory `info` findings remain, so a long line does not
- *     block a release but an unused import does.
+ *   - **lint** - `jennifer lint` over the deck's modules and their overlays.
+ *     Its exit code is non-zero for a warning or an error and zero when only
+ *     advisory `info` findings remain, so a long line does not block a
+ *     release but an unused import does.
  *   - **test overlays** - every module under `src/` must have a co-located
  *     `MODULE_test.j`, and every overlay must pass. A module with no overlay is
  *     as much a failure as one whose overlay fails: an untested module is what
- *     the rule exists to prevent.
+ *     the rule exists to prevent. So is an overlay with no test function in it.
+ *     Overlays run with a cut-down environment and an empty home directory
+ *     (`runIsolated`), here and in the install-time `runOverlays`.
+ *
+ *     A file another `src/` file `include`s, or one named `NAME.inc.j`, is
+ *     part of its includer, not a module: in isolation its calls into the
+ *     includer read as undefined. It is linted and tested through the
+ *     includer, needs no overlay of its own, and an overlay that is itself
+ *     included is not run alone.
  *   - **docblocks** - every `src/` file is parsed with the `docblock` module and
  *     any `warning` or `error` diagnostic blocks the release. This catches doc
  *     drift, such as an `@param` for a parameter that no longer exists.
  *
  * **`jennifer fmt` is not in the gate.** The gate asks whether a deck is
- * correct; formatting is not. The one formatting rule that bears on
- * correctness, line width, is a lint rule already.
+ * correct; formatting is not. Line width is a lint `info` finding, advisory
+ * like the rest.
  * @module verify
  * @example
  * import "./verify.j" as verify;
@@ -37,11 +43,49 @@ use fs;
 use path;
 use strings;
 use convert;
+use maps;
 import "docblock.j" as docblock;
 
 # The interpreter jvc shells out to for lint and test. Overridable for an
 # unusual install layout; resolved from PATH otherwise.
 def const DEFAULT_JENNIFER as string init "jennifer";
+
+# What `jennifer test` prints for an overlay with no test function, matched on
+# its head (the rest of the line names the convention and `--allow-empty`).
+# Builds before 0.24.0-dev+167 said "methods".
+def const NO_TESTS as list of string init ["no test methods found", "no test functions found"];
+
+/**
+ * The environment variables an overlay's process inherits; every other one is
+ * withheld. An overlay is code, and at install time (`--runtests`) it is
+ * somebody else's code, so it is not handed what would let it act as whoever
+ * ran jvc: a publish token (`$JVC_TOKEN`), a CI job's identity-token
+ * coordinates, a forge or cloud credential (`GITHUB_TOKEN`, `CI_JOB_TOKEN`,
+ * `AWS_*`, `NPM_TOKEN`, ...), an `SSH_AUTH_SOCK`, or `$JVC_CREDENTIALS`. The
+ * interpreter can neither enumerate nor unset the environment, so this is an
+ * allowlist applied by `env -i` rather than a denylist cleared in place: a
+ * credential nobody thought to name stays out too.
+ *
+ * What remains is what running a test needs: `PATH` (to find the interpreter
+ * and `git`), the locale and terminal, `TZ`, `TMPDIR`, and the interpreter's
+ * own `JENNIFER_VENDOR` (which the install-time check sets to the project's
+ * `vendor/`) and `JENNIFER_SYSMODDIR`. `HOME` and the XDG base directories
+ * are not passed through but pointed at a fresh empty directory (`runIsolated`).
+ */
+export def const PASSED_ENV as list of string init [
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TZ",
+    "TMPDIR",
+    "JENNIFER_VENDOR",
+    "JENNIFER_SYSMODDIR"
+];
+
+# The prefix of the throwaway home directory each isolated run gets.
+def const HOME_PREFIX as string init "jvc-overlay-home";
 
 /**
  * One check's outcome.
@@ -98,11 +142,66 @@ export func overlayFor(file as string) {
 }
 
 /**
- * List a deck's `src/` modules, excluding the test overlays themselves.
- * @param dir {string} the deck's root directory
- * @return {list of string} the module paths
+ * List the files the `.j` sources under a directory `include`, each resolved
+ * against the file that includes it and cleaned (`path.clean`). Only an
+ * `include "PATH";` statement at the start of a line counts.
+ * @param dir {string} the directory to scan
+ * @return {map of string to bool} the included paths, each mapped to true
  */
-export func modulesOf(dir as string) {
+export func includedFiles(dir as string) {
+    def out as map of string to bool init {};
+    if (not fs.isDir($dir)) {
+        return $out;
+    }
+    for (def st in fs.walk($dir)) {
+        if ($st.isDir or not strings.endsWith($st.path, ".j")) {
+            continue;
+        }
+        for (def target in includeTargets(fs.readString($st.path))) {
+            $out[path.clean(path.join(path.dir($st.path), $target))] = true;
+        }
+    }
+    return $out;
+}
+
+# includeTargets returns the paths a source's `include` statements name.
+func includeTargets(source as string) {
+    def out as list of string init [];
+    for (def line in strings.split($source, "\n")) {
+        def t as string init strings.trim($line);
+        if (not strings.startsWith($t, INCLUDE_HEAD)) {
+            continue;
+        }
+        def rest as string init strings.substring($t, len(INCLUDE_HEAD), len($t));
+        def end as int init strings.indexOf($rest, "\"");
+        if ($end > 0) {
+            $out[] = strings.substring($rest, 0, $end);
+        }
+    }
+    return $out;
+}
+
+# What an include statement starts with, up to its path.
+def const INCLUDE_HEAD as string init "include \"";
+
+/**
+ * Report whether a file is part of its includer rather than a module of its
+ * own: another file includes it, or it is named `NAME.inc.j`.
+ * @param file {string} the file path
+ * @param included {map of string to bool} the included paths (`includedFiles`)
+ * @return {bool} true for an included file
+ */
+export func isPartial(file as string, included as map of string to bool) {
+    return strings.endsWith($file, ".inc.j") or maps.has($included, path.clean($file));
+}
+
+/**
+ * List every `.j` file under a deck's `src/` that is not a test overlay,
+ * included files among them.
+ * @param dir {string} the deck's root directory
+ * @return {list of string} the source paths
+ */
+export func sourcesOf(dir as string) {
     def out as list of string init [];
     def src as string init path.join($dir, "src");
     if (not fs.isDir($src)) {
@@ -116,6 +215,23 @@ export func modulesOf(dir as string) {
             continue;
         }
         $out[] = $st.path;
+    }
+    return $out;
+}
+
+/**
+ * List a deck's `src/` modules: its sources less the included files
+ * (`isPartial`), which are linted and tested through their includer.
+ * @param dir {string} the deck's root directory
+ * @return {list of string} the module paths
+ */
+export func modulesOf(dir as string) {
+    def included as map of string to bool init includedFiles(path.join($dir, "src"));
+    def out as list of string init [];
+    for (def file in sourcesOf($dir)) {
+        if (not isPartial($file, $included)) {
+            $out[] = $file;
+        }
     }
     return $out;
 }
@@ -153,6 +269,109 @@ export func docblockProblems(source as string) {
     return $out;
 }
 
+/**
+ * Build the argv that runs a command through `env -i` with only `PASSED_ENV`
+ * (those of them that are set) and with `HOME`, `XDG_CONFIG_HOME`,
+ * `XDG_DATA_HOME` and `XDG_CACHE_HOME` pointed into `home`. Pure.
+ * @param argv {list of string} the command and its arguments
+ * @param home {string} the directory to give the child as its home
+ * @return {list of string} the wrapped argv
+ */
+export func isolatedArgv(argv as list of string, home as string) {
+    def out as list of string init ["env", "-i"];
+    for (def name in PASSED_ENV) {
+        def value as string init os.getEnv($name);
+        if (not ($value == "")) {
+            $out[] = $name + "=" + $value;
+        }
+    }
+    $out[] = "HOME=" + $home;
+    $out[] = "XDG_CONFIG_HOME=" + path.join($home, ".config");
+    $out[] = "XDG_DATA_HOME=" + path.join($home, ".local", "share");
+    $out[] = "XDG_CACHE_HOME=" + path.join($home, ".cache");
+    for (def a in $argv) {
+        $out[] = $a;
+    }
+    return $out;
+}
+
+/**
+ * Run a command with an environment cut down to `PASSED_ENV` and a fresh,
+ * empty home directory, removed again afterwards on every path.
+ *
+ * This keeps credentials out of the child's **environment and home**: the
+ * stored login (`$JVC_CREDENTIALS`, or its default path under the user's
+ * config directory) is not where the child looks, and no token variable
+ * reaches it. It is **not a sandbox**. The child runs with the user's
+ * privileges and can read any file the user can, by absolute path; a deck
+ * whose tests are run is a deck whose code is trusted.
+ *
+ * Needs `env` (coreutils, or any POSIX `env` with `-i`) on PATH, as `git.j`
+ * already does for `env -u`.
+ * @param argv {list of string} the command and its arguments
+ * @return {os.Result} the command's result
+ * @throws {Error} when the temporary home cannot be made or `env` cannot be started
+ */
+export func runIsolated(argv as list of string) {
+    def home as string init fs.makeTempDir("", HOME_PREFIX);
+    defer fs.removeAll($home);
+    return os.run(isolatedArgv($argv, $home));
+}
+
+# runFailure reports `env` failing to start the interpreter (exit 126 or 127
+# with an `env:` message), so a wrong `$JVC_JENNIFER` reads as that rather than
+# as a failed test; "" otherwise. A throw from `os.run` (no `env`, no temporary
+# directory) is caught by the callers.
+func runFailure(r as os.Result) {
+    if (($r.exitCode == 126 or $r.exitCode == 127) and strings.startsWith($r.stderr, "env:")) {
+        return cannotRun(strings.trim($r.stderr));
+    }
+    return "";
+}
+
+# cannotRun renders the one message every "the interpreter did not start" path
+# shares.
+func cannotRun(message as string) {
+    return "cannot run " + interpreter() + ": " + $message;
+}
+
+# saysNoTests reports whether runner output is the empty-suite message, in any
+# spelling an interpreter has used.
+func saysNoTests(output as string) {
+    for (def head in NO_TESTS) {
+        if (strings.contains($output, $head)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+# runOverlay runs one overlay isolated (`runIsolated`), returning "" when it
+# passed or the failure text, a failure to start the interpreter included. An
+# overlay with no test function tests nothing, so it fails; it is recognised by
+# the runner's message, before the exit code is read.
+func runOverlay(dir as string, overlay as string) {
+    def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
+    try {
+        $r = runIsolated([interpreter(), "test", $overlay]);
+    } catch (err) {
+        return cannotRun($err.message);
+    }
+    def broken as string init runFailure($r);
+    if (not ($broken == "")) {
+        return $broken;
+    }
+    def output as string init strings.trim($r.stdout + $r.stderr);
+    if (saysNoTests($output)) {
+        return rel($dir, $overlay) + " defines no test function, so it tests " +
+            "nothing (the runner discovers functions whose names start with `test`)";
+    }
+    if (not ($r.exitCode == 0)) {
+        return rel($dir, $overlay) + " failed:\n" + $output;
+    }
+    return "";
+}
+
 # rel renders a path relative to the deck directory, for readable messages.
 func rel(dir as string, file as string) {
     def prefix as string init $dir + "/";
@@ -166,6 +385,8 @@ func rel(dir as string, file as string) {
 
 # lintCheck runs `jennifer lint` over the deck's src/. The exit code is the
 # verdict: non-zero for a warning or error, zero when only info findings remain.
+# Lint reads the sources and runs none of them, so it is not isolated; an
+# interpreter that cannot be started is a failed check, not a crash.
 func lintCheck(dir as string) {
     def modules as list of string init modulesOf($dir);
     def overlays as list of string init [];
@@ -183,20 +404,32 @@ func lintCheck(dir as string) {
         $argv[] = $f;
     }
     if (len($modules) == 0) {
-        return Finding{ check: "lint", ok: true, detail: "no modules to lint" };
+        return Finding{check: "lint", ok: true, detail: "no modules to lint"};
     }
-    def r as os.Result init os.run($argv);
+    def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
+    try {
+        $r = os.run($argv);
+    } catch (err) {
+        return Finding{check: "lint", ok: false, detail: cannotRun($err.message)};
+    }
     if ($r.exitCode == 0) {
-        return Finding{ check: "lint", ok: true,
-            detail: convert.toString(len($modules)) + " module(s) clean" };
+        return Finding{
+            check: "lint",
+            ok: true,
+            detail: convert.toString(len($modules)) + " module(s) clean"
+        };
     }
-    return Finding{ check: "lint", ok: false, detail: strings.trim($r.stdout + $r.stderr) };
+    return Finding{check: "lint", ok: false, detail: strings.trim($r.stdout + $r.stderr)};
 }
 
 # overlayCheck requires an overlay per module and runs each one. Named this way
 # rather than `testCheck` because the test runner discovers any method starting
 # with `test`, so a private helper called `testCheck` would be run as a test by
-# this module's own overlay.
+# this module's own overlay. Each overlay runs isolated (`runIsolated`), the
+# same as at install time: a publish runs in exactly the CI job that holds the
+# credentials, and the overlays import vendored decks that are not the
+# author's code. A test that needs a variable outside PASSED_ENV, or something
+# in the user's home, does not pass the gate; that is deliberate.
 func overlayCheck(dir as string) {
     def absent as list of string init missingOverlays($dir);
     if (len($absent) > 0) {
@@ -205,31 +438,35 @@ func overlayCheck(dir as string) {
             $names = $names + "\n      " + rel($dir, $module) + " has no " +
                 rel($dir, overlayFor($module));
         }
-        return Finding{ check: "tests", ok: false,
-            detail: "every module needs a test overlay:" + $names };
+        return Finding{
+            check: "tests",
+            ok: false,
+            detail: "every module needs a test overlay:" + $names
+        };
     }
     def modules as list of string init modulesOf($dir);
     if (len($modules) == 0) {
-        return Finding{ check: "tests", ok: true, detail: "no modules to test" };
+        return Finding{check: "tests", ok: true, detail: "no modules to test"};
     }
     for (def module in $modules) {
-        def overlay as string init overlayFor($module);
-        def r as os.Result init os.run([interpreter(), "test", $overlay]);
-        if (not ($r.exitCode == 0)) {
-            return Finding{ check: "tests", ok: false,
-                detail: rel($dir, $overlay) + " failed:\n" +
-                    strings.trim($r.stdout + $r.stderr) };
+        def problem as string init runOverlay($dir, overlayFor($module));
+        if (not ($problem == "")) {
+            return Finding{check: "tests", ok: false, detail: $problem};
         }
     }
-    return Finding{ check: "tests", ok: true,
-        detail: convert.toString(len($modules)) + " overlay(s) passed" };
+    return Finding{
+        check: "tests",
+        ok: true,
+        detail: convert.toString(len($modules)) + " overlay(s) passed"
+    };
 }
 
-# docblockCheck parses every module's docblocks and blocks on drift.
+# docblockCheck parses every source's docblocks, included files too, and blocks
+# on drift.
 func docblockCheck(dir as string) {
     def problems as string init "";
     def count as int init 0;
-    for (def module in modulesOf($dir)) {
+    for (def module in sourcesOf($dir)) {
         def found as list of string init docblockProblems(fs.readString($module));
         for (def message in $found) {
             $problems = $problems + "\n      " + rel($dir, $module) + " " + $message;
@@ -237,65 +474,87 @@ func docblockCheck(dir as string) {
         }
     }
     if ($count > 0) {
-        return Finding{ check: "docblocks", ok: false,
-            detail: convert.toString($count) + " problem(s):" + $problems };
+        return Finding{
+            check: "docblocks",
+            ok: false,
+            detail: convert.toString($count) + " problem(s):" + $problems
+        };
     }
-    return Finding{ check: "docblocks", ok: true, detail: "no doc drift" };
+    return Finding{check: "docblocks", ok: true, detail: "no doc drift"};
 }
 
 /**
  * Run every test overlay found under a directory, without requiring one per
- * module.
+ * module. An overlay another file includes runs through its includer only.
  *
  * This is the **install-time** check, and it is deliberately weaker than the
  * publish gate: a consumer is asking "does this deck pass on *my* interpreter",
  * not "is this deck well covered". Coverage is the publisher's responsibility
- * and is enforced at publish (`verify`).
+ * and is enforced at publish (`verify`), which is also why an overlay defining
+ * no test function passes here (`--allow-empty`) and fails there.
+ *
+ * **This runs the deck's code with the user's privileges.** The overlays are
+ * third-party code on the consumer's machine, often in a CI job that holds
+ * publishing credentials. `runIsolated` keeps those credentials out of the
+ * overlays' environment and home directory, and that is all it does: it is not
+ * a sandbox, and an overlay can still read, write, or reach whatever the user
+ * running jvc can.
  * @param dir {string} the directory to search for overlays
  * @return {Finding} the outcome, named "tests"
  */
 export func runOverlays(dir as string) {
+    def included as map of string to bool init includedFiles($dir);
     def overlays as list of string init [];
     for (def st in fs.walk($dir)) {
-        if (not $st.isDir and isOverlay($st.path)) {
+        if (not $st.isDir and isOverlay($st.path) and not isPartial($st.path, $included)) {
             $overlays[] = $st.path;
         }
     }
     if (len($overlays) == 0) {
-        return Finding{ check: "tests", ok: true, detail: "the deck ships no tests" };
+        return Finding{check: "tests", ok: true, detail: "the deck ships no tests"};
     }
     for (def overlay in $overlays) {
-        def r as os.Result init os.run([interpreter(), "test", $overlay]);
+        def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
+        try {
+            $r = runIsolated([interpreter(), "test", "--allow-empty", $overlay]);
+        } catch (err) {
+            return Finding{check: "tests", ok: false, detail: cannotRun($err.message)};
+        }
+        def broken as string init runFailure($r);
+        if (not ($broken == "")) {
+            return Finding{check: "tests", ok: false, detail: $broken};
+        }
         if (not ($r.exitCode == 0)) {
-            return Finding{ check: "tests", ok: false,
+            return Finding{
+                check: "tests",
+                ok: false,
                 detail: rel($dir, $overlay) + " failed:\n" +
-                    strings.trim($r.stdout + $r.stderr) };
+                    strings.trim($r.stdout + $r.stderr)
+            };
         }
     }
-    return Finding{ check: "tests", ok: true,
-        detail: convert.toString(len($overlays)) + " overlay(s) passed" };
+    return Finding{
+        check: "tests",
+        ok: true,
+        detail: convert.toString(len($overlays)) + " overlay(s) passed"
+    };
 }
 
 /**
  * Run the whole gate over a deck directory. Every check runs even when an
- * earlier one fails, so an author sees everything to fix in one pass rather than
- * discovering the next problem only after fixing the last.
+ * earlier one fails, so an author sees every problem in one pass.
  * @param dir {string} the deck's root directory
  * @return {Report} the verdict and each check's finding
  */
 export func verify(dir as string) {
-    def findings as list of Finding init [
-        lintCheck($dir),
-        overlayCheck($dir),
-        docblockCheck($dir)
-    ];
+    def findings as list of Finding init [lintCheck($dir), overlayCheck($dir), docblockCheck($dir)];
     def ok as bool init true;
     for (def f in $findings) {
         if (not $f.ok) {
             $ok = false;
         }
     }
-    return Report{ ok: $ok, findings: $findings };
+    return Report{ok: $ok, findings: $findings};
 }
 
 /**

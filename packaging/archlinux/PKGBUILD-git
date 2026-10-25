@@ -1,16 +1,13 @@
 # Maintainer: mplx <jennifer@mplx.dev>
 
-# jvc is pure Jennifer source: no compilation, nothing architecture specific.
-# The package is therefore a straight file copy of the two directories the
-# launcher needs, plus the shell completion and the documentation.
+# jvc is architecture-independent Jennifer source, so the package copies the
+# two directories the launcher needs, plus the completions and the docs.
 #
-# The interpreter is not in the official repositories; `jennifer-git` provides
-# `jennifer`, so that is what is depended on. Note that the sources declare
-# `# pragma-jennifer-version: >=0.25.0` while `jennifer-git` carries no version
-# in its `provides`, so the floor cannot be expressed here as
-# `jennifer>=0.25.0` - it would be unsatisfiable rather than merely unmet. A
-# `-dev` interpreter bypasses a version floor anyway, which is how jvc runs on
-# today's 0.24.0-dev builds; the floor bites only under a tagged release.
+# `jennifer-bin` and `jennifer-git` both provide an unversioned `jennifer`, so
+# the sources' floor (`# pragma-jennifer-version: >=0.25.0`) cannot be written
+# here as `jennifer>=0.25.0`: it would be unsatisfiable. The interpreter checks
+# the pragma at load time instead; a `-dev` build bypasses it, a release such
+# as 0.25.0 is checked.
 
 _pkgname=jvc
 pkgname=jvc-git
@@ -20,8 +17,13 @@ pkgdesc="The Jennifer deck manager: dependency resolution, vendoring, and publis
 arch=('any')
 url="https://github.com/jennifer-language/jvc"
 license=('LGPL-3.0-only')
-depends=('jennifer' 'git')
+depends=('jennifer')
+# git fetches the source, and check() needs it too: several overlays run the
+# real binary. At run time it is optional, as in PKGBUILD and the .deb.
 makedepends=('git')
+optdepends=(
+	'git: [sources] decks, registry decks of kind git, `jvc app install`, and publishing'
+)
 provides=("${_pkgname}=${pkgver%%.r*}")
 conflicts=("${_pkgname}")
 source=("${_pkgname}::git+https://github.com/jennifer-language/jvc.git")
@@ -30,8 +32,8 @@ sha256sums=('SKIP')
 pkgver() {
 	cd "${srcdir}/${_pkgname}"
 
-	# There are no release tags yet, so the manifest is the version of record
-	# and the revision count keeps successive builds ordered.
+	# The manifest's version plus the revision count keeps builds ordered.
+	# TODO: once release tags exist, derive this from `git describe` instead.
 	local ver
 	ver="$(sed -n 's/^version = "\(.*\)"/\1/p' deck.toml | head -n1)"
 	printf '%s.r%s.g%s' "${ver:-0}" "$(git rev-list --count HEAD)" \
@@ -41,13 +43,12 @@ pkgver() {
 check() {
 	cd "${srcdir}/${_pkgname}"
 
-	# Every module carries a co-located white-box overlay. `jennifer test`
-	# splices the module in first, so the module itself is exercised here,
-	# not just the overlay.
+	# Every module has a white-box overlay, which `jennifer test` runs with
+	# the module spliced in. Globbed, as in CI, so a new module cannot skip
+	# its tests.
 	local t
-	for t in manifest deckname catalog resolver constraint git gitsource \
-		scaffold pragma app verify publish registry scopemap ciauth cli; do
-		jennifer test "src/${t}_test.j"
+	for t in src/*_test.j; do
+		jennifer test "${t}"
 	done
 
 	jennifer lint src/*.j bin/jvc
@@ -56,25 +57,21 @@ check() {
 package() {
 	cd "${srcdir}/${_pkgname}"
 
-	# The launcher resolves `import "../src/cli.j"` relative to its own file,
-	# so `bin/` and `src/` must stay siblings. `/usr/share` is right for an
-	# architecture-independent tree, and it matches the layout jvc itself uses
-	# when it installs an app into a prefix (`<prefix>/share/jvc/apps/<name>`).
+	# The launcher imports "../src/cli.j" relative to its own file, so `bin/`
+	# and `src/` stay siblings, under `/usr/share` as an
+	# architecture-independent tree.
 	install -Dm755 bin/jvc "${pkgdir}/usr/share/jvc/bin/jvc"
 	install -Dm644 deck.toml "${pkgdir}/usr/share/jvc/deck.toml"
 
-	# The test overlays are a development artefact: nothing at runtime imports
-	# them, and `jvc verify` runs the interpreter against the *consuming*
-	# project's overlays, not against these.
+	# The test overlays are not shipped: nothing imports them at runtime.
 	local f
 	for f in src/*.j; do
 		[[ ${f} == *_test.j ]] && continue
 		install -Dm644 "${f}" "${pkgdir}/usr/share/jvc/${f}"
 	done
 
-	# A symlink rather than a wrapper, which is also how `jvc app install`
-	# puts a command on PATH: `ls -l` then shows where jvc really lives, and
-	# the interpreter resolves the relative import through the link.
+	# A symlink, as `jvc app install` writes: the interpreter resolves the
+	# relative import through it.
 	install -dm755 "${pkgdir}/usr/bin"
 	ln -s /usr/share/jvc/bin/jvc "${pkgdir}/usr/bin/jvc"
 

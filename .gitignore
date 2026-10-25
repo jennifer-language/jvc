@@ -24,3 +24,6 @@ camcorder.lock
 
 # Grimoire book output.
 /public/
+
+# Local work notes.
+/TODO.txt

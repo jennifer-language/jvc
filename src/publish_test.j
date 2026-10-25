@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
 # pragma-jennifer-version: >=0.25.0
 #
-# White-box tests for publish.j: packaging (src/ + manifest only), metadata
-# derivation, the prepare (no --db) path, and direct registration into a
-# registry document (--db). Run with:
+# White-box tests for publish.j: packaging (what goes into the tarball),
+# manifest validation, capability and jennifer-tiny checks, the operator
+# command, check and pack. Run with:
 #
-#     jennifer test cli/publish_test.j
+#     jennifer test src/publish_test.j
 
 use testing;
 use os;
@@ -32,7 +32,8 @@ func makeDeck(tag as string, name as string, withDep as bool) {
         $m = manifest.addDependency($m, "@jennifer/net", "^1.0.0");
     }
     manifest.save($m, $dir + "/deck.toml");
-    fs.writeString($dir + "/src/" + deckname.deckOf($name) + ".j",
+    fs.writeString(
+        $dir + "/src/" + deckname.deckOf($name) + ".j",
         "export def const X as int init 1;");
     fs.writeString($dir + "/README.md", "readme");
     fs.writeString($dir + "/vendor/junk.j", "junk");
@@ -59,6 +60,52 @@ func testPackDeckIncludesSrcAndManifestOnly() {
     fs.removeAll($dir);
 }
 
+# modeOf returns the mode an archive gives a member, or -1 when it is absent.
+func modeOf(data as bytes, name as string) {
+    for (def e in archive.unpack($data, "tar.gz")) {
+        if ($e.name == $name) {
+            return $e.mode & 0o777;
+        }
+    }
+    return -1;
+}
+
+# Every member used to be 0o644, so a deck's [package] bin was never executable
+# once installed.
+func testPackDeckKeepsTheExecutableBit() {
+    def dir as string init makeDeck("exec", "@jennifer/routeros", false);
+    fs.mkdirAll($dir + "/src/bin");
+    fs.writeString($dir + "/src/bin/tool", "#!/usr/bin/env -S jennifer run\n");
+    fs.chmod($dir + "/src/bin/tool", 0o750);
+    fs.chmod($dir + "/src/routeros.j", 0o600);
+    def data as bytes init packDeck($dir);
+    testing.assertEqual(modeOf($data, "src/bin/tool"), 0o755);
+    testing.assertEqual(modeOf($data, "src/routeros.j"), 0o644);
+    testing.assertEqual(modeOf($data, "deck.toml"), 0o644);
+    # Still reproducible: the same tree packs to the same bytes.
+    testing.assertEqual(hexSha256(packDeck($dir)), hexSha256($data));
+    fs.removeAll($dir);
+}
+
+# The overlays ship, because `jvc install --runtests` runs them.
+func testPackDeckKeepsTheTestOverlays() {
+    def dir as string init makeDeck("overlay", "@jennifer/routeros", false);
+    fs.writeString($dir + "/src/routeros_test.j", "use testing;\n");
+    testing.assertTrue(hasEntry(packDeck($dir), "src/routeros_test.j"));
+    fs.removeAll($dir);
+}
+
+# A trailing slash used to leave every name with its directory on, so nothing
+# matched and the archive came out empty.
+func testPackDeckAcceptsATrailingSlash() {
+    def dir as string init makeDeck("slash", "@jennifer/routeros", false);
+    def data as bytes init packDeck($dir + "/");
+    testing.assertTrue(hasEntry($data, "deck.toml"));
+    testing.assertTrue(hasEntry($data, "src/routeros.j"));
+    testing.assertFalse(hasEntry($data, "README.md"));
+    fs.removeAll($dir);
+}
+
 func testRequiresSpecOf() {
     def m as manifest.Manifest init manifest.empty("app", "0.1.0");
     testing.assertEqual(requiresSpecOf($m), "");
@@ -74,12 +121,12 @@ func capDeck(label as string, manifestCaps as string, pragmaLine as string) {
     def dir as string init os.tempDir() + "/jvc_pub_" + $label;
     fs.removeAll($dir);
     fs.mkdirAll($dir + "/src");
-    fs.writeString($dir + "/deck.toml",
+    fs.writeString(
+        $dir + "/deck.toml",
         "[package]\nname = \"@acme/tool\"\nversion = \"1.0.0\"\n" +
-        $manifestCaps +
-        "\n[package.urls]\ndeck = \"https://x/tool\"\n");
-    fs.writeString($dir + "/src/tool.j",
-        $pragmaLine + 'export func f() { return 1; }' + "\n");
+            $manifestCaps +
+            "\n[package.urls]\ndeck = \"https://x/tool\"\n");
+    fs.writeString($dir + "/src/tool.j", $pragmaLine + 'export func f() { return 1; }' + "\n");
     return $dir;
 }
 
@@ -108,10 +155,25 @@ func testPublishRefusesAnUndeclaredCapability() {
 }
 
 func testPublishAcceptsADeclaredCapability() {
-    def dir as string init capDeck("declared", 'capabilities = ["net"]' + "\n",
+    def dir as string init capDeck(
+        "declared",
+        'capabilities = ["net"]' + "\n",
         "# pragma-jennifer-capability: net\n");
     def r as Result init check($dir, false);
     testing.assertTrue($r.ok);
+    fs.removeAll($dir);
+}
+
+# The interpreter reads `net # why` as three names and refuses "#", so a pragma
+# line with a trailing comment is a broken file, not a commented one.
+func testPublishRefusesAnUnknownCapabilityInTheSource() {
+    def dir as string init capDeck(
+        "srcunknown",
+        'capabilities = ["net"]' + "\n",
+        "# pragma-jennifer-capability: net # needs the network\n");
+    def r as Result init check($dir, false);
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.message, "\"#\", which is not a Jennifer capability");
     fs.removeAll($dir);
 }
 
@@ -136,24 +198,97 @@ func testPublishCommandFormat() {
     # the end, so the printed command failed with `unexpected extra argument`.
     # This assertion pinned that mistake for as long as it existed, which is why
     # it now checks the description sits where deckadmin expects it.
-    def cmd as string init publishCommand("@jennifer/routeros", "0.1.0",
-        "https://x/r.tgz", "sha256:ab", "RouterOS", "@jennifer/net ^1.0.0",
-        "jennifer ^0.21.0", "net");
-    testing.assertContains($cmd,
-        "deckadmin add @jennifer/routeros 0.1.0 https://x/r.tgz \"RouterOS\"");
-    testing.assertContains($cmd, "--checksum sha256:ab");
-    testing.assertContains($cmd, "--requires \"@jennifer/net ^1.0.0\"");
-    testing.assertContains($cmd, "--engines \"jennifer ^0.21.0\"");
-    testing.assertContains($cmd, "--capabilities \"net\"");
+    def cmd as string init publishCommand(
+        "@jennifer/routeros",
+        "0.1.0",
+        "https://x/r.tgz",
+        "sha256:ab",
+        "RouterOS",
+        "@jennifer/net ^1.0.0",
+        "jennifer ^0.21.0",
+        "net");
+    testing.assertContains(
+        $cmd,
+        "deckadmin add '@jennifer/routeros' '0.1.0' 'https://x/r.tgz' 'RouterOS'");
+    testing.assertContains($cmd, "--checksum 'sha256:ab'");
+    testing.assertContains($cmd, "--requires '@jennifer/net ^1.0.0'");
+    testing.assertContains($cmd, "--engines 'jennifer ^0.21.0'");
+    testing.assertContains($cmd, "--capabilities 'net'");
+}
+
+func testShellQuote() {
+    testing.assertEqual(shellQuote("plain"), "'plain'");
+    testing.assertEqual(shellQuote(""), "''");
+    testing.assertEqual(shellQuote("it's"), "'it'\\''s'");
+}
+
+# argvOf runs an operator command through a real POSIX shell with `deckadmin`
+# replaced by a function printing each argument on its own line, so what is
+# compared is exactly the argv deckadmin would have received.
+func argvOf(cmd as string) {
+    def script as string init "deckadmin() \{ printf '%s\\n' \"$@\"; \}; " + $cmd;
+    def r as os.Result init os.run(["sh", "-c", $script]);
+    testing.assertEqual($r.exitCode, 0);
+    # Every argument ends in a newline, so the split ends in one empty item.
+    return strings.split($r.stdout, "\n");
+}
+
+# The description and URL are the author's free text, and the command is
+# pasted by an operator. Pasted inside double quotes, `$(touch X)` ran on the
+# operator's machine; every argument must reach deckadmin literally instead.
+func testPublishCommandSurvivesAHostileDescription() {
+    def marker as string init os.tempDir() + "/jvc_pub_injected";
+    rm($marker);
+    def hostile as string init "a $(touch " + $marker + ") `touch " + $marker +
+        "` \"quoted\" it's \\ $HOME";
+    def url as string init "https://x/d.tgz;touch " + $marker;
+    def cmd as string init publishCommand(
+        "@acme/d",
+        "1.0.0",
+        $url,
+        "sha256:ff",
+        $hostile,
+        "@acme/e ^1.0.0, @acme/f >=2.0.0 <3.0.0",
+        "jennifer >=0.24.0",
+        "net, exec");
+    def got as list of string init argvOf($cmd);
+    def want as list of string init [
+        "add",
+        "@acme/d",
+        "1.0.0",
+        $url,
+        $hostile,
+        "--checksum",
+        "sha256:ff",
+        "--requires",
+        "@acme/e ^1.0.0, @acme/f >=2.0.0 <3.0.0",
+        "--engines",
+        "jennifer >=0.24.0",
+        "--capabilities",
+        "net, exec",
+        ""
+    ];
+    testing.assertEqual(len($got), len($want));
+    for (def i in lists.range(0, len($want))) {
+        testing.assertEqual($got[$i], $want[$i]);
+    }
+    testing.assertFalse(fs.exists($marker));
 }
 
 func testTheChecksumIsNeverAPositional() {
     # The failure mode was silent in the output and loud only when the command
     # was run, so it is worth asserting directly.
-    def cmd as string init publishCommand("@acme/d", "1.0.0", "https://x/d.tgz",
-        "sha256:ff", "a deck", "", "", "");
+    def cmd as string init publishCommand(
+        "@acme/d",
+        "1.0.0",
+        "https://x/d.tgz",
+        "sha256:ff",
+        "a deck",
+        "",
+        "",
+        "");
     testing.assertFalse(strings.contains($cmd, "d.tgz sha256:ff"));
-    testing.assertContains($cmd, "--checksum sha256:ff");
+    testing.assertContains($cmd, "--checksum 'sha256:ff'");
 }
 
 func testPublishPrepareWritesTarballAndCommand() {
@@ -161,21 +296,18 @@ func testPublishPrepareWritesTarballAndCommand() {
     def out as string init $dir + "/dist";
     def gate as Result init check($dir, false);
     testing.assertTrue($gate.ok);
-    def r as Result init pack($dir, "https://x/routeros-0.1.0.tar.gz", $out, "0",
-        $gate.message);
+    def r as Result init pack($dir, "https://x/routeros-0.1.0.tar.gz", $out, $gate.message);
     testing.assertTrue($r.ok);
     testing.assertTrue(fs.exists($out + "/routeros-0.1.0.tar.gz"));
     testing.assertTrue(fs.exists($out + "/publish.json"));
     # The operator command is returned separately rather than appended, because
     # whether it is the right instruction depends on the repository, which this
     # module cannot see. The caller decides whether to print it.
-    testing.assertContains($r.operatorCommand, "deckadmin add @jennifer/routeros 0.1.0");
-    testing.assertContains($r.operatorCommand, "--requires \"@jennifer/net ^1.0.0\"");
+    testing.assertContains($r.operatorCommand, "deckadmin add '@jennifer/routeros' '0.1.0'");
+    testing.assertContains($r.operatorCommand, "--requires '@jennifer/net ^1.0.0'");
     testing.assertFalse(strings.contains($r.message, "deckadmin"));
     fs.removeAll($dir);
 }
-
-
 
 # a bare (unscoped) deck name is not a registry deck -> publish refuses
 func testPublishRejectsBareName() {
@@ -186,10 +318,51 @@ func testPublishRejectsBareName() {
     fs.removeAll($dir);
 }
 
+# a release's requires must be resolvable by its consumers, so publish checks
+# the dependency tables as install does
+func testPublishRefusesAConstraintOutsideTheGrammar() {
+    def dir as string init makeDeck("badcons", "@jennifer/routeros", false);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    $m = manifest.addDependency($m, "@jennifer/net", "^abc");
+    manifest.save($m, $dir + "/deck.toml");
+    def r as Result init check($dir, false);
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.message, "not a valid constraint");
+    fs.removeAll($dir);
+}
+
+func testPublishRefusesABareConflictAndABadEngineConstraint() {
+    def dir as string init makeDeck("badconf", "@jennifer/routeros", false);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    $m = manifest.addConflict($m, "ansi", "*");
+    manifest.save($m, $dir + "/deck.toml");
+    def r as Result init check($dir, false);
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.message, "[conflicts] ansi");
+    $m = manifest.removeConflict($m, "ansi");
+    $m = manifest.addEngine($m, "jennifer", ">=zero");
+    manifest.save($m, $dir + "/deck.toml");
+    def e as Result init check($dir, false);
+    testing.assertFalse($e.ok);
+    testing.assertContains($e.message, "[engines]");
+    fs.removeAll($dir);
+}
+
+# a numeric part over 18 digits is valid SemVer but cannot be ordered
+func testPublishRefusesAnUnusableVersion() {
+    def dir as string init makeDeck("bigver", "@jennifer/routeros", false);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    $m.pkg.version = "1234567890123456789.0.0";
+    manifest.save($m, $dir + "/deck.toml");
+    def r as Result init check($dir, false);
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.message, "18 digits");
+    fs.removeAll($dir);
+}
 
 func testPublishRejectsMissingEntrypoint() {
     def dir as string init makeDeck("noentry", "@jennifer/routeros", false);
-    fs.remove($dir + "/src/routeros.j");   # remove the entrypoint
+    fs.remove($dir + "/src/routeros.j"); # remove the entrypoint
     def r as Result init check($dir, false);
     testing.assertFalse($r.ok);
     testing.assertContains($r.message, "entrypoint");
@@ -223,6 +396,23 @@ func testUsesOfIgnoresADocblockMention() {
     testing.assertEqual($found[0], "os");
 }
 
+# An alias or a trailing comment used to hide the library from the check, so
+# `use gpio as g;` passed a jennifer-tiny claim.
+func testUsesOfSeesThroughAnAliasAndAComment() {
+    def src as string init "use term as t;\nuse gpio; # pins\nuse serial;# port\n" +
+        "use  spi   as  bus ;\n";
+    def found as list of string init usesOf($src);
+    testing.assertEqual(len($found), 4);
+    testing.assertEqual($found[0], "term");
+    testing.assertEqual($found[1], "gpio");
+    testing.assertEqual($found[2], "serial");
+    testing.assertEqual($found[3], "spi");
+}
+
+func testACommentedOutUseIsNotADeclaration() {
+    testing.assertEqual(len(usesOf("# use gpio;\n")), 0);
+}
+
 func testUsesOfIgnoresWhatIsNotADeclaration() {
     testing.assertEqual(len(usesOf("used = 1;\nusefully();\nuse os\n")), 0);
 }
@@ -240,7 +430,8 @@ func tinyDeck(tag as string, lib as string, claimsTiny as bool) {
         $m = manifest.addEngine($m, "jennifer-tiny", ">=0.5.0");
     }
     manifest.save($m, $dir + "/deck.toml");
-    fs.writeString($dir + "/src/blinker.j",
+    fs.writeString(
+        $dir + "/src/blinker.j",
         "use " + $lib + ";\nexport def const X as int init 1;\n");
     return $dir;
 }

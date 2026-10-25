@@ -3,28 +3,25 @@
 # pragma-jennifer-version: >=0.25.0
 
 /**
- * The deck manifest: the file that declares a deck's identity, its own
- * dependencies, and what it offers - the jvc equivalent of a Python
- * requirements file or a composer.json. A manifest has these parts: generic
- * package metadata and version (the `[package]` table), the Jennifer engines
- * that can run it (the `[engines]` table), the runtime requirements (the
- * `[decks]` table), the development-only requirements (the `[dev-decks]`
- * table), the decks it conflicts with (the `[conflicts]` table), and where
- * individual decks come from when not from the repository (the `[sources]`
- * table, deck name -> git URL).
- * Two on-disk encodings
- * are supported, chosen by file extension - `deck.toml` (TOML, Jennifer's
- * native config format) and `deck.json` - both decoded to and encoded from
- * the same `Manifest` value. A dependency or conflict binds a deck name to a
- * version constraint (see the `constraint` module for the grammar). The
- * resolved, installed set is pinned in a separate `camcorder.lock` (written by
- * the CLI).
- * Pure Jennifer over `toml` / `json` / `fs`.
+ * The deck manifest: the file that declares a deck's identity and its
+ * dependencies. Its parts: package metadata and version (`[package]`), the
+ * Jennifer engines that can run it (`[engines]`), the runtime requirements
+ * (`[decks]`), the development-only requirements (`[dev-decks]`), the decks it
+ * conflicts with (`[conflicts]`), git URLs for decks not taken from a registry
+ * (`[sources]`), and the registry each scope resolves at (`[registries]`).
+ *
+ * Three encodings are supported, chosen by file extension: `deck.toml` (TOML,
+ * Jennifer's native config format), `deck.yaml` / `deck.yml`, and `deck.json`,
+ * all decoded to and encoded from the same `Manifest` value. A dependency or
+ * conflict binds a deck name to a version constraint (see the `constraint`
+ * module for the grammar). The resolved, installed set is pinned in a
+ * separate `camcorder.lock` (written by the CLI).
+ * Pure Jennifer over `toml` / `yaml` / `json` / `fs`.
  * @module manifest
  * @example
  * import "./manifest.j" as manifest;
  * def m as manifest.Manifest init manifest.load("deck.toml");
- * def m2 as manifest.Manifest init manifest.addDependency($m, "ansi", "^1.2.0");
+ * def m2 as manifest.Manifest init manifest.addDependency($m, "@acme/ansi", "^1.2.0");
  * manifest.save($m2, "deck.toml");
  */
 
@@ -35,17 +32,18 @@ use fs;
 use strings;
 use convert;
 use maps;
+import "./deckname.j" as deckname;
 
-# The supported manifest filenames, in detection priority order (toml -> yaml ->
-# json). `.yaml` and `.yml` are the same YAML encoding.
+# The supported manifest filenames. `.yaml` and `.yml` are the same YAML
+# encoding.
 def const MANIFEST_TOML as string init "deck.toml";
 def const MANIFEST_YAML as string init "deck.yaml";
 def const MANIFEST_YML as string init "deck.yml";
 def const MANIFEST_JSON as string init "deck.json";
 
 /**
- * Generic package metadata plus the deck's own version - the `[package]` table.
- * @field name {string} the deck's name (a Jennifer module name)
+ * Package metadata plus the deck's own version: the `[package]` table.
+ * @field name {string} the deck's name (`@scope/deck`; a bare name for an app)
  * @field version {string} the deck's own version
  * @field description {string} a one-line summary ("" when absent)
  * @field license {string} an SPDX license id ("" when absent)
@@ -83,9 +81,8 @@ export def struct Dependency {
 };
 
 /**
- * A decoded deck manifest: the package metadata, the runtime and
- * development requirements, and the conflicting decks. Each list follows its
- * source document's order.
+ * A decoded deck manifest, one field per table. Each list keeps its document's
+ * order.
  * @field pkg {Package} the package metadata and version
  * @field engines {list of Dependency} the Jennifer engine version ranges that can run this deck
  * @field decks {list of Dependency} the runtime requirements
@@ -140,17 +137,125 @@ export func empty(name as string, version as string) {
 
 # raise throws a manifest-kind Error with a message.
 func raise(message as string) {
-    throw Error{ kind: "manifest", message: $message, file: "", line: 0, col: 0 };
+    throw Error{kind: "manifest", message: $message, file: "", line: 0, col: 0};
 }
 
 # ptrEscape encodes a name as one JSON Pointer reference token (RFC 6901:
 # "~" -> "~0", "/" -> "~1"), so a scoped dependency key such as
 # "@jennifer/routeros" is addressed as a single key rather than a nested path.
-# toml / json navigation is JSON-Pointer based; the on-disk key stays the real
+# toml / yaml / json navigation is JSON-Pointer based; the on-disk key stays the real
 # "@jennifer/routeros".
 func ptrEscape(token as string) {
     def out as string init strings.replace($token, "~", "~0");
     return strings.replace($out, "/", "~1");
+}
+
+# --- decoding, shared by the three formats -----------------------------------
+
+# typeName describes a decoded node type (as `typeOf` reports it) for an error.
+func typeName(t as string) {
+    if ($t == "map") {
+        return "a table";
+    }
+    if ($t == "list") {
+        return "an array";
+    }
+    if ($t == "int") {
+        return "an integer";
+    }
+    if ($t == "null") {
+        return "nothing (null)";
+    }
+    return "a " + $t;
+}
+
+# expectType raises a manifest error naming the field when a decoded node is not
+# of the type the schema wants, instead of the decoder's bare "node is a float,
+# not a string". A number where a string belongs is nearly always an unquoted
+# version, which TOML and YAML read as a float, so that case says to quote it.
+func expectType(actual as string, wanted as string, where as string) {
+    if ($actual == $wanted) {
+        return;
+    }
+    def hint as string init "";
+    if ($wanted == "string" and ($actual == "float" or $actual == "int")) {
+        $hint = " (quote it: an unquoted 1.10 reads as the number 1.1)";
+    }
+    raise($where + ": expected " + typeName($wanted) + ", found " +
+        typeName($actual) + $hint);
+}
+
+# DECK_TABLES are the tables keyed by deck name, whose keys are folded.
+def const DECK_TABLES as list of string init ["decks", "dev-decks", "conflicts", "sources"];
+
+# FOLDED_TABLES are every table whose keys are folded at parse: the deck tables,
+# plus `[registries]`, whose keys are scope patterns and fold like the names
+# they match. `[engines]` keys keep their spelling, but lookups (`sameName`)
+# compare them case-insensitively like every other key.
+def const FOLDED_TABLES as list of string init [
+    "decks",
+    "dev-decks",
+    "conflicts",
+    "sources",
+    "registries"
+];
+
+# isDeckTable reports whether a table's keys are deck names.
+func isDeckTable(table as string) {
+    for (def t in DECK_TABLES) {
+        if ($t == $table) {
+            return true;
+        }
+    }
+    return false;
+}
+
+# isFoldedTable reports whether a table's keys are folded at parse.
+func isFoldedTable(table as string) {
+    for (def t in FOLDED_TABLES) {
+        if ($t == $table) {
+            return true;
+        }
+    }
+    return false;
+}
+
+# buildDeps turns a table's keys and values, in document order, into a
+# Dependency list. Keys of a deck table, and of `[registries]` (scope patterns,
+# compared folded by `scopemap.registryFor`), are folded, because everything
+# downstream (the resolver, the lockfile, the registry's answers) compares
+# folded names. Two keys that fold to one are an error, not a silent pick.
+func buildDeps(table as string, keys as list of string, values as list of string) {
+    def out as list of Dependency init [];
+    def fold as bool init isFoldedTable($table);
+    def what as string init "deck";
+    def why as string init "deck names are case-insensitive";
+    if (not isDeckTable($table)) {
+        $what = "scope pattern";
+        $why = "scope patterns are case-insensitive";
+    }
+    def firstKey as map of string to string init {};
+    for (def i as int init 0; $i < len($keys); $i = $i + 1) {
+        def name as string init $keys[$i];
+        if ($fold) {
+            $name = deckname.fold($name);
+            if (maps.has($firstKey, $name)) {
+                raise("[" + $table + "] names one " + $what + " twice: \"" +
+                    $firstKey[$name] + "\" and \"" + $keys[$i] + "\" (" + $why + "); keep one");
+            }
+            $firstKey[$name] = $keys[$i];
+        }
+        $out[] = Dependency{name: $name, constraint: $values[$i]};
+    }
+    return $out;
+}
+
+# fieldWhere names a package field for an error, as the author would find it.
+func fieldWhere(pointer as string) {
+    if (strings.startsWith($pointer, "/package/")) {
+        return "[package] " + strings.substring($pointer, len("/package/"), len($pointer));
+    }
+    return strings.substring($pointer, 1, len($pointer));
 }
 
 /**
@@ -178,13 +283,11 @@ export func detectFormat(path as string) {
 # tomlPkgStr reads a package string field, accepting it either under the
 # [package] table or at the top level (a lenient minimal form).
 func tomlPkgStr(doc as toml.Value, field as string) {
-    def pkgPtr as string init "/package/" + $field;
-    if (toml.has($doc, $pkgPtr)) {
-        return toml.asString($doc, $pkgPtr);
-    }
-    def topPtr as string init "/" + $field;
-    if (toml.has($doc, $topPtr)) {
-        return toml.asString($doc, $topPtr);
+    for (def ptr in ["/package/" + $field, "/" + $field]) {
+        if (toml.has($doc, $ptr)) {
+            expectType(toml.typeOf($doc, $ptr), "string", fieldWhere($ptr));
+            return toml.asString($doc, $ptr);
+        }
     }
     return "";
 }
@@ -197,8 +300,11 @@ func tomlStrList(doc as toml.Value, field as string) {
         $ptr = "/" + $field;
     }
     if (toml.has($doc, $ptr)) {
+        expectType(toml.typeOf($doc, $ptr), "list", fieldWhere($ptr));
         for (def i as int init 0; $i < toml.length($doc, $ptr); $i = $i + 1) {
-            $out[] = toml.asString($doc, $ptr + "/" + convert.toString($i));
+            def at as string init $ptr + "/" + convert.toString($i);
+            expectType(toml.typeOf($doc, $at), "string", fieldWhere($ptr) + " entry");
+            $out[] = toml.asString($doc, $at);
         }
     }
     return $out;
@@ -213,28 +319,45 @@ func tomlUrls(doc as toml.Value) {
         $ptr = "/urls";
     }
     if (toml.has($doc, $ptr)) {
+        expectType(toml.typeOf($doc, $ptr), "map", fieldWhere($ptr));
         for (def key in toml.keys($doc, $ptr)) {
-            $out[$key] = toml.asString($doc, $ptr + "/" + $key);
+            def at as string init $ptr + "/" + ptrEscape($key);
+            expectType(toml.typeOf($doc, $at), "string", fieldWhere($ptr) + " " + $key);
+            $out[$key] = toml.asString($doc, $at);
         }
     }
     return $out;
 }
 
-# tomlDeps reads a table of name -> string into a Dependency list.
-func tomlDeps(doc as toml.Value, pointer as string) {
-    def out as list of Dependency init [];
+# tomlDeps reads a top-level table of name -> string into a Dependency list.
+func tomlDeps(doc as toml.Value, table as string) {
+    def keys as list of string init [];
+    def values as list of string init [];
+    def pointer as string init "/" + $table;
     if (toml.has($doc, $pointer)) {
+        expectType(toml.typeOf($doc, $pointer), "map", "[" + $table + "]");
         for (def key in toml.keys($doc, $pointer)) {
-            def value as string init toml.asString($doc, $pointer + "/" + ptrEscape($key));
-            $out[] = Dependency{ name: $key, constraint: $value };
+            def at as string init $pointer + "/" + ptrEscape($key);
+            expectType(toml.typeOf($doc, $at), "string", "[" + $table + "] " + $key);
+            $keys[] = $key;
+            $values[] = toml.asString($doc, $at);
         }
     }
-    return $out;
+    return buildDeps($table, $keys, $values);
+}
+
+# decodeToml decodes TOML text, reporting a syntax error as a manifest error.
+func decodeToml(text as string) {
+    try {
+        return toml.decode($text);
+    } catch (e) {
+        raise("not valid TOML: " + $e.message);
+    }
 }
 
 # parseToml decodes a TOML manifest document into a Manifest.
 func parseToml(text as string) {
-    def doc as toml.Value init toml.decode($text);
+    def doc as toml.Value init decodeToml($text);
     def pkg as Package init Package{
         name: tomlPkgStr($doc, "name"),
         version: tomlPkgStr($doc, "version"),
@@ -249,12 +372,12 @@ func parseToml(text as string) {
     };
     return Manifest{
         pkg: $pkg,
-        engines: tomlDeps($doc, "/engines"),
-        decks: tomlDeps($doc, "/decks"),
-        devDecks: tomlDeps($doc, "/dev-decks"),
-        conflicts: tomlDeps($doc, "/conflicts"),
-        sources: tomlDeps($doc, "/sources"),
-        registries: tomlDeps($doc, "/registries")
+        engines: tomlDeps($doc, "engines"),
+        decks: tomlDeps($doc, "decks"),
+        devDecks: tomlDeps($doc, "dev-decks"),
+        conflicts: tomlDeps($doc, "conflicts"),
+        sources: tomlDeps($doc, "sources"),
+        registries: tomlDeps($doc, "registries")
     };
 }
 
@@ -262,13 +385,11 @@ func parseToml(text as string) {
 
 # yamlPkgStr reads a package string field from `package:` or the top level.
 func yamlPkgStr(doc as yaml.Value, field as string) {
-    def pkgPtr as string init "/package/" + $field;
-    if (yaml.has($doc, $pkgPtr)) {
-        return yaml.asString($doc, $pkgPtr);
-    }
-    def topPtr as string init "/" + $field;
-    if (yaml.has($doc, $topPtr)) {
-        return yaml.asString($doc, $topPtr);
+    for (def ptr in ["/package/" + $field, "/" + $field]) {
+        if (yaml.has($doc, $ptr)) {
+            expectType(yaml.typeOf($doc, $ptr), "string", fieldWhere($ptr));
+            return yaml.asString($doc, $ptr);
+        }
     }
     return "";
 }
@@ -281,8 +402,11 @@ func yamlStrList(doc as yaml.Value, field as string) {
         $ptr = "/" + $field;
     }
     if (yaml.has($doc, $ptr)) {
+        expectType(yaml.typeOf($doc, $ptr), "list", fieldWhere($ptr));
         for (def i as int init 0; $i < yaml.length($doc, $ptr); $i = $i + 1) {
-            $out[] = yaml.asString($doc, $ptr + "/" + convert.toString($i));
+            def at as string init $ptr + "/" + convert.toString($i);
+            expectType(yaml.typeOf($doc, $at), "string", fieldWhere($ptr) + " entry");
+            $out[] = yaml.asString($doc, $at);
         }
     }
     return $out;
@@ -296,28 +420,45 @@ func yamlUrls(doc as yaml.Value) {
         $ptr = "/urls";
     }
     if (yaml.has($doc, $ptr)) {
+        expectType(yaml.typeOf($doc, $ptr), "map", fieldWhere($ptr));
         for (def key in yaml.keys($doc, $ptr)) {
-            $out[$key] = yaml.asString($doc, $ptr + "/" + ptrEscape($key));
+            def at as string init $ptr + "/" + ptrEscape($key);
+            expectType(yaml.typeOf($doc, $at), "string", fieldWhere($ptr) + " " + $key);
+            $out[$key] = yaml.asString($doc, $at);
         }
     }
     return $out;
 }
 
-# yamlDeps reads a mapping of name -> string into a Dependency list.
-func yamlDeps(doc as yaml.Value, pointer as string) {
-    def out as list of Dependency init [];
+# yamlDeps reads a top-level mapping of name -> string into a Dependency list.
+func yamlDeps(doc as yaml.Value, table as string) {
+    def keys as list of string init [];
+    def values as list of string init [];
+    def pointer as string init "/" + $table;
     if (yaml.has($doc, $pointer)) {
+        expectType(yaml.typeOf($doc, $pointer), "map", "[" + $table + "]");
         for (def key in yaml.keys($doc, $pointer)) {
-            def value as string init yaml.asString($doc, $pointer + "/" + ptrEscape($key));
-            $out[] = Dependency{ name: $key, constraint: $value };
+            def at as string init $pointer + "/" + ptrEscape($key);
+            expectType(yaml.typeOf($doc, $at), "string", "[" + $table + "] " + $key);
+            $keys[] = $key;
+            $values[] = yaml.asString($doc, $at);
         }
     }
-    return $out;
+    return buildDeps($table, $keys, $values);
+}
+
+# decodeYaml decodes YAML text, reporting a syntax error as a manifest error.
+func decodeYaml(text as string) {
+    try {
+        return yaml.decode($text);
+    } catch (e) {
+        raise("not valid YAML: " + $e.message);
+    }
 }
 
 # parseYaml decodes a YAML manifest document into a Manifest.
 func parseYaml(text as string) {
-    def doc as yaml.Value init yaml.decode($text);
+    def doc as yaml.Value init decodeYaml($text);
     def pkg as Package init Package{
         name: yamlPkgStr($doc, "name"),
         version: yamlPkgStr($doc, "version"),
@@ -332,12 +473,12 @@ func parseYaml(text as string) {
     };
     return Manifest{
         pkg: $pkg,
-        engines: yamlDeps($doc, "/engines"),
-        decks: yamlDeps($doc, "/decks"),
-        devDecks: yamlDeps($doc, "/dev-decks"),
-        conflicts: yamlDeps($doc, "/conflicts"),
-        sources: yamlDeps($doc, "/sources"),
-        registries: yamlDeps($doc, "/registries")
+        engines: yamlDeps($doc, "engines"),
+        decks: yamlDeps($doc, "decks"),
+        devDecks: yamlDeps($doc, "dev-decks"),
+        conflicts: yamlDeps($doc, "conflicts"),
+        sources: yamlDeps($doc, "sources"),
+        registries: yamlDeps($doc, "registries")
     };
 }
 
@@ -345,13 +486,11 @@ func parseYaml(text as string) {
 
 # jsonPkgStr reads a package string field from "package" or the top level.
 func jsonPkgStr(doc as json.Value, field as string) {
-    def pkgPtr as string init "/package/" + $field;
-    if (json.has($doc, $pkgPtr)) {
-        return json.asString($doc, $pkgPtr);
-    }
-    def topPtr as string init "/" + $field;
-    if (json.has($doc, $topPtr)) {
-        return json.asString($doc, $topPtr);
+    for (def ptr in ["/package/" + $field, "/" + $field]) {
+        if (json.has($doc, $ptr)) {
+            expectType(json.typeOf($doc, $ptr), "string", fieldWhere($ptr));
+            return json.asString($doc, $ptr);
+        }
     }
     return "";
 }
@@ -364,8 +503,11 @@ func jsonStrList(doc as json.Value, field as string) {
         $ptr = "/" + $field;
     }
     if (json.has($doc, $ptr)) {
+        expectType(json.typeOf($doc, $ptr), "list", fieldWhere($ptr));
         for (def i as int init 0; $i < json.length($doc, $ptr); $i = $i + 1) {
-            $out[] = json.asString($doc, $ptr + "/" + convert.toString($i));
+            def at as string init $ptr + "/" + convert.toString($i);
+            expectType(json.typeOf($doc, $at), "string", fieldWhere($ptr) + " entry");
+            $out[] = json.asString($doc, $at);
         }
     }
     return $out;
@@ -380,28 +522,45 @@ func jsonUrls(doc as json.Value) {
         $ptr = "/urls";
     }
     if (json.has($doc, $ptr)) {
+        expectType(json.typeOf($doc, $ptr), "map", fieldWhere($ptr));
         for (def key in json.keys($doc, $ptr)) {
-            $out[$key] = json.asString($doc, $ptr + "/" + $key);
+            def at as string init $ptr + "/" + ptrEscape($key);
+            expectType(json.typeOf($doc, $at), "string", fieldWhere($ptr) + " " + $key);
+            $out[$key] = json.asString($doc, $at);
         }
     }
     return $out;
 }
 
-# jsonDeps reads an object of name -> string into a Dependency list.
-func jsonDeps(doc as json.Value, pointer as string) {
-    def out as list of Dependency init [];
+# jsonDeps reads a top-level object of name -> string into a Dependency list.
+func jsonDeps(doc as json.Value, table as string) {
+    def keys as list of string init [];
+    def values as list of string init [];
+    def pointer as string init "/" + $table;
     if (json.has($doc, $pointer)) {
+        expectType(json.typeOf($doc, $pointer), "map", "[" + $table + "]");
         for (def key in json.keys($doc, $pointer)) {
-            def value as string init json.asString($doc, $pointer + "/" + ptrEscape($key));
-            $out[] = Dependency{ name: $key, constraint: $value };
+            def at as string init $pointer + "/" + ptrEscape($key);
+            expectType(json.typeOf($doc, $at), "string", "[" + $table + "] " + $key);
+            $keys[] = $key;
+            $values[] = json.asString($doc, $at);
         }
     }
-    return $out;
+    return buildDeps($table, $keys, $values);
+}
+
+# decodeJson decodes JSON text, reporting a syntax error as a manifest error.
+func decodeJson(text as string) {
+    try {
+        return json.decode($text);
+    } catch (e) {
+        raise("not valid JSON: " + $e.message);
+    }
 }
 
 # parseJson decodes a JSON manifest document into a Manifest.
 func parseJson(text as string) {
-    def doc as json.Value init json.decode($text);
+    def doc as json.Value init decodeJson($text);
     def pkg as Package init Package{
         name: jsonPkgStr($doc, "name"),
         version: jsonPkgStr($doc, "version"),
@@ -416,22 +575,31 @@ func parseJson(text as string) {
     };
     return Manifest{
         pkg: $pkg,
-        engines: jsonDeps($doc, "/engines"),
-        decks: jsonDeps($doc, "/decks"),
-        devDecks: jsonDeps($doc, "/dev-decks"),
-        conflicts: jsonDeps($doc, "/conflicts"),
-        sources: jsonDeps($doc, "/sources"),
-        registries: jsonDeps($doc, "/registries")
+        engines: jsonDeps($doc, "engines"),
+        decks: jsonDeps($doc, "decks"),
+        devDecks: jsonDeps($doc, "dev-decks"),
+        conflicts: jsonDeps($doc, "conflicts"),
+        sources: jsonDeps($doc, "sources"),
+        registries: jsonDeps($doc, "registries")
     };
 }
 
 /**
  * Decode manifest text in the named format ("toml", "yaml", or "json") into a
  * Manifest.
+ *
+ * Every failure is a kind "manifest" error naming what is wrong and where: a
+ * syntax error, a field of the wrong type (an unquoted `version = 1.0`, a
+ * string where `authors` wants an array, an inline table where a constraint
+ * belongs), or two keys in one deck table that name the same deck once folded
+ * (or two `[registries]` keys naming the same scope pattern).
+ * The keys of `[decks]`, `[dev-decks]`, `[conflicts]`, `[sources]` and
+ * `[registries]` come back folded (`deckname.fold`), since a deck name, and so
+ * a scope pattern, is case-insensitive. `[engines]` keys are kept as written.
  * @param text {string} the manifest source text
  * @param format {string} the encoding, "toml", "yaml", or "json"
  * @return {Manifest} the decoded manifest
- * @throws {Error} kind "manifest" for an unknown format, or a decode error
+ * @throws {Error} kind "manifest" for any of those, or an unknown format
  */
 export func parse(text as string, format as string) {
     if ($format == "toml") {
@@ -470,7 +638,7 @@ func tomlSetDeps(doc as toml.Value, pointer as string, deps as list of Dependenc
 func tomlSetUrls(doc as toml.Value, pointer as string, urls as map of string to string) {
     def out as toml.Value init toml.set($doc, $pointer, toml.map());
     for (def key in $urls) {
-        $out = toml.set($out, $pointer + "/" + $key, $urls[$key]);
+        $out = toml.set($out, $pointer + "/" + ptrEscape($key), $urls[$key]);
     }
     return $out;
 }
@@ -574,7 +742,7 @@ func jsonSetDeps(doc as json.Value, pointer as string, deps as list of Dependenc
 func jsonSetUrls(doc as json.Value, pointer as string, urls as map of string to string) {
     def out as json.Value init json.set($doc, $pointer, json.map());
     for (def key in $urls) {
-        $out = json.set($out, $pointer + "/" + $key, $urls[$key]);
+        $out = json.set($out, $pointer + "/" + ptrEscape($key), $urls[$key]);
     }
     return $out;
 }
@@ -603,8 +771,8 @@ func encodeJson(m as Manifest) {
 }
 
 /**
- * Render a Manifest to text in the named format ("toml" or "json"). Both forms
- * are pretty-printed for a human-editable file.
+ * Render a Manifest to text in the named format ("toml", "yaml", or "json").
+ * Every form is pretty-printed for a human-editable file.
  * @param m {Manifest} the manifest to encode
  * @param format {string} the encoding, "toml", "yaml", or "json"
  * @return {string} the encoded manifest text
@@ -626,9 +794,10 @@ export func encode(m as Manifest, format as string) {
 /**
  * Load and decode a manifest from disk, picking the encoding from the path's
  * extension.
- * @param path {string} the manifest path (ending in .toml or .json)
+ * @param path {string} the manifest path (ending in .toml, .yaml, .yml, or .json)
  * @return {Manifest} the decoded manifest
- * @throws {Error} kind "manifest" when the format is unsupported, or on a read / decode error
+ * @throws {Error} kind "manifest" for an unsupported format or bad content; the
+ *     `fs` error when the file cannot be read
  */
 export func load(path as string) {
     return parse(fs.readString($path), detectFormat($path));
@@ -638,27 +807,28 @@ export func load(path as string) {
  * Encode a manifest and write it to disk, picking the encoding from the path's
  * extension.
  * @param m {Manifest} the manifest to write
- * @param path {string} the destination path (ending in .toml or .json)
- * @throws {Error} kind "manifest" when the format is unsupported, or on a write error
+ * @param path {string} the destination path (ending in .toml, .yaml, .yml, or .json)
+ * @throws {Error} kind "manifest" for an unsupported format; the `fs` error when
+ *     the file cannot be written
  */
 export func save(m as Manifest, path as string) {
     fs.writeString($path, encode($m, detectFormat($path)));
 }
 
-# manifestNames lists the candidate manifest filenames in detection priority
-# order: deck.toml, then deck.yaml / deck.yml, then deck.json.
-func manifestNames() {
-    def names as list of string init [
-        MANIFEST_TOML, MANIFEST_YAML, MANIFEST_YML, MANIFEST_JSON
-    ];
+/**
+ * The manifest filenames a deck directory may hold, in the order they are
+ * looked for (spec section 1). The order decides nothing: a directory holding
+ * more than one of them is an error.
+ * @return {list of string} `deck.toml`, `deck.yaml`, `deck.yml`, `deck.json`
+ */
+export func manifestNames() {
+    def names as list of string init [MANIFEST_TOML, MANIFEST_YAML, MANIFEST_YML, MANIFEST_JSON];
     return $names;
 }
 
 /**
- * Find the manifest in a directory. Returns the path of the single manifest
- * present (`deck.toml` preferred, then `deck.yaml` / `deck.yml`, then
- * `deck.json`), or "" when none exists. More than one manifest is an ambiguous,
- * unsupported state, so it is a hard error rather than a silent preference.
+ * Find the manifest in a directory: the one manifest present, or "" when none
+ * exists. More than one is an error, not a silent preference.
  * @param dir {string} the directory to search (e.g. ".")
  * @return {string} the manifest path, or "" if none found
  * @throws {Error} kind "manifest" when more than one deck manifest exists
@@ -689,16 +859,27 @@ export func findManifest(dir as string) {
 }
 
 # --- dependency-list helpers ------------------------------------------------
+#
+# Names are matched folded (`deckname.fold`: trimmed, lowercased). Every key
+# these tables hold is case-insensitive (a deck name, a scope pattern, an engine
+# name), so `jvc add @acme/app` updates a hand-written `@Acme/App` instead of
+# adding a second key the next parse would refuse.
+
+# sameName reports whether two table keys name the same thing.
+func sameName(a as string, b as string) {
+    return deckname.fold($a) == deckname.fold($b);
+}
 
 /**
- * Report whether a Dependency list contains an entry with the given name.
+ * Report whether a Dependency list contains an entry with the given name,
+ * compared folded (case-insensitively, ignoring surrounding space).
  * @param deps {list of Dependency} the list to inspect
  * @param name {string} the name to find
  * @return {bool} true when an entry with that name is present
  */
 export func depListHas(deps as list of Dependency, name as string) {
     for (def dep in $deps) {
-        if ($dep.name == $name) {
+        if (sameName($dep.name, $name)) {
             return true;
         }
     }
@@ -706,15 +887,15 @@ export func depListHas(deps as list of Dependency, name as string) {
 }
 
 /**
- * Return the constraint bound to a name in a Dependency
- * list, or "" when the name is absent.
+ * Return the constraint bound to a name in a Dependency list, or "" when the
+ * name is absent. The name is compared folded.
  * @param deps {list of Dependency} the list to inspect
  * @param name {string} the name to find
  * @return {string} the bound value, or "" if absent
  */
 export func depListGet(deps as list of Dependency, name as string) {
     for (def dep in $deps) {
-        if ($dep.name == $name) {
+        if (sameName($dep.name, $name)) {
             return $dep.constraint;
         }
     }
@@ -723,8 +904,8 @@ export func depListGet(deps as list of Dependency, name as string) {
 
 /**
  * Return a new Dependency list with the name set to the given value: replaced
- * in place if present (keeping position), else appended. The input is not
- * mutated.
+ * in place if present (keeping position, and taking the given spelling), else
+ * appended. The name is compared folded. The input is not mutated.
  * @param deps {list of Dependency} the starting list
  * @param name {string} the name to set
  * @param constraint {string} the constraint or version to bind
@@ -734,22 +915,22 @@ export func depListSet(deps as list of Dependency, name as string, constraint as
     def out as list of Dependency init [];
     def replaced as bool init false;
     for (def dep in $deps) {
-        if ($dep.name == $name) {
-            $out[] = Dependency{ name: $name, constraint: $constraint };
+        if (sameName($dep.name, $name)) {
+            $out[] = Dependency{name: $name, constraint: $constraint};
             $replaced = true;
         } else {
             $out[] = $dep;
         }
     }
     if (not $replaced) {
-        $out[] = Dependency{ name: $name, constraint: $constraint };
+        $out[] = Dependency{name: $name, constraint: $constraint};
     }
     return $out;
 }
 
 /**
  * Return a new Dependency list with the named entry removed (unchanged if
- * absent). The input is not mutated.
+ * absent). The name is compared folded. The input is not mutated.
  * @param deps {list of Dependency} the starting list
  * @param name {string} the name to remove
  * @return {list of Dependency} a new list without that entry
@@ -757,7 +938,7 @@ export func depListSet(deps as list of Dependency, name as string, constraint as
 export func depListRemove(deps as list of Dependency, name as string) {
     def out as list of Dependency init [];
     for (def dep in $deps) {
-        if (not ($dep.name == $name)) {
+        if (not sameName($dep.name, $name)) {
             $out[] = $dep;
         }
     }
@@ -787,7 +968,8 @@ export func getConstraint(m as Manifest, name as string) {
 }
 
 /**
- * Return a new manifest with a runtime requirement added or updated.
+ * Return a new manifest with a runtime requirement added or updated. The deck
+ * name is stored folded, as a parsed manifest holds it.
  * @param m {Manifest} the starting manifest
  * @param name {string} the deck name
  * @param constraint {string} the version constraint
@@ -795,7 +977,7 @@ export func getConstraint(m as Manifest, name as string) {
  */
 export func addDependency(m as Manifest, name as string, constraint as string) {
     def out as Manifest init $m;
-    $out.decks = depListSet($m.decks, $name, $constraint);
+    $out.decks = depListSet($m.decks, deckname.fold($name), $constraint);
     return $out;
 }
 
@@ -813,6 +995,7 @@ export func removeDependency(m as Manifest, name as string) {
 
 /**
  * Return a new manifest with a development-only requirement added or updated.
+ * The deck name is stored folded.
  * @param m {Manifest} the starting manifest
  * @param name {string} the deck name
  * @param constraint {string} the version constraint
@@ -820,7 +1003,7 @@ export func removeDependency(m as Manifest, name as string) {
  */
 export func addDevDependency(m as Manifest, name as string, constraint as string) {
     def out as Manifest init $m;
-    $out.devDecks = depListSet($m.devDecks, $name, $constraint);
+    $out.devDecks = depListSet($m.devDecks, deckname.fold($name), $constraint);
     return $out;
 }
 
@@ -839,7 +1022,8 @@ export func removeDevDependency(m as Manifest, name as string) {
 /**
  * Return a new manifest that conflicts with a deck over a version range (added
  * or updated). A conflict means the two decks cannot be installed together when
- * the other deck's version matches the constraint.
+ * the other deck's version matches the constraint. The deck name is stored
+ * folded.
  * @param m {Manifest} the starting manifest
  * @param name {string} the conflicting deck name
  * @param constraint {string} the conflicting version range (e.g. "<1.0.0", "*")
@@ -847,7 +1031,7 @@ export func removeDevDependency(m as Manifest, name as string) {
  */
 export func addConflict(m as Manifest, name as string, constraint as string) {
     def out as Manifest init $m;
-    $out.conflicts = depListSet($m.conflicts, $name, $constraint);
+    $out.conflicts = depListSet($m.conflicts, deckname.fold($name), $constraint);
     return $out;
 }
 
@@ -894,7 +1078,7 @@ export func removeEngine(m as Manifest, name as string) {
  * Return a new manifest sourcing a deck from a git URL (added or updated). The
  * `[sources]` entry says only *where* the deck's versions come from; the version
  * constraint stays in `[decks]`, so a deck can move between the repository and a
- * git URL without its requirement changing.
+ * git URL without its requirement changing. The deck name is stored folded.
  * @param m {Manifest} the starting manifest
  * @param name {string} the deck name (`@scope/deck`)
  * @param url {string} the git URL to resolve that deck's versions from
@@ -902,7 +1086,7 @@ export func removeEngine(m as Manifest, name as string) {
  */
 export func addSource(m as Manifest, name as string, url as string) {
     def out as Manifest init $m;
-    $out.sources = depListSet($m.sources, $name, $url);
+    $out.sources = depListSet($m.sources, deckname.fold($name), $url);
     return $out;
 }
 
@@ -913,19 +1097,19 @@ export func addSource(m as Manifest, name as string, url as string) {
  * The key is a scope wildcard, a scope name whose deck half is a star, or the
  * bare catch-all star. It is never a deck name: a scope resolves at exactly one
  * registry, and making the deck the unit would reintroduce the ambiguity the
- * mapping exists to remove.
- *
- * (The patterns are spelled out in prose rather than shown, because a slash
- * followed by a star inside a docblock opens a nested block comment and eats
- * the terminator.)
+ * mapping exists to remove. The pattern is stored folded, as at parse.
  * @param m {Manifest} the starting manifest
  * @param pattern {string} the scope wildcard, or the catch-all star
  * @param url {string} the registry base URL that scope resolves at
  * @return {Manifest} a new manifest with the mapping set
  */
 export func addRegistry(m as Manifest, pattern as string, url as string) {
+    # The docblock describes the patterns in prose: a slash followed by a star
+    # inside a docblock opens a nested block comment.
     def out as Manifest init $m;
-    $out.registries = depListSet($m.registries, $pattern, $url);
+    # Folded as at parse, so `@Acme/*` updates the `@acme/*` entry rather than
+    # adding a second key that the next parse would refuse.
+    $out.registries = depListSet($m.registries, deckname.fold($pattern), $url);
     return $out;
 }
 
@@ -938,7 +1122,7 @@ export func addRegistry(m as Manifest, pattern as string, url as string) {
  */
 export func removeRegistry(m as Manifest, pattern as string) {
     def out as Manifest init $m;
-    $out.registries = depListRemove($m.registries, $pattern);
+    $out.registries = depListRemove($m.registries, deckname.fold($pattern));
     return $out;
 }
 

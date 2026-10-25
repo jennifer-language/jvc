@@ -4,7 +4,7 @@
 #
 # White-box tests for manifest.j. Run with:
 #
-#     JENNIFER_SYSMODDIR=../jennifer-lang/modules jennifer test cli/manifest_test.j
+#     jennifer test src/manifest_test.j
 
 use testing;
 use os;
@@ -98,7 +98,8 @@ func testSourcesRoundTripInEveryFormat() {
     $m = addSource($m, "@acme/routeros", "https://github.com/acme/deck-routeros.git");
     for (def format in ["toml", "yaml", "json"]) {
         def back as Manifest init parse(encode($m, $format), $format);
-        testing.assertEqual(getSource($back, "@acme/routeros"),
+        testing.assertEqual(
+            getSource($back, "@acme/routeros"),
             "https://github.com/acme/deck-routeros.git");
         # the constraint stays in [decks], independent of the source
         testing.assertEqual(getConstraint($back, "@acme/routeros"), "^1.0.0");
@@ -328,4 +329,219 @@ func testFindManifestRejectsTomlPlusYaml() {
     fs.writeString($dir + "/deck.yaml", "package:\n  name: x\n");
     testing.assertThrows("findTomlYaml", "manifest");
     fs.removeAll($dir);
+}
+
+# --- url roles are pointer-escaped -------------------------------------------
+
+func testUrlRolesWithSlashOrTildeRoundTripInEveryFormat() {
+    # toml and json addressed the role unescaped: "docs/api" threw and
+    # "a~1b" read the "a/b" entry
+    def m as Manifest init empty("mydeck", "1.0.0");
+    $m = setUrl($m, "docs/api", "https://example.test/api");
+    $m = setUrl($m, "a~1b", "https://example.test/tilde");
+    $m = setUrl($m, "a/b", "https://example.test/slash");
+    for (def format in ["toml", "yaml", "json"]) {
+        def back as Manifest init parse(encode($m, $format), $format);
+        testing.assertEqual(getUrl($back, "docs/api"), "https://example.test/api");
+        testing.assertEqual(getUrl($back, "a~1b"), "https://example.test/tilde");
+        testing.assertEqual(getUrl($back, "a/b"), "https://example.test/slash");
+    }
+}
+
+func testAHandWrittenUrlRoleWithASlashParses() {
+    def toml as string init "[package]\nname = \"x\"\n[package.urls]\n" +
+        "\"docs/api\" = \"https://x\"\n";
+    testing.assertEqual(getUrl(parse($toml, "toml"), "docs/api"), "https://x");
+    def json as string init '{"package":{"name":"x","urls":{"docs/api":"https://x"}}}';
+    testing.assertEqual(getUrl(parse($json, "json"), "docs/api"), "https://x");
+}
+
+# --- deck names are folded ---------------------------------------------------
+
+func testDeckKeysAreFoldedInEveryFormat() {
+    def texts as map of string to string init {
+        "toml": "[decks]\n\"@Acme/App\" = \"^1.0.0\"\n[dev-decks]\n\"@Acme/Dev\" = \"*\"\n" +
+            "[conflicts]\n\"@Acme/Old\" = \"<1.0.0\"\n" +
+            "[sources]\n\"@Acme/App\" = \"https://x/a.git\"\n" +
+            "[engines]\njennifer = \"*\"\n",
+        "yaml": "decks:\n  \"@Acme/App\": \"^1.0.0\"\ndev-decks:\n  \"@Acme/Dev\": \"*\"\n" +
+            "conflicts:\n  \"@Acme/Old\": \"<1.0.0\"\n" +
+            "sources:\n  \"@Acme/App\": \"https://x/a.git\"\n" +
+            "engines:\n  jennifer: \"*\"\n",
+        "json": '{"decks":{"@Acme/App":"^1.0.0"},"dev-decks":{"@Acme/Dev":"*"},' +
+            '"conflicts":{"@Acme/Old":"<1.0.0"},"sources":{"@Acme/App":"https://x/a.git"},' +
+            '"engines":{"jennifer":"*"}}'
+    };
+    for (def format in $texts) {
+        def m as Manifest init parse($texts[$format], $format);
+        testing.assertEqual($m.decks[0].name, "@acme/app");
+        testing.assertEqual($m.devDecks[0].name, "@acme/dev");
+        testing.assertEqual($m.conflicts[0].name, "@acme/old");
+        testing.assertEqual($m.sources[0].name, "@acme/app");
+        testing.assertEqual($m.engines[0].name, "jennifer");
+    }
+}
+
+func testTwoKeysFoldingToOneDeckAreRefused() {
+    testing.assertThrows("parseFoldClashToml", "manifest");
+    testing.assertThrows("parseFoldClashYaml", "manifest");
+    testing.assertThrows("parseFoldClashJson", "manifest");
+}
+
+func parseFoldClashToml() {
+    parse("[decks]\n\"@acme/app\" = \"^1.0.0\"\n\"@Acme/App\" = \"^2.0.0\"\n", "toml");
+}
+
+func parseFoldClashYaml() {
+    parse("sources:\n  \"@acme/app\": a\n  \"@ACME/app\": b\n", "yaml");
+}
+
+func parseFoldClashJson() {
+    parse('{"conflicts":{"@acme/app":"*","@Acme/app":"*"}}', "json");
+}
+
+func testTheFoldClashNamesBothKeys() {
+    def msg as string init "";
+    try {
+        parseFoldClashToml();
+    } catch (e) {
+        $msg = $e.message;
+    }
+    testing.assertContains($msg, "[decks]");
+    testing.assertContains($msg, "@acme/app");
+    testing.assertContains($msg, "@Acme/App");
+}
+
+func testTheDeckEditorsMatchAndStoreFolded() {
+    def m as Manifest init parse("[decks]\n\"@Acme/App\" = \"^1.0.0\"\n", "toml");
+    $m = addDependency($m, "@ACME/app", "^2.0.0");
+    testing.assertEqual(len($m.decks), 1);
+    testing.assertEqual($m.decks[0].name, "@acme/app");
+    testing.assertEqual(getConstraint($m, "@Acme/APP"), "^2.0.0");
+    testing.assertTrue(hasDependency($m, "@acme/APP"));
+    $m = addSource($m, "@Acme/App", "https://x/a.git");
+    testing.assertEqual($m.sources[0].name, "@acme/app");
+    testing.assertEqual(getSource($m, "@acme/app"), "https://x/a.git");
+    $m = removeDependency($m, "@Acme/App");
+    testing.assertEqual(len($m.decks), 0);
+    # a hand-written scope pattern is replaced in place, not duplicated
+    def regs as list of Dependency init depListSet([], "@Acme/*", "https://a");
+    $regs = depListSet($regs, "@acme/*", "https://b");
+    testing.assertEqual(len($regs), 1);
+    testing.assertEqual(depListGet($regs, "@ACME/*"), "https://b");
+}
+
+# --- registries keys fold like the names they match --------------------------
+
+# A scope pattern matches folded deck names, so a hand-written "@Acme/*" comes
+# back as "@acme/*" from every format; the catch-all is unchanged.
+func testRegistryKeysAreFoldedInEveryFormat() {
+    def texts as map of string to string init {
+        "toml": "[registries]\n\"@Acme/*\" = \"https://a\"\n\"*\" = \"https://b\"\n",
+        "yaml": "registries:\n  \"@Acme/*\": \"https://a\"\n  \"*\": \"https://b\"\n",
+        "json": '{"registries":{"@Acme/*":"https://a","*":"https://b"}}'
+    };
+    for (def format in $texts) {
+        def m as Manifest init parse($texts[$format], $format);
+        testing.assertEqual($m.registries[0].name, "@acme/*");
+        testing.assertEqual($m.registries[1].name, "*");
+    }
+}
+
+# Two spellings of one scope used to both parse, and the first silently won.
+func testTwoRegistryKeysFoldingToOneScopeAreRefused() {
+    testing.assertThrows("parseRegistryClashToml", "manifest");
+    testing.assertThrows("parseRegistryClashYaml", "manifest");
+    testing.assertThrows("parseRegistryClashJson", "manifest");
+}
+
+func parseRegistryClashToml() {
+    parse("[registries]\n\"@Acme/*\" = \"https://a\"\n\"@acme/*\" = \"https://b\"\n", "toml");
+}
+
+func parseRegistryClashYaml() {
+    parse("registries:\n  \"@acme/*\": a\n  \"@ACME/*\": b\n", "yaml");
+}
+
+func parseRegistryClashJson() {
+    parse('{"registries":{"@acme/*":"a","@Acme/*":"b"}}', "json");
+}
+
+func testTheRegistryClashNamesBothKeys() {
+    def msg as string init "";
+    try {
+        parseRegistryClashToml();
+    } catch (e) {
+        $msg = $e.message;
+    }
+    testing.assertContains($msg, "[registries]");
+    testing.assertContains($msg, "@Acme/*");
+    testing.assertContains($msg, "@acme/*");
+    testing.assertContains($msg, "scope pattern");
+}
+
+# [engines] keys keep their spelling at parse; only the deck tables fold.
+func testEngineKeysAreKeptAsWritten() {
+    def m as Manifest init parse("[engines]\nJennifer = \"*\"\njennifer = \"*\"\n", "toml");
+    testing.assertEqual(len($m.engines), 2);
+    testing.assertEqual($m.engines[0].name, "Jennifer");
+}
+
+func testTheRegistryEditorsStoreFolded() {
+    def m as Manifest init addRegistry(empty("x", "0.1.0"), "@Acme/*", "https://a");
+    testing.assertEqual($m.registries[0].name, "@acme/*");
+    $m = addRegistry($m, "@ACME/*", "https://b");
+    testing.assertEqual(len($m.registries), 1);
+    testing.assertEqual($m.registries[0].constraint, "https://b");
+    $m = removeRegistry($m, "@Acme/*");
+    testing.assertEqual(len($m.registries), 0);
+}
+
+# --- a field of the wrong type is a manifest error naming the field ---------
+
+# wrongType parses a source and returns the error, or fails when none is raised.
+func wrongType(text as string, format as string) {
+    try {
+        parse($text, $format);
+    } catch (e) {
+        return $e;
+    }
+    throw Error{
+        kind: "assertion",
+        message: "parsed without an error: " + $text,
+        file: "",
+        line: 0,
+        col: 0
+    };
+}
+
+func testAFieldOfTheWrongTypeIsAManifestError() {
+    def cases as list of list of string init [
+        ["toml", "[package]\nversion = 1.0\n", "version"],
+        ["toml", "[package]\nauthors = \"me\"\n", "authors"],
+        ["toml", "decks = \"x\"\n", "[decks]"],
+        ["toml", '[decks]
+ansi = { version = "1" }
+', "ansi"],
+        ["toml", "[package]\nkeywords = [1]\n", "keywords"],
+        ["toml", "[package.urls]\ndeck = 3\n", "deck"],
+        ["yaml", "package:\n  version: 1.10\n", "version"],
+        ["yaml", "decks:\n  ansi: 1\n", "ansi"],
+        ["yaml", "engines: [a]\n", "[engines]"],
+        ["json", '{"package":{"name":7}}', "name"],
+        ["json", '{"registries":{"*":null}}', "*"],
+        ["toml", "[package\n", "TOML"],
+        ["json", '{', "JSON"]
+    ];
+    for (def c in $cases) {
+        def e as Error init wrongType($c[1], $c[0]);
+        testing.assertEqual($e.kind, "manifest");
+        testing.assertContains($e.message, $c[2]);
+    }
+}
+
+func testAnUnquotedVersionSaysToQuoteIt() {
+    def e as Error init wrongType("[package]\nversion = 1.0\n", "toml");
+    testing.assertContains($e.message, "[package] version");
+    testing.assertContains($e.message, "quote it");
 }

@@ -1,6 +1,6 @@
 # Deck manifest specification
 
-- **Version:** 0.4.1 (draft)
+- **Version:** 0.1.0 (draft)
 - **Applies to:** jvc 0.1.0
 
 This is the authoritative specification of the *deck manifest* - the file that
@@ -16,27 +16,24 @@ is the friendly guide; this document is the normative reference. The key words
 > at, how a dependency graph is resolved, how code is fetched and verified, and
 > how a write is authorised are normative in the
 > [client specification](https://registry.jennifer-lang.dev/specs/specs-client.html),
-> which the registry project owns and serves. This document references that contract
-> rather than restating it, so the two cannot drift: a local copy of it went
-> stale once before and cost a release's worth of debugging.
+> which the registry project owns and serves. This document references that
+> contract rather than restating it.
 
 **Versioning.** The **minor** position advances whenever this document's
 normative content changes; the patch position is for corrections that change
 no requirement. **A version tracks a committed change, not an edit**:
-everything that lands together carries one number, however many passes it took
-to write. **The format stabilises with the tool**: this document reaches 1.0.0
-when jvc carries a stable `1.0.0` tag, and not before, because a specification
-cannot promise more stability than the thing that implements it. This is the
-same rule the registry project's server and client specifications follow, so
-all three read alike.
+everything that lands together carries one number. **The format stabilises with
+the tool**: this document reaches 1.0.0 when jvc carries a stable `1.0.0` tag,
+and not before. The registry project's server and client specifications follow
+the same rule.
 
 The reference implementation is `src/manifest.j` (read/write), `src/deckname.j`
 (names), `src/cli.j` (install), `src/resolver.j` (resolution over a
 `src/catalog.j`), `src/constraint.j` (constraint grammar), `src/pragma.j`
-(capability pragmas), `src/gitsource.j`
-(git sources), `src/scaffold.j` (frames), `src/app.j` (app installs),
-`src/publish.j` (packaging + registration), `src/verify.j` (the publish gate),
-and, in the registry project, its store.
+(version and capability pragmas), `src/gitsource.j` (git sources),
+`src/scaffold.j` (frames), `src/app.j` (app installs), `src/publish.j` (packing
+and publishing), `src/verify.j` (the publish gate), and, in the registry
+project, its store.
 
 ## 1. Files and discovery
 
@@ -46,9 +43,8 @@ A manifest is a single file named `deck.toml`, `deck.yaml` / `deck.yml`, or
 - A directory **MUST** contain at most one manifest. If more than one of the four
   filenames exists, a tool **MUST** abort with an error that lists them
   instead of choosing one.
-- Tools discover the manifest in this order: `deck.toml`, then `deck.yaml`, then
-  `deck.yml`, then `deck.json` - the first present wins (and, per the rule above,
-  it **MUST** be the only one present).
+- Tools look for `deck.toml`, `deck.yaml`, `deck.yml` and `deck.json`; finding
+  more than one is the error above.
 
 The resolved, installed dependency set is pinned separately in a **`camcorder.lock`**
 (§11), written by `jvc install`. The lockfile is not a manifest and is not
@@ -64,20 +60,24 @@ The encoding is determined by the file extension:
 | `.yaml` / `.yml` | YAML 1.x | `yaml` library |
 | `.json`          | JSON     | `json` library |
 
-All three encodings describe the same logical document (§3) and round-trip
-through jvc unchanged. Any other extension is an error.
+All three encodings describe the same logical document (§3). Any other
+extension is an error.
+
+**A manifest-editing tool rewrites from its parsed model.** jvc's editing verbs
+(`add`, `remove`, `engine`, `source`, `registry` and the rest) re-encode the
+whole document from what they parsed, so the *data* survives an edit but
+comments, unknown keys, and the author's field order do not, and deck names
+come back folded (§5). A manifest whose comments matter **SHOULD** be edited by
+hand.
 
 ## 3. Document structure
 
 The logical document has seven top-level sections (below). They are
-**structurally independent**, and the *parser* treats any absent section or
-field as empty (§12). That tolerance is about parsing, not completeness: a
-**publishable** deck **MUST** still carry its identity in `[package]` - a
-non-empty `name`, a valid `version`, and a `urls.deck` (§4). So "optional" here
-means only "the parser will not reject a document that omits it", **not** "a real
-deck may leave it out". The dependency sections (`[decks]`, `[dev-decks]`,
-`[conflicts]`, `[engines]`, `[sources]`) are genuinely optional -
-an absent one just means the deck has none.
+structurally independent, and the parser reads an absent section or field as
+empty (§12). A **publishable** deck **MUST** still carry a non-empty `name`, a
+valid `version` and a `urls.deck` in `[package]` (§4). An absent dependency
+section (`[decks]`, `[dev-decks]`, `[conflicts]`, `[engines]`, `[sources]`)
+means the deck has none.
 
 | Section       | TOML          | JSON key      | Meaning                              |
 | ------------- | ------------- | ------------- | ------------------------------------ |
@@ -106,8 +106,8 @@ A table of scalar and string-array fields:
 | `authors`     | array of string   | no       | `[]`    | names / emails                          |
 | `keywords`    | array of string   | no       | `[]`    | search keywords                         |
 | `capabilities`| array of string   | no       | `[]`    | host capabilities the code needs (§4.2) |
-| `bin`         | string            | no       | `""`    | the one entry script exposed as a command (§14.0) |
-| `bin-dir`     | string            | no       | `bin/`  | where a project writes vendored commands (§14.0) |
+| `bin`         | string            | no       | `""`    | the one entry script exposed as a command (§14.1) |
+| `bin-dir`     | string            | no       | `bin`   | where a project writes vendored commands (§14.1) |
 
 ¹ *Semantically* required for a usable, publishable deck. The parser is lenient
 (a missing field reads as its default); tools that publish or resolve **SHOULD**
@@ -128,18 +128,18 @@ for a publishable deck; the parser accepts its absence (empty map), but a
 publishing tool **SHOULD** require it.
 
 **Lenient top-level fallback.** The canonical home for these fields is
-`[package]` (as in the complete example, §13). As a shorthand, `name`,
-`version`, `description`, `license`, and the `urls` table **MAY** also appear at
-the document's **top level** (outside `[package]`); a tool reads
-`[package].<field>` first, then the top-level `<field>`. The two forms are
-equivalent - the top-level form is not a separate schema, just a convenience for
-a minimal manifest:
+`[package]` (as in the complete example, §15). As a shorthand, every
+`[package]` field (`name`, `version`, `description`, `license`, `authors`,
+`keywords`, `capabilities`, `bin`, `bin-dir`) and the `urls` table **MAY** also
+appear at the document's **top level** (outside `[package]`); a tool reads
+`[package].<field>` first, then the top-level `<field>`, field by field. The two
+forms are equivalent:
 
 ```toml
 name = "myapp"
 version = "0.1.0"
 [engines]
-jennifer = "^0.21.0"
+jennifer = ">=0.25.0"
 ```
 
 ### 4.2 The `capabilities` array
@@ -164,16 +164,17 @@ through a vendored `import`, so a deck needing `net` cannot run under
 `jennifer-tiny`. The pragma is authoritative; `capabilities` is how a deck
 *advertises* the same fact to tools before anything is installed.
 
-- A tool that publishes **MUST** verify the two agree: if the deck's `src/`
-  declares a capability the manifest omits, publishing **MUST** be refused, so a
-  deck can never claim less than its code needs. An unknown capability name
-  **MUST** also be refused.
+- A tool that publishes **MUST** verify the two agree: the array **MUST**
+  include every capability the pragma headers in `src/` declare, and **MAY** list
+  more. Publishing **MUST** be refused otherwise, so a deck never claims less
+  than its code needs. An unknown capability name **MUST** also be refused.
 - Only the leading comment header of a file counts, matching the interpreter: a
   pragma below the first non-comment line, or inside a `/** */` docblock, is
   ignored.
-- The set is recorded with the published version (§10) and in the lockfile
-  (§11), and a tool **SHOULD** warn at install time when a resolved deck needs a
-  capability the target build lacks (§10.2).
+- The set is recorded with the published version (§10) and in each lockfile
+  entry (§11), and a tool **SHOULD** warn at install time when a resolved deck
+  needs a capability the installing build lacks (§10.2, step 3). It is a
+  warning, not a refusal: the pragma is what binds at run time.
 
 ## 5. Deck sections: `[decks]`, `[dev-decks]`, `[conflicts]`
 
@@ -191,12 +192,13 @@ version constraints** (string, §9).
 "@old/jvc" = "<1.0.0"
 ```
 
-- **`[decks]` / `[dev-decks]` keys MUST be scoped `@scope/deck`.** A registry
-  dependency is a scoped deck (§7); a **bare** name is **not** a valid dependency
-  here - a bundled stdlib module (its version is the engine's) is required via
-  `[engines]` (§5), and a local module (an `-I` path or a `./relative` import)
-  has no version and is not a dependency at all. jvc rejects a bare `[decks]`
-  entry on `add` and before any network call on `install`.
+- **`[decks]`, `[dev-decks]` and `[conflicts]` keys MUST be scoped
+  `@scope/deck`.** A dependency is a scoped deck (§7), whether it comes from a
+  registry or from `[sources]`. A **bare** name is not a valid key: a bundled
+  stdlib module (its version is the engine's) is required via `[engines]`
+  (§5.1), and a local module (an `-I` path or a `./relative` import) has no
+  version and is not a dependency. jvc rejects a bare `[decks]` entry on `add`
+  and before any network call on `install`.
 - `[decks]` are needed at runtime; `[dev-decks]` are needed only to build/test.
   When a deck is published, its `[decks]` are recorded with that version in the
   registry (as `requires`, §10) and drive transitive resolution (§10.4).
@@ -205,13 +207,17 @@ version constraints** (string, §9).
   `"@old/jvc" = "<1.0.0"` conflicts with any `@old/jvc` before 1.0.0, and
   `= "*"` conflicts with every version).
 - A **scoped** deck name (§7) contains a `/`, so its key **MUST** be quoted in
-  TOML (`"@jennifer/routeros" = "^0.1.0"`). It is preserved verbatim as a single
-  key; tools address it as one JSON-Pointer reference token (RFC 6901 escaping).
-- A deck name **SHOULD NOT** appear twice within one section. The sections are
-  independent; a name **MAY** appear in more than one.
+  TOML (`"@jennifer/routeros" = "^0.1.0"`). It is kept as a single key, which
+  tools address as one JSON-Pointer reference token (RFC 6901 escaping).
+- **Keys are folded to lowercase at parse**, in `[decks]`, `[dev-decks]`,
+  `[conflicts]` and `[sources]` alike, since deck names are case-insensitive
+  (§7). Two keys in one section that fold to the same name (`"@Acme/Tool"` and
+  `"@acme/tool"`) **MUST** be rejected as a parse error naming both, rather than
+  one silently winning. The sections are independent; a name **MAY** appear in
+  more than one.
 - Order is preserved from the source document.
 
-### The `[engines]` table
+### 5.1 The `[engines]` table
 
 `[engines]` maps a **Jennifer engine name** to a **version constraint** (§9) on
 the interpreter that can run this deck. Recognized engines: `jennifer` (the full
@@ -222,57 +228,48 @@ runs under exactly one engine at a time, so the entries are the engines the deck
 *supports*, each with its own accepted version range. Evaluation:
 
 - If `[engines]` is **empty/absent**, the deck imposes no engine restriction.
-- Otherwise the **running engine MUST be a key** in the table **and** the
-  running interpreter version MUST satisfy that key's constraint. If the running
-  engine is not listed, or its version does not satisfy that entry, a tool
-  **SHOULD** refuse to run or install the deck.
-- **A development build of an engine MUST bypass the version constraint**, and
-  MUST still be held to the allowlist. A version carrying a SemVer prerelease
-  (`0.24.0-dev+28`) is a development build; only a release tag is compared. This
-  mirrors `# pragma-jennifer-version`, where any `-dev` build passes the floor
-  and the interpreter compares release tags alone. The two MUST agree: a tool
-  gate stricter than the interpreter's own would refuse decks the interpreter
-  loads without complaint, and a development build of the next release is
-  where a deck needing that release is tried first. Bypassing the
-  range is **not** licence to bypass the allowlist: a `-dev` build of
-  `jennifer-tiny` is still not `jennifer`, which is a question of which engine
-  runs, not of how new it is.
+- Otherwise a tool **MUST** refuse to install the deck unless the running
+  engine is a key in the table and the running interpreter's version satisfies
+  that key's constraint.
+- **A development build of an engine MUST bypass the version constraint, and
+  MUST still be held to the allowlist.** A version with a SemVer prerelease
+  (`0.24.0-dev+28`) is a development build; only releases are compared, as for
+  `# pragma-jennifer-version`. A gate stricter than the interpreter would refuse
+  decks the interpreter loads. A `-dev` build of `jennifer-tiny` is still not
+  `jennifer`.
 
-So `jennifer = "^0.21.0"` alone means "only the full `jennifer` interpreter,
-0.21.x" (a `jennifer-tiny` run is refused); adding `jennifer-tiny = "^0.5.0"`
-means "either `jennifer` 0.21.x **or** `jennifer-tiny` 0.5.x". A net-using deck
+So `jennifer = "^0.25.0"` alone means "only the full `jennifer` interpreter,
+0.25.x" (a `jennifer-tiny` run is refused); adding `jennifer-tiny = "^0.25.0"`
+means "either `jennifer` 0.25.x **or** `jennifer-tiny` 0.25.x". A net-using deck
 therefore lists only `jennifer`.
 
 ```toml
 [engines]
-jennifer = "^0.21.0"
+jennifer = "^0.25.0"
 # add a second line only if the deck also runs on the tiny build:
-# jennifer-tiny = "^0.5.0"
+# jennifer-tiny = "^0.25.0"
 ```
 
 **When and where `[engines]` is evaluated.** A deck's `[engines]` is checked at
 two distinct points, against two potentially different interpreters:
 
-1. **Install time - against the interpreter running `jvc`.** `jvc check` and
-   `jvc install` gate the *root* manifest's `[engines]` before any network call,
-   and `jvc install` additionally applies a **graph-wide** gate over every
-   resolved deck - root and transitive - after resolution (§10.2). A published
-   version's `[engines]` is recorded in the registry (§10) and returned by
-   `/resolve-graph`, so the whole graph is checked. This gate is a **fail-fast**,
-   **not** authoritative for the runtime: `jvc` needs `net`/`http`/`fs` and so
-   almost always runs under the full `jennifer`, meaning it validates the
-   *installing* machine - the product could later be run under `jennifer-tiny`.
-2. **Run time - against the interpreter that actually runs the app.** This is
-   the authoritative check and is **not** jvc's to make, because only the
-   running interpreter knows what it is. It is made against each **source
+1. **Install time, against the interpreter running jvc.** `jvc check`,
+   `jvc install` and `jvc update` gate the *root* manifest's `[engines]` before
+   any network call, and `install` and `update` also gate every resolved deck,
+   root and transitive, after resolution (§10.2). A published version's
+   `[engines]` is recorded in its metadata (§10), so the gate covers the whole
+   graph. The gate fails fast but is **not** authoritative for the runtime: jvc
+   needs `net` and `exec`, so it runs under the full `jennifer` and validates the
+   *installing* machine; the program could later run under `jennifer-tiny`.
+2. **Run time, against the interpreter that runs the app.** This is the
+   authoritative check and is **not** jvc's to make, because only the running
+   interpreter knows what it is. It is made against each **source
    file's own pragma header**, not against this table: the interpreter enforces
    `# pragma-jennifer-version:` and `# pragma-jennifer-capability:` at every
    import seam.
 
-   **The interpreter reads no manifest and no lockfile.** That is deliberate on
-   the interpreter side, and it is the reason the check is worth anything: a
-   core that parsed `camcorder.lock` would bind the language to one package
-   manager and foreclose the others an ecosystem should stay free to grow. The
+   **The interpreter reads no manifest and no lockfile.** A core that parsed
+   `camcorder.lock` would bind the language to one package manager. The
    pragma fires identically for a deck jvc vendored, one another manager
    vendored, a hand-populated `vendor/`, and a plain `git clone`.
    `camcorder.lock` is **jvc's private artifact** (§11), and nothing outside jvc
@@ -284,18 +281,16 @@ this version" and "needs `net` / `exec` / `sql`"; it cannot say "not on
 `jennifer-tiny`" for any other reason, nor express an upper bound or a
 per-engine range. So the guarantees divide:
 
-| The deck needs | Refused at run time by | Refused at install by |
-| -------------- | ---------------------- | --------------------- |
+| The deck needs | Refused at run time by | Caught at install by |
+| -------------- | ---------------------- | -------------------- |
 | a newer interpreter | the version pragma | `[engines]` |
-| `net`, `exec`, or `sql` | the capability pragma | `[engines]`, `capabilities` |
+| `net`, `exec`, or `sql` | the capability pragma | `[engines]` (refused); `capabilities` (a warning) |
 | any other default-only surface (`term`, `serial`, `spi`, `i2c`, `gpio`, `crypto` RSA/ECDSA) | nothing at import; the tiny build's stub fails at the **first call** | `[engines]` |
 
 That third row is why `[engines]` still matters and **MUST** be kept accurate by
 the deck's author even though nothing enforces it later: for those surfaces,
 jvc refusing the install is the only automated warning before the program is
-running. A deck using them **MUST NOT** list `jennifer-tiny`. The failure mode
-without it is late but never silent, which is tolerable; it is still a failure
-at first call instead of at install.
+running. A deck using them **MUST NOT** list `jennifer-tiny`.
 
 ## 6. Further tables
 
@@ -320,8 +315,6 @@ remote without its requirement changing.
 ```
 
 - A deck with no `[sources]` entry resolves from the registry.
-- The section is optional and **MAY** be absent; a manifest written before it
-  existed parses unchanged.
 - A key **MUST** be a scoped name (§7), as in `[decks]`.
 - Resolution semantics for a git-sourced deck are in §10.5.
 
@@ -334,27 +327,26 @@ once.
 ```toml
 [registries]
 "@acme/*" = "https://registry.internal.example"
-"*" = "https://decks.jennifer-lang.org"
+"*" = "https://registry.jennifer-lang.dev"
 ```
 
 A key **MUST** be either a **scope wildcard** (a scope name whose deck half is a
 star) or the bare **catch-all** star. A key **MUST NOT** be a deck name: the
 guarantee the mapping exists to give is stated over scopes, and making the deck
-the unit would reintroduce the ambiguity it removes.
+the unit would reintroduce the ambiguity it removes. Keys are folded to
+lowercase at parse, as deck-name keys are (§5), and two keys that fold to the
+same pattern **MUST** be rejected as a parse error.
 
 - A scope with no entry falls to the catch-all; with no catch-all either, it
   falls to whatever the tool was told on its command line or in its environment.
-- The section is optional and **MAY** be absent; a manifest written before it
-  existed parses unchanged, and a project with one registry never needs it.
+  A project with one registry never needs the section.
 
-**What a client does with this table is specified elsewhere.** That a scope
-resolves at exactly one registry with no fallback search - the defence against
-dependency confusion - that transitive dependencies follow the *consuming*
-project's mapping rather than a dependency's own, and that a client warns when a
-new mapping shadows an already-locked scope, are normative in the
+**What a client does with this table is specified elsewhere**, in the
 [client specification](https://registry.jennifer-lang.dev/specs/specs-client.html)
-section 2. This section defines the file; that one defines the behaviour, and
-the lockfile's side of it is in §11.
+section 2: a scope resolves at exactly one registry with no fallback search
+(the defence against dependency confusion), transitive dependencies follow the
+*consuming* project's mapping, and a client warns when a new mapping shadows a
+locked scope. The lockfile's side is in §11.
 
 ### 6.3 `[provides]` is reserved
 
@@ -403,20 +395,31 @@ A module name has one of two forms, and the form decides who owns it:
   module (in the interpreter's module path, versioned with the engine) or a
   **local** module (an `-I` path or a `./relative` file, with no version).
   Example: `ansi`, `semver`, `utf8`.
-- **Scoped** - `@scope/deck`, where `scope` and `deck` are **each** an
-  identifier as above. Example: `@jennifer/routeros`. The `@` and the single
-  `/` are the only non-identifier characters a scoped name may contain. A scoped
-  name is a **registry deck** - the only form jvc resolves, versions, and
-  vendors.
+- **Scoped** - `@scope/deck`. Example: `@jennifer/routeros`. A scoped name is
+  a **deck**, from a registry or from `[sources]`: the only form jvc resolves,
+  versions and vendors. Its grammar is normative in the
+  [server specification](https://registry.jennifer-lang.dev/specs/specs-server.html)
+  section 2.1, because the registry records the same names. In outline: the
+  `deck` half is a lowercase identifier (it becomes the namespace a consumer
+  binds, so no hyphen); the `scope` half is only ever a path segment, so it
+  **MAY** carry single hyphens between letters or digits
+  (`@jennifer-language/routeros`); a name is folded to lowercase rather than
+  refused for its case; anything outside ASCII is refused; and neither half may
+  be a Windows reserved device name (`con`, `nul`, `com1` and the rest), since
+  `vendor/<scope>/<deck>/` must be creatable everywhere.
 
-Consequently a **published deck name** and every **`[decks]` / `[dev-decks]`
-entry MUST be scoped**; a bare name never names a registry dependency (require a
-bundled module via `[engines]`, and a local module needs no entry). Capability
-Engine names (`[engines]`) follow the bare rule - they are not registry
-decks. A **scope** must be registered in the registry before a
-scoped deck may be published under it (§10.3). Tools **SHOULD** validate names on
-publish; the manifest parser accepts the key verbatim. The reference
-implementation is `src/deckname.j`.
+Consequently a **published deck name** and every **`[decks]`, `[dev-decks]` and
+`[conflicts]` key MUST be scoped**; a bare name never names a dependency
+(require a bundled module via `[engines]`; a local module needs no entry).
+Engine names are a fixed set (`jennifer`, `jennifer-tiny`, §5.1), not deck
+names. A **scope** must be registered in the registry before a scoped deck may
+be published under it (§10.3). The manifest parser folds a key (§5) but does not
+otherwise check it, so **a tool MUST validate a deck name wherever one enters
+it** before using it: the manifest's `[decks]`, `[dev-decks]`, `[conflicts]` and
+`[sources]` keys, each name a lockfile records, and each name a dependency's
+requirements carry. A name becomes a path under `vendor/`, so an unchecked one
+is a path an author or a lockfile chose. The reference implementation is
+`src/deckname.j`, applied by `cli.isDeckName`.
 
 ## 8. Versions
 
@@ -428,7 +431,7 @@ valid SemVer.
 ## 9. Version constraints
 
 A **constraint** is the value of a `[decks]` or `[dev-decks]` entry, of a
-`[conflicts]` entry (§5), and of an `[engines]` entry (§5). Wherever this
+`[conflicts]` entry (§5), and of an `[engines]` entry (§5.1). Wherever this
 document says "constraint", it means one of those.
 
 **The grammar and what each form matches are specified elsewhere**: they are
@@ -440,32 +443,48 @@ implementations end up disagreeing about `^1`. In outline, a constraint is a
 **single** expression with no `||` or `,` compound ranges, and it is a wildcard,
 an exact version, a caret, a tilde, or a comparator.
 
-The reference implementation is `src/constraint.j`, and the registry project
-carries a byte-identical copy of it.
+**A constraint outside the grammar matches nothing**, and is never read as a
+looser spelling of one inside it: `^abc` is not `^0`, and `^ 1.2.0` (a space
+after the operator) is not `^1.2.0`. Because matching nothing turns into a
+misleading "no version satisfies" in `[decks]`, and into no conflict at all in
+`[conflicts]`, a tool **MUST** check every constraint in a manifest when it loads
+one and report the offending entry by table and name, rather than resolve. A
+version whose numeric identifiers do not fit the implementation's integer (the
+reference implementation admits up to 18 digits) is treated as unusable and
+satisfies nothing, rather than failing the whole resolution.
+
+The reference implementation is `src/constraint.j`.
 
 ## 10. Delivery, namespaces, and installation
 
-A published version record carries a **delivery kind** (`kind`), a fetch **url**,
-an integrity **checksum**, the version's own runtime **requirements** (`requires`,
-a map of deck name → constraint - the deck's `[decks]` at that version), which
-drive transitive resolution (§10.4), and the version's **engines** (a map of
-engine name → range - the deck's `[engines]` at that version, §5), which drive
-the engine gates (§10.2).
-Every registry deck is a scoped `@scope/deck` deck (§7) delivered as a
-**`tar.gz`** and vendored:
+A published version record carries:
 
-| kind      | Artifact                | Applies to        | Installed to            |
-| --------- | ----------------------- | ----------------- | ----------------------- |
-| `tar.gz`  | a release tarball       | scoped decks      | the **vendor tree** (§10.1) |
-| `git`     | a commit's tree         | scoped decks      | the **vendor tree** (§10.1) |
+- `kind`, the delivery kind: `tar.gz` or `git`;
+- `url`, where the artifact is fetched;
+- the integrity pin: a `checksum` for `tar.gz`, a `ref` and `commit` for `git`;
+- `requires`, the version's `[decks]` (deck name to constraint), which drives
+  transitive resolution (§10.4);
+- `engines`, the version's `[engines]` (§5.1), which drives the engine gates
+  (§10.2);
+- `capabilities` (§4.2).
 
-`kind` is `tar.gz` for every registry deck; `/resolve` returns it. A deck named
-in `[sources]` (§6.1) is `git` instead and never appears in the registry at all
-(§10.5). Both kinds install identically, through the `src/`-only vendor path.
-(There is no single-`.j` `file` kind: a bare name is an engine-bundled or a
-local module, not a registry deck, §7.) A `tar.gz` version's `checksum`, when present, is `sha256:<hex>`; jvc
-**MUST** verify it against the fetched bytes before installing (§10.2). A `git`
-deck is pinned by its commit instead and carries no checksum.
+Every registry deck is scoped (§7) and vendored:
+
+| kind      | Artifact          | Installed to                |
+| --------- | ----------------- | --------------------------- |
+| `tar.gz`  | a release tarball | the **vendor tree** (§10.1) |
+| `git`     | a commit's tree   | the **vendor tree** (§10.1) |
+
+A release published by naming a repository and a tag is recorded as `git`, at
+the commit the tag resolved to. A deck named in `[sources]` (§6.1) is always
+`git` and never appears in the registry (§10.5). Both kinds install the same
+way, through the `src/`-only vendor path.
+
+A `tar.gz` version **MUST** carry a `checksum` of the form `sha256:<hex>`, and a
+tool **MUST** verify it against the fetched bytes before installing (§10.2); a
+`tar.gz` version with no checksum **MUST** be refused rather than installed
+unverified. A `git` version is pinned by its commit instead and carries no
+checksum.
 
 ### 10.1 The `/src`-only vendor model
 
@@ -485,8 +504,8 @@ a defined meaning without being vendored: `template/`, the frame template
   `src/routeros.j` → `vendor/jennifer/routeros/routeros.j`, and
   `src/query/words.j` → `vendor/jennifer/routeros/query/words.j`.
 - The deck **MUST** provide an entrypoint **`src/<deck>.j`** (→
-  `vendor/<scope>/<deck>/<deck>.j`). jvc enforces both the `src/` directory and
-  the entrypoint on install, failing with a clear error otherwise.
+  `vendor/<scope>/<deck>/<deck>.j`). jvc refuses the install when either is
+  missing.
 
 **Import spelling.** A vendored scoped deck is imported as `import "@scope/deck/"`,
 which binds the `deck.` namespace and resolves `vendor/<scope>/<deck>/<deck>.j`
@@ -504,7 +523,7 @@ routeros.greet();                    # binds the `routeros.` namespace
 `jvc install` **MUST** apply these steps, stopping on the first failure:
 
 1. **Root engine gate** - refuse before any network call if the running
-   interpreter is ruled out by the *root* manifest's `[engines]` (§5).
+   interpreter is ruled out by the *root* manifest's `[engines]` (§5.1).
 2. **Use the lockfile, else resolve** - when a `camcorder.lock` is present and
    **covers** the manifest (§11.1), a tool **MUST** install exactly the versions
    it records, without resolving and without any metadata lookup; that is what
@@ -513,26 +532,28 @@ routeros.greet();                    # binds the `routeros.` namespace
    flattened, version-locked set (§10.4). `jvc update` (§11.2) always resolves.
 3. **Graph-wide engine gate** - refuse if **any** deck in the resolved set (root
    or transitive) rules out the running interpreter by its recorded `[engines]`
-   (§5). This checks the *installing* interpreter and is a fail-fast; the
+   (§5.1). This checks the *installing* interpreter and fails fast; the
    authoritative per-import check is the interpreter's own pragma enforcement
-   (§5), which reads the source files rather than this manifest.
+   (§5.1), which reads the source files rather than this manifest. A tool
+   **SHOULD** also warn, without refusing, when a resolved deck's recorded
+   `capabilities` (§4.2) include one the installing build lacks.
 4. **Conflict gate** - refuse if **any** deck in the resolved set (root or
    transitive) matches `[conflicts]` (§5).
-5. **Fetch** - retrieve the artifact from the resolved `url` (`https://` via the
-   http bytes body, or `file://` / local path).
-6. **Verify** - check the `sha256:` checksum against the fetched bytes.
+5. **Fetch** - retrieve a `tar.gz` artifact from the resolved `url` over
+   http(s) (a registry-supplied URL that is not http(s) is refused), or archive
+   a `git` deck's pinned commit out of a local mirror (§10.5).
+6. **Verify** - check a `tar.gz` deck's `sha256:` checksum against the fetched
+   bytes. A `git` deck is pinned by its commit and has no separate checksum.
 7. **Install** - unpack the `tar.gz`'s `/src` subtree into
-   `vendor/<scope>/<deck>/` (§10.1). Every resolved deck is scoped, so every
-   install vendors; there is no `decks/<name>.j` path.
+   `vendor/<scope>/<deck>/` (§10.1).
 8. **Lock** - write `camcorder.lock` for the whole set (§11).
 
 ### 10.3 Namespaces
 
 A **scope** (`@jennifer`) is registered in the registry before any scoped deck
-may be published under it. The registry keeps a namespace table; a publish of
-`@scope/deck` under an unregistered `scope` **MUST** be refused. See
-the registry project for the `deckadmin register-namespace` / `namespaces`
-verbs.
+may be published under it, by `jvc claim` or by an operator (`deckadmin
+register-namespace`). The registry keeps a namespace table; a publish of
+`@scope/deck` under an unregistered `scope` **MUST** be refused.
 
 ### 10.4 Transitive resolution
 
@@ -573,12 +594,19 @@ vendor tree (§10.1); only where its metadata and artifact come from differs.
   `v` is stripped (`v1.2.0`, `1.2.0`) is one candidate version. A tag that is not
   a version (`latest`, `nightly`) **MUST** be ignored, not rejected.
 - **Requirements come from the tag.** A candidate's `requires` and `engines` are
-  read from that tag's own `deck.toml`, so a git deck's dependencies drive
-  transitive resolution exactly as a published version's `requires` do (§10.4). A
-  graph **MAY** mix git-sourced and registry decks in any combination.
-- **The tag and its manifest MUST agree.** If a tag's `deck.toml` declares a
-  different `version`, or a different `name` than the `[sources]` key, resolution
-  **MUST** fail instead of locking a version the vendored code contradicts.
+  read from that tag's own manifest, under any of the four names of §1, so a git
+  deck's dependencies drive transitive resolution exactly as a published
+  version's `requires` do (§10.4). A graph **MAY** mix git-sourced and registry
+  decks in any combination. A tag holding more than one manifest **MUST** fail,
+  as a directory does (§1).
+- **A tag of another deck is not a release.** A tag with no manifest, or whose
+  manifest declares a different `name` than the `[sources]` key (typically a tag
+  from before the deck was renamed), **MUST** be skipped, not rejected, so it
+  cannot hide the releases after it. A tool **SHOULD** name the skipped tags when
+  no tag is left.
+- **The tag and its manifest MUST agree on the version.** If a tag's manifest
+  declares a different `version`, resolution **MUST** fail instead of locking a
+  version the vendored code contradicts.
 - **The pin is the commit.** A git candidate carries no artifact checksum; it
   records the resolved `ref` and the `commit` that ref pointed at (§11). Install
   **MUST** archive the **commit**, not the ref, so a tag moved after resolution
@@ -588,7 +616,9 @@ vendor tree (§10.1); only where its metadata and artifact come from differs.
 
 The reference implementation is `src/gitsource.j` over `src/git.j`. This path
 needs `git` on `PATH` and the `exec` capability, so it is a default `jennifer`
-binary path; a registry deck never reaches it.
+binary path. A registry version recorded as `kind = "git"` (§10) is fetched the
+same way, at its recorded commit; only a `tar.gz` registry deck installs without
+`git`.
 
 ## 11. The lockfile (`camcorder.lock`)
 
@@ -604,10 +634,10 @@ reproducible "recording" of what was installed:
       "url": "https://…/routeros-0.1.0.tar.gz",
       "kind": "tar.gz",
       "checksum": "sha256:…",
-      "engines": { "jennifer": "^0.21.0" },
+      "engines": { "jennifer": ">=0.25.0" },
       "requires": { "@jennifer/net": "^1.0.0" },
       "capabilities": ["net"],
-      "registry": "https://decks.jennifer-lang.org"
+      "registry": "https://registry.jennifer-lang.dev"
     },
     "@acme/spinner": {
       "version": "1.1.0",
@@ -615,7 +645,9 @@ reproducible "recording" of what was installed:
       "kind": "git",
       "ref": "v1.1.0",
       "commit": "152b795ddff17846fa6f13c2d1d1ddc1011318ca",
-      "engines": { "jennifer": ">=0.24.0" }
+      "engines": { "jennifer": ">=0.25.0" },
+      "requires": {},
+      "capabilities": []
     }
   }
 }
@@ -626,18 +658,19 @@ The integrity pin depends on `kind`: a `tar.gz` deck records the artifact
 two forms is present per entry.
 
 Each entry also records that version's own `requires` (a map of deck name to
-constraint), which is what lets a tool judge the lockfile **offline** (§11.1),
-and its `capabilities` (§4.2), so jvc can report what a graph will need without
-re-reading every vendored file. Both are recorded for **jvc's** use: the
-interpreter reads neither (§5).
+constraint), which lets a tool judge the lockfile **offline** (§11.1); its
+`engines` (§5.1), so the graph-wide engine gate (§10.2) runs from the lockfile
+alone (an empty object means no restriction); and its `capabilities` (§4.2), so
+jvc can report what a graph needs without re-reading every vendored file. All
+three are recorded for **jvc's** use: the interpreter reads none of them (§5.1).
 
 An entry resolved from a registry also records which registry it came from, as
-`registry`; without it the same lockfile resolves to different code on a machine
-whose `[registries]` mapping differs (§6.2), which is the exact failure a
-lockfile exists to prevent. A `git`-sourced entry has no registry and omits the
-field, its integrity resting on the commit instead. An entry written before the
-field existed carries no registry and **MUST** be accepted, since there is
-nothing to disagree with; the next advance records it.
+`registry`, whatever its `kind`; without it the same lockfile resolves to
+different code on a machine whose `[registries]` mapping differs (§6.2), which
+is what a lockfile exists to prevent. Only an entry resolved through `[sources]`
+(§6.1) has no registry and omits the field; its integrity rests on the commit.
+An entry written before the field existed carries no registry and **MUST** be
+accepted, since there is nothing to disagree with; the next advance records it.
 
 **What a client must do with that field is specified elsewhere**: recording it,
 preferring the URL a registry advertises in its discovery document over the
@@ -656,7 +689,17 @@ records:
   the lockfile whose recorded version satisfies that requirement's constraint;
   **and**
 - every locked deck's recorded `requires` names a deck in the lockfile whose
-  version satisfies it.
+  version satisfies it; **and**
+- every locked deck is reachable from those requirements through the recorded
+  `requires`, so a deck the manifest no longer needs (after a `remove`, say) is
+  pruned by a resolution rather than reinstalled; **and**
+- `[sources]` agrees with where each deck was locked from: a deck with a
+  `[sources]` entry is locked as a `git` deck from exactly that URL, and a deck
+  locked from a `[sources]` git remote (a `git` entry with no `registry`) still
+  has its `[sources]` entry.
+
+A lockfile recording no decks covers a manifest with no requirements, and no
+other.
 
 A covering lockfile **MUST** be installed as recorded. A lockfile that does not
 cover the manifest is **stale** - the manifest changed, or a dependency's needs
@@ -668,151 +711,73 @@ degrades to verifying the roots only.
 
 ### 11.2 Advancing the lockfile
 
-`jvc update` is the deliberate counterpart to install: it ignores the lockfile,
-resolves within the manifest's constraints, installs, and rewrites the lockfile.
-Given one or more deck names it **SHOULD** advance only those, pinning every
-other locked deck to its recorded version, so a single dependency can move
-without disturbing the rest of the graph.
-
-Each deck entry records its `[engines]` allowlist (§5) so that the graph-wide
-install gate (§10.2) and the staleness judgement (§11.1) can both be made from
-the lockfile alone, without re-fetching a single version record. An empty
-`engines` object means no restriction.
-
-**It is recorded for jvc, not for the interpreter.** `camcorder.lock` is jvc's
-own reproducibility and integrity artifact; no interpreter is required to read
-it, and the reference interpreter deliberately does not. A deck's engine
-requirement binds at run time through its source files' pragma headers (§5), a
-mechanism that belongs to no package manager.
+`jvc update` ignores the lockfile, resolves within the manifest's constraints,
+installs, and rewrites the lockfile. Given one or more deck names it **SHOULD**
+advance only those, pinning every other locked deck to its recorded version, so
+a single dependency can move without disturbing the rest of the graph.
 
 ## 12. Parsing and validation
 
 - Parsing is **lenient**: unknown/extra keys are ignored, and any absent field
-  or section takes its default. A parse fails only on malformed TOML/YAML/JSON or
-  a field of the wrong scalar type (e.g. a non-string dependency value).
+  or section takes its default. A parse fails only on malformed TOML/YAML/JSON;
+  on a field of the wrong type, whether a wrong scalar (a non-string dependency
+  value, an unquoted `1.10` read as a number) or an array or table where a
+  string belongs (an array for `bin`, §14.1); or on two keys in one deck-name
+  table or in `[registries]` that fold to the same name (§5, §6.2).
 - A tool that **publishes** a deck **SHOULD** additionally enforce: a non-empty
-  `name` matching §7 and a valid SemVer `version`. jvc rejects an invalid deck
-  name and an unregistered scope on publish.
+  `name` matching §7 and a valid SemVer `version`. jvc refuses an invalid or
+  unscoped name, an unscoped dependency, an invalid version, a missing
+  `urls.deck` and a missing entrypoint; whether the publisher may use the scope
+  is the registry's check.
 - On publish, the deck's `[decks]` and `[engines]` are recorded with the version
   in the registry (as `requires` and `engines`, §10). `jvc publish` derives both
   from the manifest; the low-level `deckadmin add` accepts them as `--requires`
   and `--engines` (see the registry project).
 
-## 13. Complete example
+## 13. Publishing
 
-### TOML (`deck.toml`)
+What a deck's release must satisfy before a tool publishes it.
 
-```toml
-[package]
-name = "jvc"
-version = "0.1.0"
-description = "the jennifer deck manager - CLI and deck repository"
-license = "LGPL-3.0-only"
-authors = ["edv@gmi.eu"]
-keywords = ["package-manager", "decks", "jennifer"]
-
-[package.urls]
-deck = "https://reg.example/jvc"
-homepage = "https://github.com/mplx/jennifer-lang"
-manual = "https://mplx.github.io/jennifer-lang/"
-
-[engines]
-jennifer = "^0.21.0"
-
-[decks]
-"@jennifer/routeros" = "^0.1.0"
-
-[dev-decks]
-"@acme/testkit" = "^1.0.0"
-
-[conflicts]
-"@old/jvc" = "<1.0.0"
-```
-
-### JSON (`deck.json`)
-
-```json
-{
-  "package": {
-    "name": "jvc",
-    "version": "0.1.0",
-    "description": "the jennifer deck manager - CLI and deck repository",
-    "license": "LGPL-3.0-only",
-    "urls": {
-      "deck": "https://reg.example/jvc",
-      "homepage": "https://github.com/mplx/jennifer-lang",
-      "manual": "https://mplx.github.io/jennifer-lang/"
-    },
-    "authors": ["edv@gmi.eu"],
-    "keywords": ["package-manager", "decks", "jennifer"]
-  },
-  "engines": { "jennifer": "^0.21.0" },
-  "decks": { "@jennifer/routeros": "^0.1.0" },
-  "dev-decks": { "@acme/testkit": "^1.0.0" },
-  "conflicts": { "@old/jvc": "<1.0.0" }
-}
-```
-
-### YAML (`deck.yaml` / `deck.yml`)
-
-```yaml
-package:
-  name: jvc
-  version: "0.1.0"
-  description: the jennifer deck manager - CLI and deck repository
-  license: LGPL-3.0-only
-  urls:
-    deck: https://reg.example/jvc
-    homepage: https://github.com/mplx/jennifer-lang
-    manual: https://mplx.github.io/jennifer-lang/
-  authors: [edv@gmi.eu]
-  keywords: [package-manager, decks, jennifer]
-engines:
-  jennifer: "^0.21.0"
-decks:
-  "@jennifer/routeros": "^0.1.0"
-dev-decks:
-  "@acme/testkit": "^1.0.0"
-conflicts:
-  "@old/jvc": "<1.0.0"
-```
-
-All three documents are equivalent and round-trip through jvc unchanged.
-
-### 12.1 Where a deck's tests live
+### 13.1 Where a deck's tests live
 
 A deck's white-box test overlays **MUST** be co-located with the modules they
-test, as `src/MODULE_test.j`. This is not a style preference: `jennifer test`
-resolves the module under test by stripping `_test` from the overlay's **own
-path**, so an overlay in a separate `tests/` directory would look for a module
-beside itself and fail. Co-location is also what gives an overlay access to the
-module's private names.
+test, as `src/MODULE_test.j`: `jennifer test` resolves the module under test by
+stripping `_test` from the overlay's **own path**, so an overlay in a separate
+`tests/` directory would look for a module beside itself and fail. Co-location
+is also what gives an overlay access to the module's private names.
 
 A deck **MAY** additionally keep black-box tests in a `tests/` directory, which
 exercise only the public surface by importing the deck as a consumer would.
 Those are ordinary programs, not overlays, and are not subject to the
 one-per-module rule.
 
-## 13.1 Publishing requirements
+**An included file is not a module.** A file another `src/` file `include`s,
+or one named `NAME.inc.j`, is spliced into its includer and is meaningless
+alone: its calls into the includer read as undefined. It is linted and tested
+through the includer, needs no overlay of its own, and an overlay that is
+itself included (a topic's tests spliced into the module's overlay) **MUST
+NOT** be run alone.
+
+### 13.2 Publishing requirements
 
 A tool that publishes a deck **MUST** refuse one that fails any of these, so the
 registry's contents can be relied on:
 
-- **Lint.** `jennifer lint` over the deck's `src/` **MUST** exit zero. Advisory
-  `info` findings do not block; a warning or error does.
-- **Test overlays.** Every module under `src/` **MUST** have a co-located
-  `MODULE_test.j`, and every overlay **MUST** pass. A module with no overlay is a
-  failure, not an omission.
-- **Docblocks.** No `warning` or `error` diagnostic from the `docblock` module.
+- **Lint.** `jennifer lint` over the deck's modules and their overlays **MUST**
+  exit zero. Advisory `info` findings do not block; a warning or error does.
+- **Test overlays.** Every module under `src/` (§13.1: not an included file)
+  **MUST** have a co-located `MODULE_test.j`, and every overlay **MUST** pass. A
+  module with no overlay is a failure, not an omission.
+- **Docblocks.** No `warning` or `error` diagnostic from the `docblock` module,
+  in any `src/` file, included files too.
 - **Capabilities.** The manifest's `capabilities` **MUST** cover what `src/`
   declares by pragma (§4.2).
 
 A tool **MAY** offer an explicit bypass, and **MUST** then say in its output that
 the checks were skipped.
 
-A formatter (`jennifer fmt`) is **not** part of this gate. The gate asks
-whether a deck is correct, and formatting is not correctness; the line-width
-rule that does matter is already enforced by the linter.
+A formatter (`jennifer fmt`) is **not** part of this gate: formatting is not
+correctness, and line width is an advisory lint `info` finding.
 
 ## 14. Frames and the `template/` directory
 
@@ -827,24 +792,35 @@ Three shapes, distinguished by how they are distributed:
 | Shape | What it is | Distributed as | Repo naming |
 | ----- | ---------- | -------------- | ----------- |
 | **deck** | imported, vendored library or framework; never run | vendored into `vendor/` | `deck-` (official) / `jennifer-` (community) |
-| **app** | installed and run; owns a `main.j` | release binary | plain name, **no** `deck-` prefix |
+| **app** | installed and run; owns a shebang entry script (`[package] bin`, else the root file named after the app) | installed from git by `jvc app install` | plain name, **no** `deck-` prefix |
 | **frame** | a per-project app skeleton over an engine deck | produced by `jvc new --from` | the user's own |
 
-### 14.0 A deck that ships a command
+### 14.1 A deck that ships a command
 
 A deck **MAY** declare `[package] bin`, an entry script it exposes as a command.
 When such a deck is vendored into a project, a tool **SHOULD** additionally write
 that command into the project's command directory (`[package] bin-dir`, default
-`bin/`).
+`bin`).
 
 - `bin` is relative to the deck root and **MUST** point inside `src/`, since only
-  `src/` is vendored; a command outside it is unreachable from a consumer.
+  `src/` is vendored; a command outside it is unreachable from a consumer. It
+  **MUST NOT** contain a `..`, `.` or empty segment, and a tool **MUST** refuse
+  one that does rather than resolve it.
+- `bin-dir` **MUST** be a relative path inside the project: not absolute, no
+  backslash, and no `..`, `.` or empty segment (so `bin`, not `bin/` or
+  `./bin`). It comes from a manifest a user may have cloned, and a tool links
+  commands into it during an install that otherwise runs no code, so it must not
+  be able to name `~/.local/bin` or any other directory on `PATH`.
+- Every path a tool takes from a deck's archive (a `src/` entry, a template
+  file) is subject to the same segment rule, **whatever the path would clean
+  to**: an entry named `a/b/src/../../../../x` cleans to something harmless and
+  still escapes once the part before `src/` is stripped.
 - The written command **SHOULD** be relocatable, addressing its target relative
   to itself, so it survives the project being moved or cloned.
 - A tool **MUST NOT** overwrite a file in the command directory that it did not
   itself write.
 
-This is distinct from installing an *app* (§14.1): a deck's command is a
+This is distinct from installing an *app* (§14.2): a deck's command is a
 dependency, declared in the manifest and pinned in the lockfile, and is therefore
 reproduced by a fresh checkout plus an install.
 
@@ -854,41 +830,38 @@ where `bin` is expected is a field of the wrong type and **MUST** fail the parse
 (§12). A package that needs several verbs implements them as **subcommands** of
 its one command.
 
-This is a deliberate limit, not an oversight, and the reason is that the two
-namespaces are not the same shape. A deck name is scoped and cannot collide:
-`@acme/tool` is unique by construction, and §7 makes that a grammar rule. A
-command name is a **flat global**, shared with every other program on `PATH`, and
-nothing arbitrates it. One command per package keeps the mapping mechanical - the
-command is named for the package - so an install has exactly one name that can
-conflict, and one conflict to report. Several commands means several chances to
-collide with something already installed, discovered one at a time.
+The reason is that the two namespaces differ. A deck name is scoped and cannot
+collide: `@acme/tool` is unique by construction, and §7 makes that a grammar
+rule. A command name is a **flat global**, shared with every other program on
+`PATH`, and nothing arbitrates it. One command per package keeps the mapping
+mechanical (the command is named for the package), so an install has one name
+that can conflict and one conflict to report. Several commands mean several
+chances to collide with something already installed, discovered one at a time.
 
-That difference is also what would turn installing into a transaction it is not
-equipped to be. The rule above, and its counterpart in §14.1, forbid overwriting
-a command the tool did not itself create. With one command that refusal fails the
+Several commands would also make an install a transaction. The rule above, and
+its counterpart in §14.2, forbid overwriting a command the tool did not itself
+create. With one command that refusal fails the
 whole install cleanly, and the tree is unchanged. With several, the same rule
 produces a **partial install**: some commands written, one refused, and a tool
 that now owes a rollback it has no record to perform. Update and uninstall
 inherit the problem in reverse, and an update that *drops* a command has to
 delete a file from `PATH`, which is the operation least forgiving of a mistake.
 
-Three further consequences are worth having on purpose:
+One command per package also means:
 
 - **Versions are per package.** Commands shipped together upgrade together. If
-  that is acceptable, they are one program, which is exactly what subcommands
-  say; if it is not, they were two packages.
+  that is acceptable, they are one program, which is what subcommands say; if it
+  is not, they were two packages.
 - **`PATH` enumerates nothing.** `<command> help` lists subcommands, so one
   command is a discovery surface for all of them; a second binary is findable
   only by already knowing its name. One command is also one completion script.
 - **One entry means one dispatch table**, so argument parsing, `--help`, and
   version reporting are written once and behave the same for every verb.
 
-**What this rule does not cover.** Two programs with genuinely different
-lifecycles - a daemon and the operator client that administers it - are **two
-apps** (§14.1), not one app with two binaries. They are installed, updated, and
-removed independently, which is the property that made them two programs in the
-first place. The price is that each carries its dependencies privately, in its
-own vendor tree, and that price is accepted.
+**What this rule does not cover.** Two programs with different lifecycles (a
+daemon and the operator client that administers it) are **two apps** (§14.2),
+not one app with two binaries. They are installed, updated and removed
+independently, and each carries its dependencies in its own vendor tree.
 
 The one requirement subcommands cannot meet is an **exec-by-name contract**: a
 program that some other tool invokes under a fixed filename (a `git-<verb>`
@@ -897,12 +870,10 @@ extension, an askpass helper, an `EDITOR`) has to exist under that exact name on
 must be installed by hand.
 
 If it is ever specified, the additive form is a list of **further names for the
-same entry script**, dispatched on `argv[0]` - which preserves one program, one
-version, and one thing to roll back, and is a different feature from shipping
-several programs. It is deliberately left unspecified until a real case asks for
-it, so that "several binaries" does not arrive through the side door.
+same entry script**, dispatched on `argv[0]`: one program, one version, one
+thing to roll back. It is left unspecified until a real case asks for it.
 
-### 14.1 Installing an app
+### 14.2 Installing an app
 
 An app is installed **per user, onto `PATH`**, not vendored into a project.
 
@@ -911,15 +882,26 @@ An app is installed **per user, onto `PATH`**, not vendored into a project.
 - An installer **SHOULD** offer a **scope**: at least `user` (the default, per
   user), `system` (every user, under a prefix such as `/usr/local`), and an
   explicit directory. A `project` scope, installing beside one project, **MAY**
-  also be offered, but §14.0 is the reproducible way to put a command in a
+  also be offered, but §14.1 is the reproducible way to put a command in a
   project.
 - A privileged scope **MUST** be checked by probing writability, not by
   inspecting the user id, and a tool **MUST NOT** attempt to elevate itself.
-- Its **name MUST be unscoped** (§7); a scoped name is a deck and **MUST** be
-  refused as an app.
+- Its **command name is unscoped**. An app's own name is one path segment of
+  ASCII letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, at most
+  255 characters, and not `installed.json` in any case (the installer's record
+  shares the directory). A scoped deck installed as an app (a `[package] bin`
+  deck, §14.1) takes the deck half of its name, since `@scope/deck` is neither a
+  directory nor something a shell can invoke. Two sources yielding the same
+  command name **MUST** be refused rather than one replacing the other.
 - The entry script is `[package] bin` when declared, else the repository-root
   file named after the app. It **MUST** carry a `#!` line, since it is executed
-  directly.
+  directly. A `#!` line that names `jennifer` (or `jennifer-tiny`) **MUST**
+  hand it the `run` subcommand, either as the interpreter's one argument
+  (`#!/usr/bin/jennifer run`) or through `env -S`
+  (`#!/usr/bin/env -S jennifer run`), and an installer **MUST** refuse one that
+  does not: `#!/usr/bin/env jennifer` starts the interpreter without a
+  subcommand, and `#!/usr/bin/env jennifer run` asks `env` for a program named
+  `jennifer run`. A line naming any other interpreter is not checked.
 - Versions are the repository's SemVer tags (§10.5). A repository with no
   version tags **MAY** be installed at its default branch head, but an explicit
   version constraint against such a repository **MUST** then be an error rather
@@ -929,7 +911,7 @@ An app is installed **per user, onto `PATH`**, not vendored into a project.
 - A tool **MUST NOT** overwrite or remove a file in the command directory that it
   did not itself create.
 
-### 14.2 The template
+### 14.3 The template
 
 A deck **MAY** ship a `template/` directory in its release. When present, its
 contents are the frame `jvc new` stamps; when absent, jvc **SHOULD** fall back to
@@ -948,15 +930,100 @@ a minimal built-in frame so `jvc new` works against any deck.
   **MUST** be copied byte for byte.
 - If `template/deck.toml` is present it is the base for the frame's manifest,
   with the engine requirement added on top; otherwise a minimal manifest is
-  generated. Either way the engine is pinned to `^<resolved version>`.
+  generated. Either way the engine is pinned to `^<resolved version>`, or
+`=<resolved version>` when the engine is a prerelease. A
+  template's `[registries]` and `[sources]` tables **MUST** be dropped: where
+  the frame's decks come from is its owner's decision, not the engine deck's.
 
-### 14.3 The web-root rule
+### 14.4 The web-root rule
 
 A scaffold template **MUST** bake in this rule: the project directory is
 **never** the web root. Only the build output or a scoped assets directory
 (`public/`) is web-facing; `main.j`, `config.toml`, and `vendor/` sit above it
 and **MUST** stay unreachable over HTTP. Serving a project root would expose the
-manifest, the engine source, and any secrets beside them - a known real-world
-footgun. A template **SHOULD** therefore build into (or serve only from)
-`public/`, keep secrets in the environment rather than in committed config, and
-gitignore `vendor/`, the build output, and `.env`.
+manifest, the engine source, and any secrets beside them. A template **SHOULD**
+therefore build into (or serve only from) `public/`, keep secrets in the
+environment rather than in committed config, and gitignore `vendor/`, the build
+output, and `.env`.
+
+## 15. Complete example
+
+### TOML (`deck.toml`)
+
+```toml
+[package]
+name = "@acme/tool"
+version = "0.1.0"
+description = "an example deck"
+license = "MIT"
+authors = ["Acme <dev@acme.example>"]
+keywords = ["example", "routeros"]
+capabilities = ["net"]
+
+[package.urls]
+deck = "https://git.acme.example/acme/tool/raw/main/deck.toml"
+homepage = "https://acme.example/tool"
+
+[engines]
+jennifer = ">=0.25.0"
+
+[decks]
+"@jennifer/routeros" = "^0.1.0"
+
+[dev-decks]
+"@acme/testkit" = "^1.0.0"
+
+[conflicts]
+"@old/tool" = "<1.0.0"
+```
+
+### JSON (`deck.json`)
+
+```json
+{
+  "package": {
+    "name": "@acme/tool",
+    "version": "0.1.0",
+    "description": "an example deck",
+    "license": "MIT",
+    "urls": {
+      "deck": "https://git.acme.example/acme/tool/raw/main/deck.toml",
+      "homepage": "https://acme.example/tool"
+    },
+    "authors": ["Acme <dev@acme.example>"],
+    "keywords": ["example", "routeros"],
+    "capabilities": ["net"]
+  },
+  "engines": { "jennifer": ">=0.25.0" },
+  "decks": { "@jennifer/routeros": "^0.1.0" },
+  "dev-decks": { "@acme/testkit": "^1.0.0" },
+  "conflicts": { "@old/tool": "<1.0.0" }
+}
+```
+
+### YAML (`deck.yaml` / `deck.yml`)
+
+```yaml
+package:
+  name: "@acme/tool"
+  version: "0.1.0"
+  description: an example deck
+  license: MIT
+  urls:
+    deck: https://git.acme.example/acme/tool/raw/main/deck.toml
+    homepage: https://acme.example/tool
+  authors: ["Acme <dev@acme.example>"]
+  keywords: [example, routeros]
+  capabilities: [net]
+engines:
+  jennifer: ">=0.25.0"
+decks:
+  "@jennifer/routeros": "^0.1.0"
+dev-decks:
+  "@acme/testkit": "^1.0.0"
+conflicts:
+  "@old/tool": "<1.0.0"
+```
+
+All three documents are equivalent: each parses to the same model, and a tool
+that rewrites one writes that model back (§2).

@@ -5,7 +5,8 @@
 #
 #   jvc-<version>.tar.gz          the runtime tree, unpack and run
 #   jvc_<version>_all.deb         Debian / Ubuntu
-#   jvc-<version>-1-any.pkg.tar.zst   Arch
+#   jvc-<pkgver>-1-any.pkg.tar.zst    Arch (<pkgver> is <version>
+#                                     without its `-`, see the PKGBUILD)
 #
 # jvc is architecture-independent Jennifer source, so there is no build
 # matrix: one tarball and one package of each kind serve every platform
@@ -20,13 +21,21 @@ name: release
 on:
   push:
     tags:
-      # Bare-version tags like `0.1.0` (no `v` prefix), matching the
-      # interpreter's convention and jvc's own SemVer validation, which
-      # rejects a leading `v`.
+      # Bare-version tags like `0.1.0` (no `v` prefix), as the interpreter
+      # tags and as SemVer validation requires. A prerelease such as
+      # `0.2.0-rc.1` matches too: the tarball keeps the tag as it is, the
+      # .deb spells it `0.2.0~rc.1` and the Arch package `0.2.0rc.1`, so
+      # each package manager sorts it before `0.2.0`, and the GitHub
+      # Release is flagged as a pre-release. The tag must equal both
+      # `VERSION` in src/cli.j (what `jvc version` prints) and `version`
+      # in deck.toml; the linux job checks this before building.
       - '[0-9]*.[0-9]*.[0-9]*'
 
+# Read-only by default. Only the publish job, which creates the Release,
+# is granted write access, so the jobs that run the test suite and the
+# build scripts never hold a token that can rewrite the repository.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   gate:
@@ -42,6 +51,18 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Check the tag against VERSION and deck.toml
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          code="$(sed -n 's/^def const VERSION as string init "\(.*\)";$/\1/p' src/cli.j)"
+          manifest="$(sed -n 's/^version = "\(.*\)"$/\1/p' deck.toml | head -n 1)"
+          echo "tag $tag, src/cli.j VERSION $code, deck.toml version $manifest"
+          if [ "$tag" != "$code" ] || [ "$tag" != "$manifest" ]; then
+              echo "the tag, src/cli.j VERSION and deck.toml version must agree" >&2
+              exit 1
+          fi
 
       - name: Build the tarball and the .deb
         run: |
@@ -91,25 +112,26 @@ jobs:
 
           mkdir -p build
           # Stamp the tag and the real checksum into the PKGBUILD. The
-          # result is published as a release asset so an AUR maintainer
-          # (and `publish.sh`) can take a ready-to-commit file rather than
-          # rerunning updpkgsums by hand.
-          sed -e "s/^pkgver=.*/pkgver=$version/" \
+          # result is published as a release asset, so an AUR maintainer
+          # can commit it without rerunning updpkgsums.
+          # pacman's pkgver cannot hold a `-`; see the PKGBUILD for why a
+          # prerelease drops it (0.2.0-rc.1 -> 0.2.0rc.1).
+          pkgver="$(printf '%s\n' "$version" | sed 's/-//g')"
+          sed -e "s/^_tag=.*/_tag=$version/" \
+              -e "s/^pkgver=.*/pkgver=$pkgver/" \
               -e "s/^sha256sums=.*/sha256sums=('$sum')/" \
               packaging/archlinux/PKGBUILD > build/PKGBUILD
           # makepkg finds the source in the build directory and skips the
-          # download, which is what lets this job package the exact bytes
-          # the release ships rather than fetching a copy that does not
-          # exist yet.
+          # download, so the package holds the exact bytes the release
+          # ships.
           cp "release/jvc-$version.tar.gz" build/
 
           # makepkg refuses to run as root, and the container is root.
           useradd -m builder
           chown -R builder build
-          # --nodeps because the dependency (`jennifer`) is not in any Arch
-          # repository yet, and --nocheck because the release tarball
-          # deliberately excludes the test overlays: the suite already ran
-          # in the gate job, against a real interpreter.
+          # --nodeps because `jennifer` is not in any Arch repository yet;
+          # --nocheck because the release tarball excludes the test
+          # overlays, and the suite already ran in the gate job.
           sudo -u builder bash -c "cd '$GITHUB_WORKSPACE/build' && makepkg --nodeps --nocheck"
 
           mkdir -p out
@@ -129,6 +151,8 @@ jobs:
     name: Publish the release
     needs: [linux, arch]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Collect the artifacts
         uses: actions/download-artifact@v8
@@ -139,7 +163,10 @@ jobs:
       - name: Decide whether this is a pre-release
         id: prerel
         run: |
+          # A SemVer prerelease (`1.2.0-rc.1`) is a pre-release whatever
+          # its major version, and so is everything before 1.0.0.
           case "${GITHUB_REF_NAME}" in
+              *-*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
               0.*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
               *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
           esac
@@ -148,12 +175,17 @@ jobs:
         run: |
           set -eu
           version="${GITHUB_REF_NAME}"
+          # The Arch package carries pacman's spelling of the version.
+          pkgver="$(printf '%s\n' "$version" | sed 's/-//g')"
           cat > release_notes.md <<EOF
           jvc $version, the deck manager for the Jennifer programming language.
 
-          jvc needs the \`jennifer\` interpreter; every package declares the
-          floor its \`[engines]\` table sets, and the interpreter enforces the
-          same floor at read time.
+          jvc needs the \`jennifer\` interpreter at the floor its \`[engines]\`
+          table sets. The .deb declares that floor as a dependency; the Arch
+          packages cannot (the interpreter packages provide an unversioned
+          \`jennifer\`), so they depend on it bare. Either way the interpreter
+          enforces the floor at read time, from each source file's version
+          pragma.
 
           ### Install
 
@@ -166,14 +198,15 @@ jobs:
           Arch:
 
           \`\`\`sh
-          sudo pacman -U jvc-${version}-1-any.pkg.tar.zst
+          sudo pacman -U jvc-${pkgver}-1-any.pkg.tar.zst
           \`\`\`
 
           Anywhere else, unpack and put the launcher on PATH:
 
           \`\`\`sh
           tar xzf jvc-${version}.tar.gz
-          ./jvc-${version}/bin/jvc version
+          ln -s "\$PWD/jvc-${version}/bin/jvc" ~/.local/bin/jvc
+          jvc version
           \`\`\`
 
           Every artifact ships a sidecar \`.sha256\`. The tarball is
@@ -185,9 +218,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           draft: false
-          # Pre-1.0.0 tags are flagged as pre-releases, matching the
-          # interpreter's pipeline and jvc's own "the format stabilises
-          # with the tool" rule.
+          # Pre-1.0.0 and SemVer prerelease tags are flagged as
+          # pre-releases, matching the interpreter's pipeline and jvc's own
+          # "the format stabilises with the tool" rule.
           prerelease: ${{ steps.prerel.outputs.prerelease }}
           generate_release_notes: false
           body_path: release_notes.md

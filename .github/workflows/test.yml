@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
 #
-# PR gate: run every module's test overlay and the linter against an
-# interpreter built from the tip of the jennifer repository.
+# PR gate: run every module's test overlay and the linter against two
+# interpreters.
 #
-# There is no released interpreter to install from a package repository
-# yet, so CI builds one. That is not a workaround: jvc is the client half
-# of a language that is still moving, and building against its tip is how
-# a break shows up here rather than in somebody's install. It is also the
-# mirror image of the M26.3 release gate, where jennifer's own CI runs
-# this suite against a release candidate before it tags.
+# - `release`: the 0.25.0 release tarball, the floor `[engines]` and every
+#   pragma declare. A release build enforces those floors, so this job is the
+#   one that proves jvc loads on the oldest interpreter it claims to support.
+# - `tip`: built from the tip of the jennifer repository. A `-dev` build skips
+#   every version floor, but it shows a language change breaking jvc here
+#   rather than in somebody's install. It mirrors the M26.3 release gate,
+#   where jennifer's own CI runs this suite against a release candidate.
 
 name: test
 
@@ -22,7 +23,7 @@ on:
   # being published rather than being noticed afterwards.
   workflow_call:
 
-# A second push supersedes the first: these jobs build an interpreter from
+# A second push supersedes the first: the tip job builds an interpreter from
 # source, so a superseded run is a minute of runner time for an answer nobody
 # will read. Not applied to `release.yml`, where a superseded tag build would
 # leave a release half-published.
@@ -35,23 +36,42 @@ permissions:
 
 jobs:
   test:
-    name: jennifer test + lint
+    name: jennifer test + lint (${{ matrix.interpreter }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        interpreter: [release, tip]
     env:
-      # The bundled modules jvc imports by bare name (http.j, semver.j, ...)
-      # live in the interpreter checkout, not at the FHS location a package
-      # would have installed them to.
-      JENNIFER_SYSMODDIR: ${{ github.workspace }}/.interpreter/modules
+      # Bump together with `[engines]` and the pragmas.
+      JENNIFER_RELEASE: 0.25.0
       # `verify.j` shells out to an interpreter to lint and test the deck it is
-      # checking, and takes `jennifer` from PATH unless told otherwise. This job
-      # builds one into the runner temp and never puts it on PATH, so without
-      # this the verify overlays fail with "executable file not found".
+      # checking, and takes `jennifer` from PATH unless told otherwise. Neither
+      # job puts its interpreter on PATH, so without this the verify overlays
+      # fail with "executable file not found".
       JVC_JENNIFER: ${{ runner.temp }}/jennifer
     steps:
       - name: Checkout jvc
         uses: actions/checkout@v7
 
+      - name: Install the release interpreter
+        if: matrix.interpreter == 'release'
+        run: |
+          set -eu
+          stage="jennifer-${JENNIFER_RELEASE}-linux-amd64"
+          base="https://github.com/jennifer-language/jennifer/releases/download/${JENNIFER_RELEASE}"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "$base/$stage.tar.gz"
+          curl -fsSLO "$base/$stage.tar.gz.sha256"
+          sha256sum -c "$stage.tar.gz.sha256"
+          tar xzf "$stage.tar.gz"
+          install -m755 "$stage/jennifer" "$RUNNER_TEMP/jennifer"
+          # The bundled modules jvc imports by bare name (http.j, semver.j, ...)
+          # sit in the tarball, not at the FHS location a package installs to.
+          echo "JENNIFER_SYSMODDIR=$RUNNER_TEMP/$stage/share/jennifer/modules" >> "$GITHUB_ENV"
+
       - name: Checkout the interpreter
+        if: matrix.interpreter == 'tip'
         uses: actions/checkout@v7
         with:
           repository: jennifer-language/jennifer
@@ -61,22 +81,21 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
+        if: matrix.interpreter == 'tip'
         uses: actions/setup-go@v6
         with:
           go-version-file: .interpreter/go.mod
           cache-dependency-path: .interpreter/go.sum
 
       - name: Build the interpreter
+        if: matrix.interpreter == 'tip'
         working-directory: .interpreter
-        run: go build -o "$RUNNER_TEMP/jennifer" ./cmd/jennifer
+        run: |
+          go build -o "$RUNNER_TEMP/jennifer" ./cmd/jennifer
+          echo "JENNIFER_SYSMODDIR=$GITHUB_WORKSPACE/.interpreter/modules" >> "$GITHUB_ENV"
 
       - name: Report what we are testing against
-        run: |
-          "$RUNNER_TEMP/jennifer" --version
-          # A build from the tip reports a `-dev` version, and a -dev build
-          # bypasses every version floor, so jvc's own `>=0.25.0` pragma does
-          # not gate this run. The day the interpreter cuts a release that
-          # jvc's floor excludes, this step is where it becomes visible.
+        run: '"$RUNNER_TEMP/jennifer" --version'
 
       - name: Run every module's overlay
         run: |
@@ -125,8 +144,10 @@ jobs:
         # A repo convention, and the kind of thing that is invisible in
         # review and trivial for a machine.
         run: |
+          # The whole tree, not a list of extensions. JENNIFER.md is the
+          # interpreter's reference, copied in, and not ours to restyle.
           if grep -rInP '\xe2\x80\x93|\xe2\x80\x94' \
-                  --include='*.j' --include='*.md' --include='PKGBUILD*' \
+                  --exclude-dir=.git --exclude-dir=.interpreter \
                   --exclude=JENNIFER.md . ; then
               echo "::error::em-dash or en-dash found (repo convention forbids both)"
               exit 1

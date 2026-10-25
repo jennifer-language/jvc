@@ -10,36 +10,29 @@
 #     /usr/share/fish/vendor_completions.d/jvc.fish
 #     ~/.config/fish/completions/jvc.fish
 #
-# Nothing here runs jvc. Completing a deck name would otherwise start an
-# interpreter on every Tab, so the manifest and the lockfile are read directly:
-# a wrong guess costs a keystroke, a slow one costs the habit.
+# Nothing here runs jvc, so Tab never starts an interpreter: the manifest and
+# the lockfile are read directly.
 
 # --- reading the project -----------------------------------------------------
 
-# __jvc_manifest walks up from the current directory to the manifest jvc would
-# use, matching how the CLI locates one. Prints nothing when there is none.
+# __jvc_manifest prints the manifest in the current directory (deck.toml,
+# deck.yaml, deck.yml or deck.json), or nothing. Like jvc, it does not look in
+# parent directories.
 function __jvc_manifest
-    set -l dir $PWD
-    while test -n "$dir"
-        for name in deck.toml deck.yaml deck.yml deck.json
-            if test -f "$dir/$name"
-                echo "$dir/$name"
-                return 0
-            end
+    for name in deck.toml deck.yaml deck.yml deck.json
+        if test -f "$PWD/$name"
+            echo "$PWD/$name"
+            return 0
         end
-        test "$dir" = /; and break
-        set dir (string replace -r '/[^/]*$' '' -- $dir)
-        test -z "$dir"; and set dir /
     end
     return 1
 end
 
 # __jvc_table prints the keys of one manifest table.
 #
-# The TOML header is matched with its closing bracket rather than as a prefix,
-# which is not fussiness: an unanchored `[decks` also matches `[dev-decks]`, so
-# the two tables would bleed into each other. The JSON arm assumes the
-# pretty-printed form jvc writes, one key per line.
+# The TOML header is matched with its closing bracket: as a prefix, `[decks`
+# would also match `[dev-decks]`. The JSON arm assumes the pretty-printed form
+# jvc writes, one key per line.
 function __jvc_table --argument-names file table
     test -f "$file"; or return 0
     set -l inside 0
@@ -73,8 +66,7 @@ function __jvc_decks
     end | sort -u
 end
 
-# __jvc_self prints this project's own deck name, which is the one `yank` is
-# almost always about.
+# __jvc_self prints this project's own deck name, the usual target of `yank`.
 function __jvc_self
     set -l m (__jvc_manifest); or return 0
     for line in (cat $m)
@@ -86,8 +78,8 @@ function __jvc_self
     end
 end
 
-# __jvc_locked prints the decks camcorder.lock pins, which is what `update`
-# actually operates on, transitive ones included.
+# __jvc_locked prints the decks camcorder.lock pins, transitive ones included:
+# what `update` operates on.
 #
 # The names are the keys at exactly one level inside "decks", which the pretty
 # printer puts at four spaces. Matching any `"key": {` instead would also return
@@ -102,12 +94,9 @@ function __jvc_locked
     end
 end
 
-# __jvc_scopes prints the mapping keys `jvc registry` accepts: the scopes this
-# project already depends on, whatever the manifest maps today, and the
-# catch-all. Everything is normalised to the wildcard form the manifest actually
-# stores, so a scope is offered once rather than as two spellings of the same
-# key. `jvc registry` accepts the bare scope too, but completing to the canonical
-# form means what lands in the manifest is what was on screen.
+# __jvc_scopes prints the mapping keys `jvc registry` accepts (mapped scopes,
+# depended-on scopes, and `*`), in the `@scope/*` form the manifest stores, so
+# each appears once.
 function __jvc_scopes
     set -l m (__jvc_manifest)
     if test -z "$m"
@@ -121,8 +110,8 @@ function __jvc_scopes
     end | string replace -r '^(@[^/]+)$' '$1/*' | sort -u
 end
 
-# __jvc_scopenames prints bare scopes, which is what `claim` and `owners` take:
-# a scope name there, not a mapping key, so no wildcard and no catch-all.
+# __jvc_scopenames prints bare scopes for `claim` and `owners`: no wildcard,
+# no catch-all.
 function __jvc_scopenames
     __jvc_decks | string replace -r -f '^@([^/]+)/.*' '$1' | sort -u
 end
@@ -155,8 +144,8 @@ end
 
 # --- reading the command line ------------------------------------------------
 
-# __jvc_positionals prints the words that are neither a flag nor a flag's value,
-# so the verb and its arguments can be told apart from the options around them.
+# __jvc_positionals prints the words that are neither a flag nor a flag's
+# value: the verb and its arguments.
 function __jvc_positionals
     set -l toks (commandline -poc)
     test (count $toks) -gt 1; or return 0
@@ -167,8 +156,8 @@ function __jvc_positionals
             continue
         end
         switch $w
-            case --registry --manifest --from --version --source --url --out \
-                --prefix --scope --repository --tag --remote
+            case --registry --from --version --source --url --out \
+                --scope --repository --tag --remote
                 set skip 1
             case '-*'
                 # a flag that takes no value
@@ -208,7 +197,7 @@ end
 # jvc takes no filenames of its own; the options that do say so with -F.
 complete -c jvc -f
 
-complete -c jvc -n __jvc_needs_verb -a init -d 'create deck.toml'
+complete -c jvc -n __jvc_needs_verb -a init -d 'create deck.toml (and a deck skeleton for @scope/deck)'
 complete -c jvc -n __jvc_needs_verb -a add -d 'add a requirement'
 complete -c jvc -n __jvc_needs_verb -a remove -d 'remove a requirement'
 complete -c jvc -n __jvc_needs_verb -a list -d 'show the manifest'
@@ -235,9 +224,12 @@ complete -c jvc -n __jvc_needs_verb -a logout -d 'discard the token held for it'
 complete -c jvc -n __jvc_needs_verb -a version -d 'print the jvc version'
 complete -c jvc -n __jvc_needs_verb -a help -d 'show the usage summary'
 
-# Options every verb accepts.
-complete -c jvc -l registry -r -f -a '(__jvc_registries)' -d 'repository URL'
-complete -c jvc -l manifest -r -F -d 'manifest file to use'
+# --registry, only on the verbs that talk to a repository: the manifest verbs,
+# pack, check and version never read it.
+set -l __jvc_remote_verbs query search install sync update upgrade new publish \
+    yank unyank whoami scopes claim owners login logout app
+complete -c jvc -n "__jvc_verb_is $__jvc_remote_verbs" \
+    -l registry -r -f -a '(__jvc_registries)' -d 'repository URL'
 complete -c jvc -n __jvc_needs_verb -l help -d 'show the usage summary'
 complete -c jvc -n __jvc_needs_verb -l version -d 'print the jvc version'
 
@@ -250,9 +242,10 @@ complete -c jvc -n '__jvc_verb_is publish pack' -l no-verify -d 'skip the qualit
 complete -c jvc -n '__jvc_verb_is publish' -l remote -x \
     -d 'the git remote to read the repository URL from (default origin)'
 complete -c jvc -n '__jvc_verb_is publish' -l repository -x -d 'the repository URL to publish'
-complete -c jvc -n '__jvc_verb_is publish' -l tag -x -d 'the tag to publish (default the manifest version)'
+complete -c jvc -n '__jvc_verb_is publish' -l tag -x \
+    -d 'the tag to publish (default: the tag on HEAD matching the version)'
 complete -c jvc -n '__jvc_verb_is pack' -l out -x -a '(__fish_complete_directories)' \
-    -d 'the directory to write the tarball into'
+    -d 'the directory for the tarball and publish.json (default dist)'
 complete -c jvc -n '__jvc_verb_is pack' -l url -x -d 'the URL the tarball will be served from'
 complete -c jvc -n '__jvc_verb_is pack' -l operator-command \
     -d 'also print the operator command that registers it'
@@ -261,17 +254,14 @@ complete -c jvc -n '__jvc_verb_is new app' -l version -x -d 'the version constra
 complete -c jvc -n '__jvc_verb_is new' -l source -x -d 'a git URL to take the engine deck from'
 complete -c jvc -n '__jvc_verb_is app' -l scope -x -a 'project user system' \
     -d 'where to install it'
-# The fourth form of --scope is a directory to install under, so only those are
-# offered: a regular file is never an answer here.
+# The fourth form of --scope is a directory, so only directories are offered.
 complete -c jvc -n '__jvc_verb_is app' -l scope -x -a '(__fish_complete_directories)' \
     -d 'install under this prefix'
 complete -c jvc -n '__jvc_verb_is app' -l system -d 'install under /usr/local'
-complete -c jvc -n '__jvc_verb_is app' -l prefix -x -a '(__fish_complete_directories)' \
-    -d 'the prefix to install under'
 complete -c jvc -n '__jvc_verb_is owners' -l remove -d 'drop the co-owner instead of adding'
 
-# Arguments per verb. Only what the manifest actually requires can be removed or
-# re-pointed, so offering anything else would be noise.
+# Arguments per verb: what the manifest requires is all remove, conflict and
+# source can act on.
 complete -c jvc -n '__jvc_verb_is remove rm conflict source query search' \
     -a '(__jvc_decks)' -d required
 complete -c jvc -n '__jvc_verb_is update upgrade' -a '(__jvc_locked)' -d locked
@@ -284,9 +274,6 @@ complete -c jvc -n '__jvc_verb_is engine; and __jvc_at_arg 2' \
     -a 'jennifer jennifer-tiny' -d engine
 complete -c jvc -n '__jvc_verb_is yank unyank; and __jvc_at_arg 2' \
     -a '(__jvc_self)' -d 'this deck'
-complete -c jvc -n '__jvc_verb_is help' -a 'init add remove list check conflict
-    engine source query install update new publish pack app registry yank unyank whoami
-    scopes claim owners login logout version'
 
 # The app verb has subcommands of its own.
 complete -c jvc -n '__jvc_verb_is app; and __jvc_at_arg 2' -a install -d 'fetch an app and put its command on PATH'

@@ -9,29 +9,30 @@ specification](https://registry.jennifer-lang.dev/specs/specs-client.html).
 ./bin/jvc <command> [args]
 ```
 
-Run it from the project directory. jvc's own module imports (`flatdb`, `semver`,
-`http`, …) resolve from the interpreter's default module directory - no `-I`
-flag is needed with a current `jennifer` build.
+Run it from the project directory: jvc reads the manifest in the current
+directory only, not in a parent. jvc's own bundled-module imports (`http`,
+`semver`, `docblock`) resolve from the interpreter's default module directory,
+so no `-I` flag is needed.
 
 ## Commands
 
 | Command                              | Does                                            |
 | ------------------------------------ | ----------------------------------------------- |
-| `init [name]`                        | create `deck.toml` (name defaults to the directory) |
+| `init [name]`                        | create `deck.toml`, plus a deck skeleton for a scoped name (name defaults to the directory) |
 | `add <deck> [constraint] [--dev]`    | add/update a requirement (empty constraint → `*`) |
-| `remove <deck> [--dev]`              | remove a requirement                            |
+| `remove <deck> [--dev]`              | remove a requirement (refused when it is not there) |
 | `list`                               | print the manifest                              |
 | `check`                              | verify the running interpreter satisfies the deck's `[engines]` |
 | `conflict <deck> [constraint]`       | declare a conflict with a deck (empty range → `*`) |
 | `engine [name] [constraint]`         | require a Jennifer engine version (name → `jennifer`) |
 | `source <deck> [git-url]`            | resolve a deck from a git remote (no url → back to the repository) |
-| `query <deck> [constraint]`          | ask the repository for the best matching version |
+| `query <deck> [constraint]`          | ask the deck's repository for the best matching version |
 | `install [--dev] [--runtests]`       | install exactly what `camcorder.lock` pins (resolving only if it is absent or stale) |
-| `update [deck...] [--dev]`           | advance to the newest allowed versions and rewrite the lockfile |
-| `new <name> --from <deck>`           | scaffold an app frame over an engine deck       |
-| `publish [--remote N] [--repository R] [--tag T]` | run the quality gate, then publish to the repository |
-| `pack [--out D] [--url U]`           | build a release tarball instead of publishing   |
-| `app install <git-url\|@scope/deck>` | install a runnable app and put its command on PATH |
+| `update [deck...] [--dev] [--runtests]` | advance to the newest allowed versions and rewrite the lockfile |
+| `new <name> --from <deck> [--version C] [--source U]` | scaffold an app frame over an engine deck |
+| `publish [--remote N] [--repository R] [--tag T] [--no-verify]` | validate, run the quality gate, then publish to the repository |
+| `pack [--out D] [--url U] [--operator-command] [--no-verify]` | build a release tarball instead of publishing |
+| `app install <git-url\|@scope/deck> [--version C]` | install a runnable app and put its command on PATH |
 | `app list`                           | show installed apps                             |
 | `app update [name...]`               | reinstall installed apps at the newest allowed version |
 | `app uninstall <name>`               | remove an app and its command                   |
@@ -45,41 +46,92 @@ flag is needed with a current `jennifer` build.
 | `login` / `logout`                   | obtain or discard a repository token (device flow) |
 | `version` / `help`                   | version, provenance, and interpreter / usage    |
 
+Aliases: `rm` (remove), `ls` (list), `sync` (install), `upgrade` (update),
+`search` (query); `app add`, `app ls`, `app upgrade`, `app remove` / `app rm`;
+`--help` / `-h` and `--version`. A valued flag such as `--registry <url>` may
+come before the command or after it.
+
 `--dev` targets the `[dev-decks]` section instead of `[decks]`. A `[decks]` /
-`[dev-decks]` dependency **must be scoped** (`@jennifer/routeros`) - a registry
-deck. `add` rejects a bare name (e.g. `ansi`) with guidance: a bundled module is
-engine-provided (require it via `[engines]`), a local (`-I` / `./relative`)
-module is not a dependency.
+`[dev-decks]` dependency **must be scoped** (`@jennifer/routeros`), whether it
+comes from a registry or from `[sources]`. `add` rejects a bare name (e.g.
+`ansi`) with guidance: a bundled module is engine-provided (require it via
+`[engines]`), and a local (`-I` / `./relative`) module is not a dependency.
+
+## init
+
+`jvc init` writes `deck.toml` at version `0.1.0`, and refuses when a manifest
+in any format is already there. **A scoped name also gets a deck skeleton**:
+
+```
+$ jvc init "@acme/widgets"
+created ./deck.toml for deck @acme/widgets
+  created src/widgets.j
+  created src/widgets_test.j
+before the first release, add [package.urls] deck = <manifest url>
+```
+
+`src/widgets.j` is the entry module: an `@module` docblock with a `TODO` line
+and an import example, and one documented example function, `greet`.
+`src/widgets_test.j` is its test overlay, with one test of `greet`. Both are
+there to be replaced.
+
+The skeleton passes the [quality gate](#the-quality-gate) as written (lint, an
+overlay per module, docblocks). **The manifest is not yet publishable**:
+`publish` and `pack` also require a `[package.urls] deck` entry, which `init`
+cannot know, so add one before the first release. A file that already exists
+is kept, never overwritten, and the report says `kept` for it. The name is
+folded (`@Acme/Widgets` becomes `@acme/widgets`) and must be a valid deck name,
+since its deck half becomes the file name and the namespace consumers bind
+(`import "@acme/widgets/"` is `widgets.greet(...)`); an invalid one is refused
+before anything is written.
+
+A **bare** name gets the manifest alone: only a scoped name can be published,
+and the bare default (the directory's name) suits a project that only consumes
+decks.
 
 ## Repository selection
 
-`query` and `install` need a repository URL, resolved in this order:
+Every verb that talks to a repository has a default one, resolved in this
+order:
 
 1. `--registry <url>`
 2. `$JVC_REGISTRY`
 3. `https://registry.jennifer-lang.dev` (default)
 
+A project's `[registries]` table (see below) comes first for anything about a
+deck in a mapped scope. `query`, `install`, `update` and `app install` /
+`app update` resolve each name through it, and so do the **writes**:
+`publish`, `yank`, `unyank`, `claim` and `owners` go to the registry the deck's
+scope maps to. A `--registry` on a write that contradicts the mapping is
+refused, since one of the two is a mistake. `login`, `logout`, `whoami` and
+`scopes` concern one registry, not one deck, so they take the default order
+alone.
+
+**`jvc new` uses no mapping.** It runs before the frame it creates has a
+manifest, so it resolves the engine deck at the default repository only: an
+engine in a scope that lives on another registry needs `--registry <url>` (or
+`$JVC_REGISTRY`).
+
 ### What jvc and a repository agree on first
 
-Before its first API call, `query`, `install`, `update`, and `new` read the
-repository's discovery document at `/.well-known/jennifer-registry` and pick the
-highest API version both sides support, then use that version's `basePath`. A
-`404` there means an old repository, which jvc reads as API v1 at `/`.
-
-Two things follow that are worth knowing when a command refuses:
+Before its first API call, every verb that talks to a repository reads the
+discovery document at `/.well-known/jennifer-registry`, picks the highest API
+version both sides support, and uses that version's `basePath`. A `404` there
+means an old repository, read as API v1 at `/`. So:
 
 - **No shared version, no guessing.** jvc names both sides' versions and stops,
   instead of trying an endpoint the repository may not serve.
 - **An operation the repository does not advertise is refused by name.** A
   repository lists what it offers in the discovery document's `features`, so
   `jvc query` against one without `resolve` says so, and points at `install`,
-  which resolves locally instead of asking the server to.
+  which resolves locally.
 
 ## Publishing
 
-`jvc publish` runs the quality gate first, always: lint, every module's test
-overlay, and the docblocks. That is the only step that looks at the code before
-anybody else does.
+`jvc publish` validates the manifest, then runs the [quality
+gate](#the-quality-gate) (lint, every module's test overlay, the docblocks)
+unless `--no-verify` is given. Both run locally, before the repository sees
+anything.
 
 What happens next depends on the repository. If it advertises `publish` and you
 are logged in, jvc **names a repository and a tag** and the registry reads the
@@ -87,17 +139,33 @@ manifest from that commit itself:
 
 ```
 $ jvc publish
+checked @mplx/demo@0.1.0
+  checks:   passed
+  ok    lint: 1 module(s) clean
+  ok    tests: 1 overlay(s) passed
+  ok    docblocks: no doc drift
+
 published @mplx/demo@0.1.0 to https://registry.jennifer-lang.dev
   from:   https://github.com/mplx/demo.git at v0.1.0
   commit: 7d50f9d0b683c5972a4906f6d6d3de1df3f5b035 (the pin, not the tag)
+  auth:   a stored login
 ```
 
+The `checked` block is the gate's own report, one line per check; with
+`--no-verify` it reads `checks:   SKIPPED (--no-verify)` instead. The `auth:`
+line names the mechanism that authorised the write (`a stored login`,
+`trusted publishing (github-actions)` or `a token from $JVC_TOKEN`), never the
+token.
+
 **Nothing is uploaded, and nothing is built.** What gets published is what the
-forge holds, not whatever a client chose to send, and the tag is resolved to a
-commit that becomes the pin. A tag can be moved afterwards; the commit cannot.
-No `dist/` appears either: a tarball built for a repository that fetches from
-the forge is a file in your project that nothing will fetch and a checksum
-nothing will verify. It is built only on the paths that need an artifact.
+forge holds, and the tag is resolved to a commit that becomes the pin: a tag can
+be moved afterwards, the commit cannot. No `dist/` appears either, since a
+registry that reads the forge would never fetch a tarball; `jvc pack` builds one
+when you need it.
+
+A prerelease version (`0.2.0-rc.1`) publishes like any other, and the output
+notes that no `*`, `^`, `~` or plain comparator will select it: a consumer opts
+in with a constraint that names it, such as `"=0.2.0-rc.1"`.
 
 **The repository is read from your `origin` remote by default. Publishing from
 a different one takes `--remote <name>`.** The tag comes from whichever tag on
@@ -105,16 +173,14 @@ a different one takes `--remote <name>`.** The tag comes from whichever tag on
 `v0.1.0`, and when jvc has to suggest one it follows whichever your repository
 already uses.
 
-Both are read from git rather than from the manifest, because the registry
-reads from the forge and it is the forge's view that has to be right. An `ssh`
-remote is rewritten to its `https` form, since a registry cannot read
-`git@github.com:...`.
+Both are read from git, not from the manifest, because the registry reads the
+forge. An `ssh` remote is rewritten to its `https` form, since a registry cannot
+read `git@github.com:...`.
 
-**If you push to more than one forge, check which remote you are publishing
-from.** A project whose `origin` is a private GitLab and whose second remote is
-GitHub will, by default, hand the registry the GitLab URL; a registry reading
-GitHub then answers `404` for a repository it cannot see, which surfaces as a
-publish that fails for no obvious reason.
+**If you push to more than one forge, check which remote you publish from.** A
+project whose `origin` is a private GitLab and whose second remote is GitHub
+hands the registry the GitLab URL by default; a registry reading GitHub then
+answers `404` for a repository it cannot see.
 
 ```sh
 jvc publish --remote github
@@ -137,47 +203,29 @@ packaged @mplx/demo@0.1.0
   tarball:  dist/demo-0.1.0.tar.gz
   checksum: sha256:930e2693efd9d562fce624dc5b1720aa91d4ae3ff0e917e6004ec3bd1d65ba40
   checks:   passed
+  ok    lint: 1 module(s) clean
+  ok    tests: 1 overlay(s) passed
+  ok    docblocks: no doc drift
+
+A repository that accepts no publishes registers a release through its
+operator: send them the tarball's URL and checksum; `--operator-command` prints
+the line they would run.
 ```
 
-It is a separate verb because it answers a different question. Publishing sends
-a repository and a tag to a registry that reads the code itself; packing
-produces a file, for hosting yourself, for a mirror, or for handing to the
+(The closing paragraph is printed as one line; it is wrapped here.)
+
+Publishing sends a repository and a tag to a registry that reads the code
+itself; packing produces a file, for hosting yourself, for a mirror, or for the
 operator of a repository that accepts no publishes. `--out` chooses the
 directory (default `dist`), `--url` records where you will host it.
-
-### Claiming `jennifer-tiny`
-
-The gate refuses a deck whose `[engines]` lists `jennifer-tiny` while its
-sources declare a library only the default build carries (`term`, `serial`,
-`spi`, `i2c`, `gpio`):
-
-```
-[engines] lists jennifer-tiny, but src/ declares `use gpio;`, which that build
-does not carry. Drop jennifer-tiny from [engines], or stop using gpio. Nothing
-enforces [engines] after install, so the claim is all a consumer has to go on.
-```
-
-The defect is the claim, not the dependency: the same code publishes fine
-without `jennifer-tiny` in `[engines]`. It matters because these libraries are
-not capabilities, so no pragma declares them and the interpreter cannot refuse
-such a deck at import the way it refuses one needing `net`. On the tiny build
-the stub instead fails at the first *call*, which is long after install.
-
-`crypto` is not checked. Its RSA and ECDSA entry points are
-default-only, but the library is not: a deck using it for sha256 runs on tiny
-perfectly well, and a `use` declaration cannot tell the two apart.
-
-**`deckadmin` is the repository operator's tool, not yours.** It edits the store
-on the repository's own host, so a release only an operator can register is one
-you hand *facts* to: the deck name, the version, and the tag.
-`--operator-command` prints the exact line they would run, for when you are that
-person.
+`deckadmin` is the operator's tool and runs on the repository's own host, so
+`--operator-command` prints the line they would run only when asked.
 
 ## Shell completion
 
 `completions/jvc.bash` and `completions/jvc.fish` complete verbs, per-verb
 flags, and arguments read from the project itself: requirements for `remove` /
-`source` / `conflict`, locked decks for `update`, scopes for `registry`, this
+`source` / `conflict` / `query`, locked decks for `update`, scopes for `registry`, this
 deck's own name for `yank`, installed apps for `app uninstall`. Source one, or
 install it where the shell looks by itself:
 
@@ -191,7 +239,9 @@ beside each candidate; bash has nowhere to put one.
 
 The command aliases (`rm`, `ls`, `sync`, `upgrade`, `search`) complete their
 arguments but are not offered in the verb list, which would otherwise show two
-spellings of everything.
+spellings of everything. `--registry` is offered only on the verbs that talk to
+a repository, and before a verb only `--help` and `--version` are. Like jvc,
+the completions read the manifest in the current directory only.
 
 ## One project, several repositories
 
@@ -205,10 +255,9 @@ on internal decks and public ones at once:
 ```
 
 `jvc registry @acme https://registry.internal.example` writes that entry, and
-`jvc registry @acme` with no URL removes it. A project with no `[registries]`
-table behaves exactly as before: everything comes from `--registry`,
-`$JVC_REGISTRY`, or the built-in default, which is also what an unmapped scope
-falls back to when there is no `*` entry.
+`jvc registry @acme` with no URL removes it. Without a `[registries]` table,
+everything comes from `--registry`, `$JVC_REGISTRY` or the built-in default,
+which is also where an unmapped scope goes when there is no `*` entry.
 
 **It is a mapping, not a search order.** A scope resolves at exactly one
 repository, and jvc will not try a second one when the first does not have the
@@ -220,27 +269,18 @@ dependency resolution failed: no such deck at https://registry.internal.example:
 @public/tool (a scope resolves at exactly one registry, so no other was tried)
 ```
 
-That is not a performance choice, it is the defence against **dependency
-confusion**. If jvc searched several repositories for a name, anyone could
-publish `@acme/foo` publicly and have it preferred over, or raced against, your
-internal deck of the same name. A strict mapping removes the ambiguity by
-construction: `@acme` is internal or it is public, never both.
-
-**A git deck is fetched at its commit, and only at its commit.** The pin has to
-be a full forty-character commit id: `git archive` would happily accept a tag or
-a branch name, and a lockfile whose commit field held one would install whatever
-that ref points at today. A commit the repository cannot produce is a hard
-failure, never a fall back to the ref, the default branch, or a generated
-archive. The URL in a version record is only a coordinate, and it can come to
-name a different party's repository without anyone touching the registry.
+This is the defence against **dependency confusion**. If jvc searched several
+repositories for a name, anyone could publish `@acme/foo` publicly and have it
+preferred over, or raced against, your internal deck of the same name. With a
+strict mapping, `@acme` is internal or public, never both.
 
 **Transitive dependencies follow your mapping, not the deck's.** A published
-version's `requires` names `@scope/deck` and says nothing about a repository, so
-your project decides where every dependency is fetched from, however deep. That
-is what makes an internal mirror, or a fork of a public scope, work.
+version's `requires` names `@scope/deck` and no repository, so your project
+decides where every dependency comes from, however deep. That is what makes an
+internal mirror, or a fork of a public scope, work.
 
 **The lockfile records which repository each deck came from**, and `install`
-refuses when the mapping has since moved, and does not silently substitute:
+refuses, instead of substituting, when the mapping has since moved:
 
 ```
 $ jvc install
@@ -257,6 +297,8 @@ where the edit was made rather than on the next install. A lockfile written
 before jvc recorded repositories has nothing to disagree with and still
 installs; the next `jvc update` fills it in.
 
+## Authentication
+
 ### Logging in
 
 `jvc login` authenticates against the repository with the OAuth 2.0 **device
@@ -270,17 +312,20 @@ open https://github.com/login/device and enter code  WXYZ-1234
 logged in as @alice
 ```
 
-Everything about the flow comes from the repository's discovery document, never
-from a hard-coded path: which provider, which flow, and which endpoints. Three
-consequences worth knowing:
+Everything about the flow comes from the repository's discovery document,
+never from a hard-coded path: the provider, the flow and the endpoints. So:
 
-- a repository advertising **no** `auth` block accepts no logins, and jvc says
-  so rather than offering a login that cannot work;
+- a repository advertising **no** `auth` block, or one whose block names no
+  `flow` (one offering only trusted publishing), accepts no logins, and jvc
+  says so;
 - a repository asking for a flow jvc does not implement is refused **by that
   flow's name**, so an unsupported flow is distinguishable from a broken
   repository;
-- polling waits the interval the repository asks for and backs off further on a
-  `429`, giving up when the code expires.
+- a `429` when starting the login is retried once, after its `Retry-After`;
+  one past 60 s is reported rather than waited out;
+- polling waits the interval the repository asks for and doubles it on a `429`
+  or a server fault, or waits a longer `Retry-After` (capped at 60 s), giving
+  up after four faults in a row or when the code expires.
 
 The token is stored in `$XDG_CONFIG_HOME/jvc/credentials.json` (override with
 `$JVC_CREDENTIALS`), owner-readable only, **keyed by repository URL** so a token
@@ -288,16 +333,14 @@ is never sent to a host other than the one that issued it. `jvc logout` forgets
 the local copy; revoking the grant at the provider is a separate act.
 
 An expired token does not send you back through the whole flow: a `401` spends
-the stored refresh token, retries the request once, and only asks for a fresh
-login if the refresh is itself rejected. Repositories that rotate refresh tokens
-issue a new one each exchange and kill the old, so whatever comes back is what
-gets stored.
+the stored refresh token, retries the request once, and asks for a fresh login
+only if the refresh is itself rejected. A repository that rotates refresh tokens
+issues a new one on each exchange, so whatever comes back is stored.
 
 ### What am I holding?
 
 `jvc whoami` decodes the stored token and prints its claims. It makes **no
-network call**, which is the point: you need the answer most when the
-repository is the thing misbehaving.
+network call**, so it works when the repository is the thing misbehaving.
 
 ```
 $ jvc whoami
@@ -309,19 +352,17 @@ $ jvc whoami
             read at 2026-08-17T19:00:09Z, and not refreshed by a token refresh
 ```
 
-Nothing here renews on a timer, so an expired token stays expired until you run
-a command that actually carries it (`claim`, `owners`, `publish`): that request
-is refused, jvc spends the refresh token, retries once, and succeeds without
-asking you to log in. **An expiry is therefore not usually something to act
-on**, which is why the token line says so rather than leaving you to pair it
-with the refresh line yourself.
+Nothing renews on a timer, so an expired token stays expired until you run a
+command that carries it (`publish`, `yank`, `unyank`, `claim`, `owners`): that
+request is refused, jvc spends the refresh token, retries once, and succeeds
+without asking you to log in. **An expiry is usually nothing to act on**, and
+the token line says so.
 
-It says the next command will *try*, not that it will succeed: whether a stored
-refresh token is still good is only knowable by spending it, and a repository
-that rotates them refuses one already used. When that happens the command says
-so rather than reporting a bare "not authenticated", and **the dead token is
-discarded**, so the next command fails immediately instead of repeating a round
-trip that cannot work:
+It says the next command will *try*: a refresh token's validity is known only
+by spending it, and a rotating repository refuses one already used. The command
+then says so, with the repository's reason when it gives one, and **discards
+the dead token**, so the next command fails at once instead of repeating a
+doomed round trip:
 
 ```
 $ jvc publish
@@ -332,28 +373,27 @@ $ jvc whoami
 not logged in to https://registry.jennifer-lang.dev; run `jvc login`
 ```
 
-Only a *rejection* discards it. A `5xx`, or a repository that cannot be reached
-at all, says nothing about the token, so it is kept **and no login is
-suggested** — replacing a credential that was never refused would not fix a
-repository that could not answer:
+Only a *rejection* discards it. A `5xx`, or a repository that cannot be
+reached, says nothing about the token, so it is kept **and no login is
+suggested**:
 
 ```
 $ jvc publish
 could not authenticate at https://registry.jennifer-lang.dev just now:
   … could not answer the refresh: error code: 502
   Your stored token is untouched, so this is the repository's end; try again shortly.
-``` Refreshing is
-lazy because a clock is not authority, a token can be revoked before its `exp`,
-and pre-emptive renewal would still meet that refusal while adding a round trip
-to every command that did not need one.
+```
+
+Refreshing is lazy because a clock is not authority: a token can be revoked
+before its `exp`, and pre-emptive renewal would still meet that refusal while
+adding a round trip to every command.
 
 The claims are shown **unverified**: jvc holds no signing key, so it cannot
-check the signature and never uses these to decide anything. They are what the
-repository asserted when it issued the token, which is what you want when a
-claim is refused and the reason is not obvious. Two lines earn their place
-there: the **account id**, because that is what a scope binds to rather than
-your login, and the **organisations**, because a scope you expect to be able to
-claim will be refused if the token does not carry it.
+check the signature and never uses them to decide anything. They are what the
+repository asserted at issue, which explains a refused claim. Two lines matter
+most: the **account id**, because a scope binds to it rather than to your
+login, and the **organisations**, because a claim on an organisation scope is
+refused when the token does not carry it.
 
 ### Publishing from a pipeline
 
@@ -370,8 +410,10 @@ browser, and nobody is reading this.
     $JVC_TOKEN         - set it to a token minted for https://registry.jennifer-lang.dev
 ```
 
-There are two ways to authorise a write without logging in, and they are not
-equivalent.
+Two mechanisms authorise a write without a login. Trusted publishing covers
+`jvc publish` only, because the identity token goes only to the publish
+endpoint the repository advertises; `yank`, `unyank`, `claim` and `owners` from
+CI need `$JVC_TOKEN`.
 
 **Trusted publishing** is the one to reach for. The CI system mints a
 short-lived identity token for one job, naming the repository, workflow and ref
@@ -387,6 +429,11 @@ steps:
   - run: jvc publish --tag ${{ github.ref_name }}
 ```
 
+The repository checks that the run built the tag it publishes: the identity
+token's commit must be the one the tag points at, and a token issued for a tag
+must be for that tag. Publish from a tag-triggered workflow, and pass it the
+tag it ran on.
+
 Nothing has to be configured in jvc. It reads the audience the repository
 advertises, asks the CI system for a token carrying exactly that value, and
 sends it. **jvc never chooses an audience of its own**: the audience is the
@@ -395,33 +442,38 @@ repository that advertises no audience gets no identity token, not a guessed
 one.
 
 **`$JVC_TOKEN`** is the fallback, for a CI system that issues no identity token
-or a machine that is not CI at all. It is a standing secret, it proves
-possession and nothing more, and jvc treats it accordingly: it is never written
-to the credential file and never printed.
+or a machine that is not CI. It is a standing secret that proves possession and
+nothing more, so it is never written to the credential file and never printed.
+
+The variable names no registry, so in a project that talks to two it would be
+offered to both. Set **`$JVC_TOKEN_REGISTRY`** to the base URL it was minted
+for, and jvc offers it to that registry only.
 
 ```sh
 JVC_TOKEN=... jvc publish --tag 0.2.0
 ```
 
 The order is **trusted publishing, then `$JVC_TOKEN`, then a stored login**. A
-CI identity that is present but broken stops the search instead of quietly
-falling back to a weaker credential, since a misconfigured workflow is worth
-reporting.
+CI identity that is present but broken stops the search instead of falling back
+to a weaker credential, so a misconfigured workflow is reported.
 
 A successful publish says which mechanism authorised it, so a build log shows
 whether a standing secret was involved:
 
 ```
+checked @acme/routeros@0.2.0
+  checks:   passed
+  ...
+
 published @acme/routeros@0.2.0 to https://registry.jennifer-lang.dev
   from:   https://github.com/acme/deck-routeros at 0.2.0
   commit: 9f2c1d4e... (the pin, not the tag)
   auth:   trusted publishing (github-actions)
 ```
 
-Neither CI mechanism is refreshed on a `401`. There is nothing for jvc to
-renew: `$JVC_TOKEN` belongs to whoever set it, and a fresh identity token would
-have to come from the CI system. The failure says so instead of reporting a
-refresh that was never possible.
+Neither CI mechanism is refreshed on a `401`: `$JVC_TOKEN` belongs to whoever
+set it, and a fresh identity token has to come from the CI system. The failure
+says so.
 
 ## Scopes
 
@@ -431,12 +483,15 @@ a repository knows without needing a token:
 ```
 $ jvc scopes
 2 scope(s) at https://registry.jennifer-lang.dev:
-  @mplx      user  owned     mplx
+  @mplx  user  owned  mplx
   @jennifer  user  reserved
 ```
 
 `jvc claim <scope>` claims one for the account you logged in as, and
-`jvc owners <scope> <subject>` adds a co-owner (`--remove` drops one).
+`jvc owners <scope> <subject>` adds a co-owner (`--remove` drops one). Only
+the scope's owner may change its co-owners; a co-owner can publish but not
+add or remove accounts. `<subject>` is the account's stable id at the
+provider, an opaque string (on GitHub, the numeric account id).
 
 **Which scopes you may claim is the repository's policy, not jvc's**, so its
 refusal is passed through word for word. A repository deriving scopes from
@@ -445,8 +500,9 @@ like `@acme does not match your github username (mplx); ask an operator to
 grant it`. A scope marked `reserved` is held by the repository itself and needs
 an operator.
 
-These are the only commands that send your token. If it has expired, jvc spends
-the refresh token, retries once, and only then asks you to log in again.
+`claim` and `owners` send your token, as do `publish`, `yank` and `unyank`;
+no read does. An expired token is refreshed as described under
+[Logging in](#logging-in).
 
 ## Withdrawing a version
 
@@ -455,27 +511,19 @@ jvc yank @mplx/clispinner 0.1.0
 jvc unyank @mplx/clispinner 0.1.0
 ```
 
-Yanking **does not delete**. The version stays fetchable, so a project whose
-lockfile already pins it keeps installing exactly as before; only fresh
-resolutions skip it. That asymmetry is the entire point, and it is why the
-operation is reversible: a mistaken yank is undone with `unyank`, not by
-republishing, which immutability forbids.
+Yanking **does not delete**. jvc never *chooses* a yanked version when it
+resolves, but still *installs* one that `camcorder.lock` pins, so existing
+builds keep reproducing and new ones move on. A yank is reversible with
+`unyank` (republishing a version is forbidden). To leave a yanked version
+behind, run `jvc update <deck>`.
 
 Both need a token and a scope you own.
 
-### Yanked versions
-
-A repository can withdraw a published version without deleting it. jvc will not
-*choose* a yanked version when it resolves, but it still *installs* one that
-`camcorder.lock` already pins - which is the point of yanking rather than
-deleting: existing builds keep reproducing, and new ones move on. To leave a
-yanked version behind, run `jvc update <deck>`.
-
 ## Git sources
 
-A deck can come straight from a git remote instead of the repository, which is
-how a deck ships before a registry exists. The manifest keeps the two facts
-apart: `[decks]` says *which version*, `[sources]` says *where from*.
+A deck can come straight from a git remote instead of a registry, so it need
+not be published. The manifest keeps the two facts apart: `[decks]` says
+*which version*, `[sources]` says *where from*.
 
 ```toml
 [decks]
@@ -494,17 +542,26 @@ How a git deck resolves:
 
 - **A version is a tag.** Every tag that parses as SemVer counts, with or without
   a `v` prefix (`v1.2.0`, `1.2.0`); anything else (`latest`, `nightly`) is
-  ignored. Constraints apply exactly as they do to published versions, so
+  ignored. Constraints apply as they do to published versions, so
   `~1.0.0` picks the 1.0.x tag even when 1.1.0 exists.
-- **Requirements come from the tag's own `deck.toml`**, read out of a local bare
-  mirror, so a git deck's dependencies join the same transitive resolution. A git
-  deck may depend on a published deck and vice versa; one graph can mix both.
-- **The tag must agree with its manifest.** A tag `v2.0.0` whose `deck.toml` says
+- **Requirements come from the tag's own manifest** (`deck.toml`, `deck.yaml`,
+  `deck.yml` or `deck.json`), read out of a local bare mirror, so a git deck's
+  dependencies join the same transitive resolution. A git deck may depend on a
+  published deck and vice versa; one graph can mix both.
+- **A tag of another deck is skipped.** A tag with no manifest, or one whose
+  manifest names a different deck (a tag from before a rename), is not a release
+  of this deck and cannot hide the later ones. When no tag is left, the error
+  lists each skipped tag and why.
+- **The tag must agree with its manifest.** A tag `v2.0.0` whose manifest says
   `1.0.0` is refused, rather than locking a version the vendored code disagrees
-  with.
+  with, and so is a tag holding two manifests.
 - **The pin is the commit.** `camcorder.lock` records `ref` (the tag) and
-  `commit` (the SHA it pointed at) instead of an artifact checksum, and installs
-  archive the *commit*, so moving a tag cannot change what a lockfile installs.
+  `commit` (the full forty-character id it pointed at) instead of an artifact
+  checksum, and installs archive the *commit*, so moving a tag cannot change
+  what a lockfile installs. A commit the repository cannot produce is a hard
+  failure, never a fallback to the ref, the default branch or a generated
+  archive. The same holds for a registry version of `kind = "git"`, whose URL
+  is only a coordinate that can come to name someone else's repository.
 - **A ref may not share its name with the commit.** git puts refs and object ids
   in one namespace, so a repository can carry a tag or branch *named after* a
   commit id, and on GitLab, Bitbucket and self-hosted git nothing prevents it.
@@ -517,19 +574,19 @@ How a git deck resolves:
   repository substitutes code behind a pin that has not changed.
   ```
 
-  This is a hard failure on purpose. jvc also refuses a version record whose
-  `ref` field is itself shaped like a commit id, since a conforming repository
-  will not serve one. Client specification 4.1.1 is the normative rule.
+  jvc also refuses a version record whose `ref` field is itself shaped like a
+  commit id, which a conforming repository never serves. Client specification
+  4.1.1 is the normative rule.
 
 Mirrors are cached per user, keyed by URL, so several projects sharing a deck
 clone it once. The cache lives at `$JVC_CACHE`, else `$XDG_CACHE_HOME/jvc`, else
-`$HOME/.cache/jvc`. This path needs `git` on `PATH` and an interpreter with the
-`exec` capability.
+`$HOME/.cache/jvc`. Git sources need `git` on `PATH` and an interpreter with
+the `exec` capability.
 
 ## install and update
 
-The two verbs divide the work the way Composer and Cargo do, and the split is
-what makes builds reproducible:
+The two verbs divide the work as in Composer and Cargo, and the split is what
+makes builds reproducible:
 
 - **`install` reproduces.** When `camcorder.lock` covers the manifest, its exact
   versions are installed with **no resolution and no metadata lookup at all**, so
@@ -549,7 +606,26 @@ check is entirely offline because each entry records its own `requires`:
 - a `[decks]` requirement is not in the lock (you just ran `jvc add`);
 - a locked version no longer satisfies its manifest constraint (you tightened
   one);
-- a locked deck's own recorded requirement is unmet inside the locked set.
+- a locked deck's own recorded requirement is unmet inside the locked set;
+- `[sources]` no longer agrees with where a deck was locked from (a git source
+  added for a registry deck, pointed at another URL, or removed);
+- the lock holds a deck that is no longer reachable from the manifest's
+  requirements (you just ran `jvc remove`), so `install` resolves and prunes it
+  rather than reinstalling it.
+
+A lock recording no decks is fresh only when the manifest has no requirements
+either; otherwise it is stale like any other.
+
+Before any of that, `install` and `update` check the manifest itself: every
+deck name, every constraint (in `[decks]`, `[dev-decks]`, `[conflicts]` and
+`[engines]`), every `[registries]` key, and `[package] bin-dir`, which must be a
+relative path inside the project. A bad entry is reported by table and name.
+A lock whose recorded registries the `[registries]` mapping has since moved is
+refused outright (see [One project, several
+repositories](#one-project-several-repositories)), not treated as stale.
+
+A deck the new set no longer contains is removed from `vendor/`, together with
+any command jvc linked for it in the project's bin directory.
 
 An unreadable lockfile is an error, not a silent re-resolve, so a corrupt
 file is never papered over.
@@ -567,17 +643,18 @@ changes:
 
 `jvc update <deck> [<deck>...]` advances only the named decks: every other locked
 deck is pinned to the version it already has, so one dependency can be bumped
-without disturbing the graph around it. Naming a deck that is neither a
-requirement nor locked is an error, not a silent no-op. `--dev` includes the
-dev-requirements in either verb.
+without disturbing the graph around it. If those pins leave no solution, only
+the direct requirements stay pinned, and the decks between them may move.
+Naming a deck that is neither a requirement nor locked is an error. `--dev`
+includes the dev-requirements in either verb.
 
 ### Capabilities
 
 A deck declares the host capabilities its code needs (`net`, `exec`, `sql`) in
 `[package] capabilities`, and the interpreter enforces the matching
-`# pragma-jennifer-capability` headers at read time - refusing to load the file
-on a build that lacks the capability, including through a vendored import. So a
-deck needing `net` cannot be used under `jennifer-tiny` at all.
+`# pragma-jennifer-capability` headers at read time: it refuses to load the file
+on a build that lacks the capability, including through a vendored import, so a
+deck needing `net` cannot be used under `jennifer-tiny`.
 
 `install` and `update` therefore **warn** when a resolved deck needs something
 the running build does not provide:
@@ -586,10 +663,10 @@ the running build does not provide:
   warning: @acme/fetcher 1.0.0 needs net, which this build does not provide
 ```
 
-It is a warning, not a refusal, because the interpreter installing the
-decks need not be the one that runs the app; the point is to say at install time
-what would otherwise surface as a load failure later. The set is recorded per
-deck in `camcorder.lock` so a run-time check can read it there.
+It is a warning, not a refusal, because the interpreter installing the decks
+need not be the one that runs the app. The set is recorded per deck in
+`camcorder.lock` for jvc's own use; the interpreter reads no lockfile and
+enforces each source file's pragma header at run time.
 
 ### Running a dependency's own tests
 
@@ -604,20 +681,26 @@ installed 1 deck(s):
         tests: 1 overlay(s) passed
 ```
 
-What this buys you is narrow but real: a deck can pass on its publisher's
-interpreter and fail on yours while still satisfying its declared `[engines]`
-range. In a pre-1.0 language that moves quickly, that gap is where breakage
-lives.
+The overlays run in a scrubbed environment: the child starts from an empty
+environment (`env -i`) plus a short allowlist of what a test needs to run, with
+`HOME` pointed at a fresh temporary directory, so registry and CI secrets
+(`$JVC_TOKEN`, the GitHub and GitLab job and identity tokens) and anything else
+in your environment are not passed on. They still run **as you**, with your
+privileges, so any file your account can read, they can read: the scrub hides
+the environment, not the filesystem.
 
-The check is weaker than the publish gate, on purpose. It runs whatever
-overlays a deck ships, without requiring one per module: coverage is the
-publisher's responsibility and is enforced at publish. A deck shipping no tests
-passes.
+It catches a deck that passes on its publisher's interpreter but fails on
+yours while still satisfying its declared `[engines]` range, which in a pre-1.0
+language is where breakage lives.
 
-> **It executes code from your dependencies.** That is why it is opt-in and will
-> never be the default. A test file can do anything the deck's declared
-> capabilities allow. Use it when you are evaluating a deck or debugging a
-> version mismatch, not as a habit on every install.
+The check is weaker than the publish gate: it runs whatever overlays a deck
+ships, without requiring one per module, since coverage is enforced at publish.
+A deck shipping no tests passes.
+
+> **It executes code from your dependencies**, so it is opt-in and will never be
+> the default. A test file can do anything the deck's declared capabilities
+> allow. Use it to evaluate a deck or debug a version mismatch, not on every
+> install.
 
 Overlays are **not vendored** (see below), so they are extracted from the release
 archive into a temporary directory and run there, with the project's `vendor/`
@@ -625,11 +708,15 @@ tree on the vendor path so the deck's own dependencies resolve.
 
 ### The install pipeline
 
-`install` runs, stopping on the first failure:
+`install` runs these steps. Steps 1 to 4 stop at the first failure; steps 5
+to 7 run for every deck, and if any deck failed, the install fails without
+writing the lock.
 
 1. **Root engine gate** - refuse (before any network call) if the running
-   interpreter is ruled out by the root manifest's `[engines]`.
-2. **Use the lock, or resolve** - if `camcorder.lock` covers the manifest, take
+   interpreter is ruled out by the root manifest's `[engines]`. A bare
+   `[decks]` entry is refused here too, and so is a malformed manifest.
+2. **Use the lock, or resolve** - refuse if the lock's recorded registries
+   disagree with `[registries]`. If `camcorder.lock` covers the manifest, take
    its exact set and skip to step 3. Otherwise solve the manifest's `[decks]` (+
    `[dev-decks]` with `--dev`) into a flattened, version-locked graph in
    `src/resolver.j`. Each resolved deck's own recorded requirements are pulled
@@ -640,24 +727,29 @@ tree on the vendor path so the deck's own dependencies resolve.
    An unsatisfiable graph fails here. (`update` always takes this path.)
 3. **Graph-wide engine gate** - refuse if **any** resolved deck (a root or a
    transitive dependency) rules out the running interpreter by its recorded
-   `[engines]`. Note this checks the *installing* interpreter (jvc runs under
-   full `jennifer`); the authoritative per-import check is done at run time by
-   the interpreter's resolver from the engines recorded in `camcorder.lock`.
+   `[engines]`. This checks the *installing* interpreter (jvc runs under full
+   `jennifer`) and is advice only: nothing reads `[engines]` after install, and
+   at run time the interpreter enforces each source file's version and
+   capability pragmas.
 4. **Conflict gate** - refuse if **any** deck in the resolved graph (a root or a
    transitive dependency) matches `[conflicts]`.
-5. **Fetch** each deck's artifact: a repository deck from the URL the repository
-   returned (`https://`, or a local / `file://` path), a git deck by archiving
-   its pinned commit out of the local mirror.
+5. **Fetch** each deck's artifact: a repository deck over http(s) from the URL
+   the repository returned (a non-http URL, or a `tar.gz` record with no
+   checksum, is refused), a git deck by archiving its pinned commit out of the
+   local mirror.
 6. **Verify** the `sha256:` checksum against the fetched bytes. A git deck is
    already pinned by its commit, so it has no separate checksum.
 7. **Install** - unpack the archive's **`src/` subtree only** into
    `vendor/<scope>/<deck>/`, skipping `*_test.j` overlays, and requiring the
-   `<deck>.j` entrypoint. Both delivery
-   forms take this same path. (`install` rejects a bare `[decks]` entry up front,
-   in step 1's spirit, before any lookup - decks are scoped.)
-8. **Lock** - write `camcorder.lock` (every deck in the graph: version + url +
-   kind + `engines` + `requires`, plus `checksum` for a repository deck or
-   `ref` + `commit` for a git one).
+   `<deck>.j` entrypoint. Both delivery forms take this path. Once every deck is
+   in, write the decks' commands (see [A deck that also ships a
+   command](#a-deck-that-also-ships-a-command)) and remove what the new set no
+   longer contains.
+8. **Lock** - write `camcorder.lock`: a top-level `lockfileVersion` and, for
+   every deck in the graph, version + url + kind + `engines` + `requires` +
+   `capabilities`, the `registry` it came from (omitted for a `[sources]` git
+   deck), and `checksum` for a `tar.gz` deck or `ref` + `commit` for a git
+   one.
 
 The manifest below requires only `@jennifer/routeros`; its dependency
 `@jennifer/net` is pulled in transitively:
@@ -683,10 +775,8 @@ routeros.greet();
 ## new
 
 `jvc new <name> --from <@scope/deck>` scaffolds an app **frame** over an engine
-deck. It exists because the language forces a split between a library and a
-program: a deck is a module, a module's top level is declarations-only, so a
-deck **cannot be run**. Anything runnable needs a non-module entry point, which
-is what a frame provides.
+deck. A deck is a module, and a module's top level is declarations-only, so a
+deck **cannot be run**; a frame is the non-module entry point that runs it.
 
 ```
 $ jvc new blog --from @you/cms
@@ -742,8 +832,12 @@ byte.
 
 If the template ships its own `deck.toml`, jvc uses it as the base and adds the
 engine requirement on top, so an engine can prescribe its frames' `[engines]` or
-extra dependencies. Otherwise a minimal manifest is generated. Either way the
-engine is pinned to `^<resolved version>`.
+extra dependencies. Its `[registries]` and `[sources]` tables are dropped: where
+a project's decks come from is the project owner's decision, not something a
+deck it scaffolds from gets to choose. Otherwise a minimal manifest is
+generated. Either way the engine is pinned to `^<resolved version>`, or to
+`=<resolved version>` when that version is a prerelease (a caret cannot name
+one).
 
 **The security rule the templates bake in.** The project directory is **never**
 the web root. Only `public/` is web-facing; `main.j`, `config.toml`, and
@@ -758,48 +852,50 @@ engine before creating anything, so a failed resolution leaves nothing behind.
 
 ## app
 
-Decks are vendored into a project and can never be run; an **app** is the other
-shape - a runnable program with its own shebang entry script, installed once per
-user onto `PATH`. `jvc app` is that half of the tool.
+Decks are vendored into a project and cannot be run; an **app** is a runnable
+program with its own shebang entry script, installed onto `PATH`. Every
+`jvc app` install and update needs `git` on `PATH`.
 
 ```
 $ jvc app install https://github.com/jennifer-language/grimoire
 installed grimoire 1.0.0
   from:    https://github.com/jennifer-language/grimoire
-  app:     ~/.local/share/jvc/apps/grimoire (37 file(s))
-  command: ~/.local/bin/grimoire
-  decks:   vendored into ~/.local/share/jvc/apps/grimoire/vendor
+  app:     /home/you/.local/share/jvc/apps/grimoire (37 file(s))
+  command: /home/you/.local/bin/grimoire
+  decks:   vendored into /home/you/.local/share/jvc/apps/grimoire/vendor
 ```
 
 | Flag                | Meaning                                                     |
 | ------------------- | ----------------------------------------------------------- |
 | `--version <range>` | the version constraint to install (default: the newest)      |
 | `--scope <scope>`   | where to install it (below); default `user`                  |
+| `--system`          | the same as `--scope system`                                 |
 
-### Scopes
+`--scope` and `--system` also select the scope for `app list`, `app update`
+and `app uninstall`.
+
+### Install scopes
 
 | `--scope` | App goes to | Command goes to | For |
 | --------- | ----------- | --------------- | --- |
 | `project` | `./.jvc/apps/<name>` | `./bin/<name>` | a tool pinned to one project |
-| `user` (default) | `$XDG_DATA_HOME/jvc/apps` | `~/.local/bin` | just you |
+| `user` (default) | `$XDG_DATA_HOME/jvc/apps` (else `~/.local/share/jvc/apps`) | `~/.local/bin` | just you |
 | `system` | `/usr/local/share/jvc/apps` | `/usr/local/bin` | every user on the machine |
 | *a path* | `<path>/share/jvc/apps` | `<path>/bin` | anything else |
 
-`/usr/local` rather than `/usr`, because the filesystem hierarchy reserves
-`/usr` for the distribution's package manager and locally administered software
-belongs in `/usr/local`.
+`/usr/local`, not `/usr`: the filesystem hierarchy reserves `/usr` for the
+distribution's package manager.
 
 **`--scope system` needs privileges, and says so before doing any work.** jvc
 probes whether it can write the command directory instead of inspecting the
-user id, which is right under `sudo`, in a container, with an ACL, or on a
-read-only mount. It never tries to elevate itself; it prints the command to
-re-run:
+user id, which is right under `sudo`, in a container, with an ACL or on a
+read-only mount. It never elevates itself; it prints the command to re-run:
 
 ```
 $ jvc app install https://github.com/acme/tool --scope system
 cannot write to /usr/local/bin
   re-run with elevated privileges, or install for yourself:
-    sudo jvc app install https://github.com/acme/tool --scope system
+    sudo jvc app install https://github.com/acme/tool --system
     jvc app install https://github.com/acme/tool
 ```
 
@@ -815,37 +911,43 @@ do not move. `$JVC_APP_HOME` and `$JVC_BIN` override the user scope's two
 directories independently. Install warns when the command directory is not on
 your `PATH`.
 
-**The command is a symlink**, which is what the ecosystem expects: `ls -l` shows
-where it really points, `readlink` resolves it, and no extra process sits between
-the shell and the program. An app that locates its own assets from `argv[0]`
-still finds them, because `realpath` resolves the link. Where a filesystem has no
-symlinks, jvc falls back to a `/bin/sh` shim that `exec`s the entry and behaves
-the same from the shell.
+**The command is a symlink**: `ls -l` shows where it points, `readlink`
+resolves it, and no extra process sits between the shell and the program. An
+app that locates its assets from `argv[0]` still finds them, because `realpath`
+resolves the link. Where a filesystem has no symlinks, jvc falls back to a
+`/bin/sh` shim that `exec`s the entry.
 
 jvc **refuses to overwrite or delete a command it did not create**. A command is
 jvc's when it is a symlink resolving into jvc's own store, or a shim carrying its
-marker line; the link test is the stronger of the two, since a marker comment
-could be copied into an unrelated script but a link's target cannot.
+marker line; the link test is the stronger, since a marker comment can be copied
+into an unrelated script but a link's target cannot.
 
-**Versions are tags**, exactly as for git deck sources: the newest SemVer tag
+**Versions are tags**, as for git deck sources: the newest SemVer tag
 satisfying `--version` is installed, and the resolved commit is what is recorded.
-A repository with **no** version tags installs its default branch head instead,
-so an app that does not tag releases is still installable - but then an explicit
-`--version` is an error, not a silent branch install.
+A repository with **no** version tags installs its default branch head
+instead; an explicit `--version` is then an error, not a silent branch install.
 
 **An app names itself** in a `deck.toml` with a plain (unscoped) name and a
 `[package] bin` naming its entry script. Both are optional: without a manifest
 the app is named after its repository and its entry is the root file of that
-name. A scoped `@scope/deck` name is refused, since that is a deck. An entry
-script with no `#!` line is refused too, since nothing could run it.
+name. A scoped `@scope/deck` name installs under its deck half, as described
+under [installing a published deck as an
+app](#installing-a-published-deck-as-an-app). An entry script with no `#!` line
+is refused, since nothing could run it, and so is one whose `#!` line would
+start jennifer without `run`: write `#!/usr/bin/env -S jennifer run`, not
+`#!/usr/bin/env jennifer` or `#!/usr/bin/env jennifer run` (without `-S`,
+`env` looks for a program called `jennifer run`).
 
 If the app declares `[decks]`, they are resolved and vendored into the app's own
 directory, so an app carries its dependencies privately instead of sharing a
 project's `vendor/`.
 
-`jvc app update` reinstalls at the newest version each app's repository offers
-and reports what moved; `jvc app uninstall` removes the command, the directory,
-and the record.
+`jvc app update` repeats each app's original request and reports what moved: the
+same constraint you installed with (not a widened `*`), and for an app
+installed as `@scope/deck`, the same registry lookup, so a yanked version is
+still skipped. A reinstall is unpacked and checked beside the working one and
+only then swapped in, so a broken new version leaves the old one running.
+`jvc app uninstall` removes the command, the directory and the record.
 
 ### Installing a published deck as an app
 
@@ -862,22 +964,22 @@ re-derived from the remote's tags: the registry's answer is the one that
 honoured the constraint and skipped anything yanked.
 
 **The command takes the deck half of the name.** `@mplx/grimoire` installs as
-`grimoire`, since `@scope/deck` is neither a directory nor something a shell can
-invoke. Two scopes shipping the same deck name would therefore collide, and jvc
-refuses rather than replacing the first: the user asked for a different program
-that happens to share a word.
+`grimoire` (as does a git URL whose `deck.toml` names a scoped deck), since
+`@scope/deck` is neither a directory nor something a shell can invoke. Two
+scopes shipping the same deck name would collide, so jvc refuses the second
+instead of replacing the first.
 
-Only a `git` deck can be installed this way. A published tarball has no
-repository to check out, and the installer reads the manifest at the chosen tag
-from a git mirror, so it says so plainly instead of failing later.
+Only a version the registry records as `kind = "git"` can be installed this
+way: a published tarball has no repository to check out, and jvc says so up
+front.
 
-This is the user-wide counterpart of the section below: the same published deck,
+This is the user-wide counterpart of the next section: the same published deck,
 installed for you, not for one project.
 
 ### A deck that also ships a command
 
-A **deck** may expose a command as well as modules, exactly as a Composer package
-may ship a binary. It declares one in its manifest:
+A **deck** may expose a command as well as modules, as a Composer package may
+ship a binary. It declares one in its manifest:
 
 ```toml
 [package]
@@ -896,13 +998,13 @@ installed 1 deck(s):
         command bin/console -> @acme/cms
 ```
 
-This is the *declarative* way to get a command into a project, and it is
-preferable to `jvc app install --scope project` whenever the tool is genuinely a
-dependency: it is recorded in `deck.toml`, pinned in `camcorder.lock`, and
-reproduced by `git clone` + `jvc install`. An imperative project-scoped app
-install leaves nothing behind that another checkout can reproduce.
+This is the *declarative* way to get a command into a project, and it beats
+`jvc app install --scope project` whenever the tool is a dependency: it is
+recorded in `deck.toml`, pinned in `camcorder.lock`, and reproduced by
+`git clone` + `jvc install`. A project-scoped app install leaves nothing another
+checkout can reproduce.
 
-The command directory defaults to `bin/` and is set with `[package] bin-dir`.
+The command directory defaults to `bin` and is set with `[package] bin-dir`.
 The link is relative, so it survives the project being moved, and jvc refuses to
 overwrite anything in that directory it did not create, so a hand-written `bin/`
 script is safe.
@@ -913,11 +1015,11 @@ elsewhere exposes no project command.
 
 ### jvc installs jvc
 
-jvc is itself an app - an unscoped name with a runnable entry script - and
-declares `bin = "bin/jvc"`, so `jvc app install <jvc-url>` installs it over
-whatever copy is already there. Since PATH order decides which one runs, `jvc
-version` reports the copy that is running, the interpreter beneath it, and any
-second copy that is installed but shadowed:
+jvc is itself an app (an unscoped name with a runnable entry script, declaring
+`bin = "bin/jvc"`), so `jvc app install <jvc-url>` installs a copy of it in the
+chosen scope. Since PATH order decides which copy runs, `jvc version` reports
+the running copy, the interpreter beneath it, and any second copy that is
+installed but shadowed:
 
 ```
 $ jvc version
@@ -926,19 +1028,18 @@ jvc 0.1.0
   installed:   system package manager
   interpreter: jennifer 0.25.0
 
-note: jvc 0.3.0 is also installed at ~/.local/bin/jvc but is not the copy running;
-      put ~/.local/bin earlier on your PATH to use it
+note: jvc 0.3.0 is also installed at /home/you/.local/bin/jvc but is not the copy running;
+      put /home/you/.local/bin earlier on your PATH to use it
 ```
 
 **Installing jvc with jvc does not upgrade a packaged jvc, and cannot.** When
 jvc arrived as a `.deb` or an Arch package, those files belong to the system
 package manager; `jvc app install` writes a *second* copy under
-`~/.local/share/jvc/apps` and puts its command in `~/.local/bin`. Which one
-then runs is decided by PATH order, and nothing about the install says so, so
-jvc says it:
+`~/.local/share/jvc/apps` with its command in `~/.local/bin`, and PATH order
+decides which runs. jvc says so:
 
 ```
-$ jvc app install jvc
+$ jvc app install <jvc-url>
 installed jvc 0.3.0
 
 warning: the jvc you just ran is /usr/share/jvc/bin/jvc, which your system
@@ -953,41 +1054,35 @@ package manager owns.
   `jvc version` reports which copy is running and names the other.
 ```
 
-The warning fires for `jvc app update` too, including the no-argument form that
-updates everything, and it is silent in the case it does not apply: a jvc
-installed under `/usr/local` is one jvc put there itself (`--scope system`), so
-it is jvc's to manage and says nothing.
+The warning fires for `jvc app update` too, including the no-argument form. A
+jvc under `/usr/local` was put there by jvc itself (`--scope system`), so it is
+jvc's to manage and gets no warning.
 
-The `installed:` line names how the running copy arrived, because a path only
-answers that for somebody who knows the layouts. It is one of `system package
-manager`, `jvc app install`, `/usr/local (locally administered, not packaged)`,
+The `installed:` line names how the running copy arrived: `system package
+manager`, `jvc app install`, `/usr/local (locally administered, not packaged)`
 or `working tree or unpacked tarball`. A copy baked into the OCI image reads as
-packaged, and that is correct rather than a limitation: the image uses the
-package layout so that installing the `.deb` there later changes nothing.
+packaged, because the image uses the package layout.
 
-The intent is that a packaged jvc is always present and is the rescue path,
-while `jvc app install` lets you run a newer jvc ahead of the next release.
+A packaged jvc is meant to stay present as the rescue path, while
+`jvc app install` runs a newer jvc ahead of the next release.
 
 ## publish and pack, in detail
 
 Both start the same way, from the current directory's `deck.toml`:
 
-1. **Validation** that the deck is publishable at all: a **scoped
-   `@scope/deck`** name, scoped `[decks]` entries, a SemVer `version`, a
-   `[package.urls] deck`, a `src/` directory, the `src/<deck>.j` entrypoint, and
-   an honest capability declaration. If `src/` carries a
-   `# pragma-jennifer-capability` the manifest's `capabilities` does not list,
-   it is refused, so a deck can never claim less than its code needs.
+1. **Validation**, which `--no-verify` does not skip: a **scoped
+   `@scope/deck`** name; scoped `[decks]` entries with valid constraints; a
+   SemVer `version` with no numeric part over 18 digits; a
+   `[package.urls] deck`; a `src/` directory with the `src/<deck>.j`
+   entrypoint; known capability names, and every
+   `# pragma-jennifer-capability` in `src/` listed in `capabilities`, so a deck
+   never claims less than its code needs; and no `jennifer-tiny` in `[engines]`
+   when `src/` uses a library that build lacks.
 2. **The quality gate** (below) unless `--no-verify` is given. It runs after
-   validation so the cheap structural checks fail first, before shelling out to
-   lint and the test overlays.
+   validation, so the cheap structural checks fail first.
 
-They diverge after that, because they answer different questions.
-
-**`jvc publish` sends a repository and a tag.** The registry fetches that
-commit and reads the manifest itself, so nothing is uploaded and nothing is
-built. The tag is resolved to a commit, and the commit is what the lockfile
-pins: a tag can be moved afterwards, a commit cannot.
+After both, `jvc publish` sends a repository and a tag (see
+[Publishing](#publishing)):
 
 | Flag              | Meaning                                                   |
 | ----------------- | --------------------------------------------------------- |
@@ -996,8 +1091,7 @@ pins: a tag can be moved afterwards, a commit cannot.
 | `--tag <tag>`     | the tag to publish (default: the one on `HEAD` matching the version) |
 | `--no-verify`     | skip the quality gate (the output says so)                 |
 
-**`jvc pack` builds an artifact.** For hosting yourself, for a mirror, or for
-handing to the operator of a registry that accepts no publishes.
+`jvc pack` builds an artifact (see [Packing a release](#packing-a-release)):
 
 | Flag                 | Meaning                                                |
 | -------------------- | ------------------------------------------------------ |
@@ -1006,21 +1100,52 @@ handing to the operator of a registry that accepts no publishes.
 | `--operator-command` | also print the `deckadmin add` line, for a registry operator |
 | `--no-verify`        | skip the quality gate                                   |
 
-It packages `deck.toml` + the `src/` subtree + any `template/` (the frame
+It packages the manifest + the `src/` subtree + any `template/` (the frame
 template `jvc new` stamps) into `<out>/<deck>-<version>.tar.gz` and computes its
-sha256. `README`, `vendor/`, and test overlays are excluded.
+sha256; `README`, `vendor/` and everything else outside those are left out.
+The `*_test.j` overlays under `src/` **are** shipped, so that `install
+--runtests` has something to run, but they are never vendored. A file keeps
+its exec bit: one with any execute bit set is packed as `0755`, everything else
+as `0644`, so a `[package] bin` script stays runnable.
+
+### Claiming `jennifer-tiny`
+
+Validation refuses a deck whose `[engines]` lists `jennifer-tiny` while its
+sources declare a library only the default build carries (`term`, `serial`,
+`spi`, `i2c`, `gpio`), even with `--no-verify`:
+
+```
+[engines] lists jennifer-tiny, but src/ declares `use gpio;`, which that build
+does not carry. Drop jennifer-tiny from [engines], or stop using gpio. Nothing
+enforces [engines] after install, so the claim is all a consumer has to go on.
+```
+
+The defect is the claim, not the dependency: the same code publishes without
+`jennifer-tiny` in `[engines]`. These libraries are not capabilities, so no
+pragma declares them and the interpreter cannot refuse such a deck at import
+the way it refuses one needing `net`; on the tiny build the stub fails at the
+first *call* instead.
+
+`crypto` is not checked. Its RSA and ECDSA entry points are default-only, but a
+deck using it for sha256 runs on tiny, and a `use` declaration cannot tell the
+two apart.
 
 ### The quality gate
 
-A deck that cannot pass its own checks does not get published. The ecosystem is
-only as trustworthy as what enters it, so these are enforced instead of left to
-a convention nobody checks:
+A deck that fails these checks is not published unless `--no-verify` is given:
 
 | Check | Passes when |
 | ----- | ----------- |
-| **lint** | `jennifer lint` over `src/` exits zero. Its exit code already draws the line correctly: non-zero for a warning or error, zero when only advisory `info` findings remain, so a long line does not block a release but an unused import does. |
-| **tests** | every module under `src/` has a co-located `MODULE_test.j` **and** every overlay passes. A module with no overlay fails the gate: an untested module is what the rule exists to prevent. |
-| **docblocks** | no `warning` or `error` diagnostic from the `docblock` module, which catches drift such as an `@param` for a parameter that no longer exists. |
+| **lint** | `jennifer lint` over the modules and their overlays exits zero: non-zero for a warning or error, zero when only advisory `info` findings remain, so a long line does not block a release but an unused import does. |
+| **tests** | every module under `src/` has a co-located `MODULE_test.j`, every overlay defines at least one test, **and** every overlay passes. |
+| **docblocks** | no `warning` or `error` diagnostic from the `docblock` module in any `src/` file, which catches drift such as an `@param` for a parameter that no longer exists. |
+
+A file another `src/` file `include`s, or one named `NAME.inc.j`, is part of
+its includer rather than a module: in a "topics" deck, `src/tool.j` includes
+`src/topics/*.j` and `src/tool_test.j` includes their overlays. Such a file is
+linted and tested through its includer, needs no overlay of its own, and an
+included overlay is not run alone. `jvc install --runtests` skips included
+overlays the same way.
 
 Every check runs even when an earlier one fails, so one attempt shows everything
 to fix:
@@ -1036,10 +1161,9 @@ publish blocked by the quality gate:
 fix these, or pass --no-verify to publish anyway
 ```
 
-**`jennifer fmt` is not in the gate.** The gate asks whether a deck is correct:
-it lints, its overlays pass, its docblocks match the code. Formatting is not
-correctness, and the one formatting rule that bears on it, line width, is a
-lint rule already.
+**`jennifer fmt` is not in the gate.** The gate asks whether a deck is correct;
+formatting is not correctness, and line width is already an advisory lint
+finding.
 
 `$JVC_JENNIFER` overrides the interpreter the gate shells out to; otherwise
 `jennifer` is taken from `PATH`.
@@ -1050,17 +1174,20 @@ packaged @jennifer/routeros@0.1.0
   tarball:  dist/routeros-0.1.0.tar.gz
   checksum: sha256:63b7…c16b
   checks:   passed
+  ok    lint: 1 module(s) clean
+  ok    tests: 1 overlay(s) passed
+  ok    docblocks: no doc drift
 
 to register it, host the tarball at your URL and run, on the repository's own host:
-  deckadmin add @jennifer/routeros 0.1.0 https://…/routeros-0.1.0.tar.gz "…" --checksum sha256:63b7…c16b
+  deckadmin add '@jennifer/routeros' '0.1.0' 'https://…/routeros-0.1.0.tar.gz' '…' --checksum 'sha256:63b7…c16b'
 ```
 
 ## Modules
 
 | File                | Role                                             |
 | ------------------- | ------------------------------------------------ |
-| `jvc`         | entry point (thin adapter over `cli.j`)          |
-| `src/cli.j`         | command logic (`init`/`add`/…/`install`, dispatch) |
+| `bin/jvc`           | entry point (thin adapter over `src/cli.j`)      |
+| `src/cli.j`         | command logic (`init`/`add`/…/`install`, dispatch), and the network half of `publish` |
 | `src/manifest.j`    | `deck.toml` / `.yaml` / `.json` parse / encode / edit |
 | `src/deckname.j`    | deck-name grammar (`@scope/deck`) + vendor paths |
 | `src/catalog.j`     | the candidate versions a resolution chooses from |
@@ -1071,5 +1198,9 @@ to register it, host the tarball at your URL and run, on the repository's own ho
 | `src/scaffold.j`    | stamping an app frame out of an engine deck's `template/` |
 | `src/app.j`         | installing runnable apps onto PATH (`jvc app`)    |
 | `src/verify.j`      | the publish quality gate (lint + tests + docblocks) |
-| `src/publish.j`     | `jvc publish` - package `src/` + register a release |
+| `src/publish.j`     | publish validation, the gate run, and `jvc pack`'s tarball |
 | `src/registry.j`    | repository client over `http`                    |
+| `src/scopemap.j`    | the `[registries]` scope mapping                 |
+| `src/ciauth.j`      | CI credentials: trusted publishing and `$JVC_TOKEN` |
+| `src/pragma.j`      | reading version and capability pragmas, as the interpreter does |
+| `src/safepath.j`    | path-segment checks and `safepath.unpack` for archives |

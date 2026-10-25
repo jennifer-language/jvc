@@ -3,19 +3,20 @@
 # pragma-jennifer-version: >=0.25.0
 
 /**
- * The deck-repository client, the CLI side of jvc. It turns a deck name and a
- * version constraint into a query against a running repository (`serve.j`),
- * parses the JSON resolution it returns, and fetches a deck's code from the
- * external URL that resolution names. The URL-building and response-parsing
- * halves are pure (and unit-tested); the two network calls (`resolve`,
- * `fetch`) are thin wrappers over the `http` client and need the default
- * `jennifer` binary. Registry delivery is by external URL: the repository
- * stores only metadata and points at where the code lives.
+ * The registry client: discovery and version negotiation, deck metadata
+ * (`fetchDeck`, `resolve`), the device login and token refresh, scopes,
+ * publish and yank. URL building and response parsing are pure and
+ * unit-tested; the network calls are thin wrappers over `http` and need the
+ * default `jennifer` binary. The registry stores metadata only: a version
+ * points at an archive URL (`tar.gz`) or a git commit (`git`).
  * @module registry
  * @example
  * import "./registry.j" as registry;
  * def c as registry.Client init registry.newClient("http://localhost:8080");
- * def r as registry.Resolution init registry.resolve($c, "ansi", "^1.2.0");
+ * def api as registry.Negotiated init registry.negotiate(
+ *     registry.discover($c),
+ *     registry.supportedVersions());
+ * def r as registry.Resolution init registry.resolve($c, "@acme/ansi", "^1.2.0", $api.basePath);
  * # def code as http.Response init registry.fetch($r.url);
  */
 
@@ -24,6 +25,7 @@ use encoding;
 use strings;
 use convert;
 use lists;
+use maps;
 import "./deckname.j" as deckname;
 import "./catalog.j" as catalog;
 import "http.j" as http;
@@ -38,8 +40,7 @@ def const DISCOVERY_PATH as string init "/.well-known/jennifer-registry";
 def const API_VERSIONS as list of int init [1];
 
 # Characters left unescaped in a query component (RFC 3986 unreserved set).
-def const UNRESERVED as string init
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" +
+def const UNRESERVED as string init "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" +
     "0123456789-._~";
 
 # Uppercase hex digits for percent-encoding.
@@ -137,9 +138,18 @@ export func noAuth() {
     def none as list of string init [];
     def noProviders as list of string init [];
     return Auth{
-        present: false, provider: "", flow: "", deviceUrl: "", tokenUrl: "",
-        refreshUrl: "", authorizeUrl: "", clientId: "", scopes: $none,
-        trustedUrl: "", trustedAudience: "", trustedProviders: $noProviders
+        present: false,
+        provider: "",
+        flow: "",
+        deviceUrl: "",
+        tokenUrl: "",
+        refreshUrl: "",
+        authorizeUrl: "",
+        clientId: "",
+        scopes: $none,
+        trustedUrl: "",
+        trustedAudience: "",
+        trustedProviders: $noProviders
     };
 }
 
@@ -185,8 +195,8 @@ export def struct Negotiated {
  * @field url {string} the external fetch URL ("" when not found)
  * @field checksum {string} the matched version's checksum ("" when not found)
  * @field description {string} the matched version's description ("" when not found)
- * @field kind {string} the delivery kind, "file" (single .j) or "tar.gz" (vendored deck)
- * @field engines {map of string to string} the engines that can run it (engine -> range)
+ * @field kind {string} the delivery kind: "file" (single .j), "tar.gz" or "git"
+ * @field engines {map of string to string} always empty: `/resolve` carries no engines
  */
 export def struct Resolution {
     found as bool,
@@ -244,7 +254,7 @@ func trimTrailingSlash(url as string) {
  * @return {Client} the client handle
  */
 export func newClient(baseUrl as string) {
-    return Client{ baseUrl: trimTrailingSlash($baseUrl) };
+    return Client{baseUrl: trimTrailingSlash($baseUrl)};
 }
 
 /**
@@ -358,6 +368,15 @@ func readStringMap(doc as json.Value, pointer as string) {
     return $out;
 }
 
+# foldKeys returns a name -> constraint map with every name folded.
+func foldKeys(m as map of string to string) {
+    def out as map of string to string init {};
+    for (def key in $m) {
+        $out[deckname.fold($key)] = $m[$key];
+    }
+    return $out;
+}
+
 /**
  * Parse a deck-record response body into the candidate versions it publishes.
  * The record's `versions` table becomes one `catalog.Candidate` per version,
@@ -374,7 +393,10 @@ export func parseDeckDoc(body as string) {
     if (not json.has($doc, "/versions")) {
         return $out;
     }
-    def name as string init strOr($doc, "/name");
+    # Folded on the way in, like every name jvc stores: a record or a
+    # requirement spelled `@Acme/App` must meet the `@acme/app` the registry
+    # files it under, or the fetch loop asks for it again for ever.
+    def name as string init deckname.fold(strOr($doc, "/name"));
     for (def version in json.keys($doc, "/versions")) {
         def p as string init "/versions/" + deckname.ptrEscape($version);
         def kind as string init strOr($doc, $p + "/kind");
@@ -390,7 +412,7 @@ export func parseDeckDoc(body as string) {
             ref: strOr($doc, $p + "/ref"),
             commit: strOr($doc, $p + "/commit"),
             description: strOr($doc, $p + "/description"),
-            requires: readStringMap($doc, $p + "/requires"),
+            requires: foldKeys(readStringMap($doc, $p + "/requires")),
             engines: readStringMap($doc, $p + "/engines"),
             capabilities: readStringList($doc, $p + "/capabilities"),
             yanked: boolOr($doc, $p + "/yanked"),
@@ -413,83 +435,30 @@ export func parseDeckDoc(body as string) {
  */
 export func fetchDeck(client as Client, name as string, basePath as string) {
     def headers as map of string to string init {};
-    def resp as http.Response init http.get(
-        deckUrl(apiRoot($client, $basePath), $name), $headers);
+    def resp as http.Response init http.get(deckUrl(apiRoot($client, $basePath), $name), $headers);
+    # Only a 404 means "no such deck"; any other non-2xx is an error, so an
+    # outage is not reported as a typo in the name.
+    if ($resp.status == 404) {
+        def none as list of catalog.Candidate init [];
+        return $none;
+    }
+    requireSuccess($resp, "deck lookup for " + $name);
     return parseDeckDoc($resp.body);
 }
 
-/**
- * The result of a transitive resolve (`/resolve-graph`): whether the graph was
- * satisfiable, the flattened locked set, and an error message on failure.
- * @field ok {bool} true when the whole graph resolved
- * @field resolved {list of Resolution} the flattened locked set (empty on failure)
- * @field error {string} the failure reason ("" on success)
- */
-export def struct GraphResolution {
-    ok as bool,
-    resolved as list of Resolution,
-    error as string
-};
-
-# encodeRoots renders a name -> constraint map as a JSON object string, with
-# scoped keys pointer-escaped so the "/" survives as one key.
-func encodeRoots(roots as map of string to string) {
-    def doc as json.Value init json.map();
-    for (def name in $roots) {
-        $doc = json.set($doc, "/" + deckname.ptrEscape($name), $roots[$name]);
+# requireSuccess throws a `registry` error naming the status and the server's
+# own explanation, unless the response is a 2xx.
+func requireSuccess(resp as http.Response, what as string) {
+    if ($resp.status >= 200 and $resp.status < 300) {
+        return;
     }
-    return json.encode($doc);
-}
-
-/**
- * Parse a `/resolve-graph` response body into a GraphResolution.
- * @param body {string} the JSON response body
- * @return {GraphResolution} the parsed result
- * @throws {Error} when the body is not valid JSON
- */
-export func parseGraph(body as string) {
-    def doc as json.Value init json.decode($body);
-    def ok as bool init false;
-    if (json.has($doc, "/ok")) {
-        $ok = json.asBool($doc, "/ok");
-    }
-    def out as list of Resolution init [];
-    if (json.has($doc, "/resolved")) {
-        for (def i as int init 0; $i < json.length($doc, "/resolved"); $i = $i + 1) {
-            def p as string init "/resolved/" + convert.toString($i);
-            $out[] = Resolution{
-                found: true,
-                name: json.asString($doc, $p + "/name"),
-                version: json.asString($doc, $p + "/version"),
-                url: json.asString($doc, $p + "/url"),
-                checksum: json.asString($doc, $p + "/checksum"),
-                description: strOr($doc, $p + "/description"),
-                kind: json.asString($doc, $p + "/kind"),
-                ref: strOr($doc, $p + "/ref"),
-                commit: strOr($doc, $p + "/commit"),
-                engines: readStringMap($doc, $p + "/engines"),
-                capabilities: readStringList($doc, $p + "/capabilities")
-            };
-        }
-    }
-    return GraphResolution{ ok: $ok, resolved: $out, error: strOr($doc, "/error") };
-}
-
-/**
- * Resolve a set of root requirements transitively against the repository (a
- * network call). Returns the flattened locked set; an unsatisfiable graph is a
- * GraphResolution with `ok = false`, not a thrown error.
- * @param client {Client} the repository client
- * @param roots {map of string to string} the root requirements (name -> constraint)
- * @return {GraphResolution} the parsed result
- * @throws {Error} on a transport failure or an unparseable body
- */
-export func resolveGraph(client as Client, roots as map of string to string) {
-    def headers as map of string to string init {};
-    def url as string init $client.baseUrl + "/resolve-graph?roots=" +
-        percentEncode(encodeRoots($roots));
-    def resp as http.Response init http.get($url, $headers);
-    return parseGraph($resp.body);
+    throw Error{
+        kind: "registry",
+        message: failureLine($resp.status, $what, errorDetail($resp.body)),
+        file: "",
+        line: 0,
+        col: 0
+    };
 }
 
 /**
@@ -501,13 +470,22 @@ export func resolveGraph(client as Client, roots as map of string to string) {
  * @param constraint {string} the version constraint
  * @param basePath {string} the negotiated API base path
  * @return {Resolution} the parsed resolution
- * @throws {Error} on a transport failure or an unparseable body
+ * @throws {Error} kind `registry` on a status other than a 2xx or the
+ *     not-found `404`; otherwise on a transport failure or an unparseable body
  */
-export func resolve(client as Client, name as string, constraint as string,
-    basePath as string) {
+export func resolve(client as Client, name as string, constraint as string, basePath as string) {
     def headers as map of string to string init {};
     def url as string init resolveUrl(apiRoot($client, $basePath), $name, $constraint);
-    def resp as http.Response init http.get($url, $headers);
+    return resolutionOf(http.get($url, $headers), $name);
+}
+
+# resolutionOf reads a `/resolve` response. The registry answers "no match" with
+# a 404 carrying `found: false`; any other non-2xx is a failure, not an answer
+# about the deck.
+func resolutionOf(resp as http.Response, name as string) {
+    if (not ($resp.status == 404)) {
+        requireSuccess($resp, "resolution of " + $name);
+    }
     return parseResolution($resp.body);
 }
 
@@ -522,6 +500,18 @@ export func resolve(client as Client, name as string, constraint as string,
 export func fetch(url as string) {
     def headers as map of string to string init {};
     return http.get($url, $headers);
+}
+
+# jsonObject encodes alternating keys and string values as one JSON object.
+# Every request body goes through here rather than being concatenated, so a `"`
+# or `\` in a tag, a URL, a version or a subject is escaped instead of ending
+# the string and starting a key of the caller's choosing.
+func jsonObject(pairs as list of string) {
+    def doc as json.Value init json.map();
+    for (def i as int init 0; $i + 1 < len($pairs); $i = $i + 2) {
+        $doc = json.set($doc, "/" + deckname.ptrEscape($pairs[$i]), $pairs[$i + 1]);
+    }
+    return json.encode($doc);
 }
 
 # --- discovery and version negotiation --------------------------------------
@@ -552,9 +542,15 @@ export func parseDiscovery(body as string) {
             if (json.has($doc, $p + "/deprecated")) {
                 $deprecated = json.asBool($doc, $p + "/deprecated");
             }
+            def mount as string init trimTrailingSlash(strOr($doc, $p + "/basePath"));
+            # Concatenated onto the base URL, so a path that does not start with
+            # `/` (`@other.host`, `.evil.example`) would change the host.
+            if (not ($mount == "") and not strings.startsWith($mount, "/")) {
+                continue;
+            }
             $mounts[] = ApiVersion{
                 version: json.asInt($doc, $p + "/version"),
-                basePath: trimTrailingSlash(strOr($doc, $p + "/basePath")),
+                basePath: $mount,
                 deprecated: $deprecated,
                 sunset: strOr($doc, $p + "/sunset")
             };
@@ -594,21 +590,30 @@ func parseAuth(doc as json.Value) {
 # trustedField reads one trusted-publishing field, in either of the two shapes
 # a registry may serve it.
 #
-# The specification's field table spells these `auth.trustedPublishing.url`,
-# which reads as a nested object, while the reference registry serves them as
-# flat keys with a dot in the name. Both are accepted here rather than one being
-# declared correct: a client that understands only its favourite spelling turns
-# a cosmetic difference into "this registry offers no trusted publishing".
+# The specification and the reference registry use a nested
+# `auth.trustedPublishing` object. Registries from before 2026-10-22 served flat
+# keys with a dot in the name (`"trustedPublishing.url"`), and those are still
+# read: missing them would report "no trusted publishing" for a registry that
+# offers it. A node that is not a string (`providers` as an array) reads as "".
 func trustedField(doc as json.Value, name as string) {
-    def nested as string init strOr($doc, "/auth/trustedPublishing/" + $name);
+    def nested as string init stringAt($doc, "/auth/trustedPublishing/" + $name);
     if (not ($nested == "")) {
         return $nested;
     }
-    return strOr($doc, "/auth/trustedPublishing." + $name);
+    return stringAt($doc, "/auth/trustedPublishing." + $name);
 }
 
-# trustedProviders reads the accepted issuers, which the specification types as
-# an array and the reference registry serves as one comma-separated string.
+# stringAt reads a string field at pointer, or "" when it is absent or holds
+# another type.
+func stringAt(doc as json.Value, pointer as string) {
+    if (not json.has($doc, $pointer) or not (json.typeOf($doc, $pointer) == "string")) {
+        return "";
+    }
+    return json.asString($doc, $pointer);
+}
+
+# trustedProviders reads the accepted issuers: an array, or, from a registry
+# older than 2026-10-22, one comma-separated string.
 func trustedProviders(doc as json.Value) {
     def out as list of string init [];
     try {
@@ -640,7 +645,7 @@ func trustedProviders(doc as json.Value) {
  */
 export func legacyDiscovery() {
     def mounts as list of ApiVersion init [
-        ApiVersion{ version: 1, basePath: "", deprecated: false, sunset: "" }
+        ApiVersion{version: 1, basePath: "", deprecated: false, sunset: ""}
     ];
     return Discovery{
         registry: "",
@@ -762,10 +767,15 @@ export func negotiate(d as Discovery, supported as list of int) {
             error: ""
         };
     }
-    return Negotiated{ ok: false, version: 0, basePath: "", warning: "",
+    return Negotiated{
+        ok: false,
+        version: 0,
+        basePath: "",
+        warning: "",
         features: $d.features,
         auth: $d.auth,
-        error: "no mount for API v" + convert.toString($best) };
+        error: "no mount for API v" + convert.toString($best)
+    };
 }
 
 /**
@@ -781,8 +791,12 @@ export func negotiate(d as Discovery, supported as list of int) {
 export func unreachable(baseUrl as string, why as string) {
     def none as list of string init [];
     return Negotiated{
-        ok: false, version: 0, basePath: "", warning: "",
-        features: $none, auth: noAuth(),
+        ok: false,
+        version: 0,
+        basePath: "",
+        warning: "",
+        features: $none,
+        auth: noAuth(),
         error: "could not reach the repository at " + $baseUrl + ": " + $why
     };
 }
@@ -800,8 +814,12 @@ export func unreachable(baseUrl as string, why as string) {
 export func lacksFeature(baseUrl as string, feature as string) {
     def none as list of string init [];
     return Negotiated{
-        ok: false, version: 0, basePath: "", warning: "",
-        features: $none, auth: noAuth(),
+        ok: false,
+        version: 0,
+        basePath: "",
+        warning: "",
+        features: $none,
+        auth: noAuth(),
         error: $baseUrl + " does not offer `" + $feature + "`"
     };
 }
@@ -820,6 +838,9 @@ export func discover(client as Client) {
     if ($resp.status == 404) {
         return legacyDiscovery();
     }
+    # A non-2xx is an error: a JSON maintenance page would otherwise parse as a
+    # registry with no API versions.
+    requireSuccess($resp, "discovery request");
     return parseDiscovery($resp.body);
 }
 
@@ -841,13 +862,19 @@ export func supportedVersions() {
  * @field verificationUri {string} where the user goes to approve
  * @field expiresIn {int} seconds until the device code dies
  * @field interval {int} the minimum seconds between polls
+ * @field throttled {bool} true when the registry answered `429` and started nothing
+ * @field retryAfter {int} the `Retry-After` seconds of a `429` (0 when absent)
+ * @field detail {string} what the registry said with a `429` ("" otherwise)
  */
 export def struct DeviceStart {
     deviceCode as string,
     userCode as string,
     verificationUri as string,
     expiresIn as int,
-    interval as int
+    interval as int,
+    throttled as bool,
+    retryAfter as int,
+    detail as string
 };
 
 /**
@@ -855,14 +882,23 @@ export def struct DeviceStart {
  *
  * The status code is the answer, not the body: a `202` means keep waiting and a
  * `429` means wait longer, and both may carry whatever body the registry likes.
+ * Only a `400`, `401`, `403` or `410` is a refusal (`error` set); every other
+ * status that is not a success leaves the question open (`pending` and
+ * `slowDown` set), so a caller holding a stored login keeps it.
  * @field done {bool} true when a token was issued
- * @field pending {bool} true when the user has not approved yet
- * @field slowDown {bool} true when the registry asked for a longer interval
+ * @field pending {bool} true when the user has not approved yet, or the
+ *     registry gave no answer about the login
+ * @field slowDown {bool} true when the registry asked for a longer interval,
+ *     or failed in a way that waiting may cure
+ * @field fault {bool} true for a `5xx`, a status the flow does not define, or a
+ *     `200` carrying no token: the registry, or something in front of it,
+ *     failed (a `429` sets `slowDown` and leaves this false)
  * @field token {string} the bearer token ("" unless done)
  * @field refreshToken {string} the refresh token ("" when the registry issues none)
  * @field expiresIn {int} seconds the token is good for
  * @field login {string} the account's display name
- * @field accountId {int} the account's stable numeric id
+ * @field subject {string} the account's stable, opaque id at the provider
+ * @field retryAfter {int} the `Retry-After` seconds of a `429` (0 when absent)
  * @field detail {string} what the registry said went wrong ("" when it said nothing)
  * @field error {string} a hard failure ("" when done, pending, or slowing down)
  */
@@ -870,24 +906,24 @@ export def struct TokenReply {
     done as bool,
     pending as bool,
     slowDown as bool,
+    fault as bool,
     token as string,
     refreshToken as string,
     expiresIn as int,
     login as string,
-    accountId as int,
+    subject as string,
+    retryAfter as int,
     detail as string,
     error as string
 };
 
-# errorDetail digs the explanation out of a failure body. It is the one thing
-# that tells a user *why* a request failed, and throwing it away is what forces
-# them to go and read the server's log.
-#
-# A body that is not the registry's JSON is reported rather than discarded,
-# because that is itself the diagnosis: the registry answers failures with
-# `{"error": ...}`, so an HTML body means something in front of it replied
-# instead, and a caller told only "HTTP 502" would go looking in the wrong
-# process entirely.
+# The longest foreign text shown in a message, in characters.
+def const SNIPPET_MAX as int init 120;
+
+# errorDetail extracts the explanation from a failure body: the `error` field of
+# the registry's JSON, or else the raw body, since a non-JSON body (an HTML error
+# page) shows that something in front of the registry answered. Cleaned by
+# `snippet`, because it reaches the terminal.
 func errorDetail(body as string) {
     if (strings.trim($body) == "") {
         return "";
@@ -895,7 +931,7 @@ func errorDetail(body as string) {
     try {
         def found as string init strOr(json.decode($body), "/error");
         if (not ($found == "")) {
-            return $found;
+            return snippet($found);
         }
     } catch (e) {
         return snippet($body);
@@ -903,15 +939,61 @@ func errorDetail(body as string) {
     return snippet($body);
 }
 
-# snippet renders a foreign body as one short line, since it may be an HTML
+# isJson reports whether a body parses as JSON at all.
+func isJson(body as string) {
+    try {
+        json.decode($body);
+        return true;
+    } catch (err) {
+        return false;
+    }
+}
+
+# unreadableReply explains a success status whose body is not JSON: typically
+# a proxy's or a load balancer's page. The write may well have happened, so the
+# message says so rather than claiming the repository could not be reached.
+func unreadableReply(status as int, body as string) {
+    return "the repository answered HTTP " + convert.toString($status) +
+        " but its reply is not JSON, so whether the request took effect is unknown: " +
+        snippet($body);
+}
+
+# snippet renders foreign text as one short, inert line, since it may be an HTML
 # error page and is only ever shown as a hint about who answered.
+#
+# Inert matters as much as short: the text reaches the user's terminal, so an
+# escape sequence in it (a C0 `ESC`, a C1 `CSI` or `OSC`) could recolour the
+# screen, rewrite earlier lines, or set the window title. Line breaks and tabs
+# become spaces; every other control character, and `DEL`, is dropped.
 func snippet(body as string) {
-    def flat as string init strings.trim(strings.replace(
-        strings.replace($body, "\n", " "), "\r", " "));
-    if (len($flat) > 120) {
-        return strings.substring($flat, 0, 120) + "...";
+    # Bounded before the per-character pass, so a megabyte of HTML is not walked
+    # only to keep its first line.
+    def raw as string init $body;
+    if (len($raw) > SNIPPET_MAX * 8) {
+        $raw = strings.substring($raw, 0, SNIPPET_MAX * 8);
+    }
+    def flat as string init strings.trim(cleanText($raw));
+    if (len($flat) > SNIPPET_MAX) {
+        return strings.substring($flat, 0, SNIPPET_MAX) + "...";
     }
     return $flat;
+}
+
+# cleanText replaces line breaks and tabs with a space and drops every other C0
+# control, `DEL`, and every C1 control.
+func cleanText(text as string) {
+    def out as list of string init [];
+    for (def ch in strings.chars($text)) {
+        def cp as int init convert.toCodepoint($ch);
+        if ($cp == 9 or $cp == 10 or $cp == 13) {
+            $out[] = " ";
+        } elseif ($cp < 32 or ($cp >= 127 and $cp < 160)) {
+            continue;
+        } else {
+            $out[] = $ch;
+        }
+    }
+    return strings.join($out, "");
 }
 
 # intOr reads an integer field at pointer, or a fallback when it is absent.
@@ -935,7 +1017,82 @@ export func parseDeviceStart(body as string) {
         userCode: strOr($doc, "/userCode"),
         verificationUri: strOr($doc, "/verificationUri"),
         expiresIn: intOr($doc, "/expiresIn", 900),
-        interval: intOr($doc, "/interval", 5)
+        interval: intOr($doc, "/interval", 5),
+        throttled: false,
+        retryAfter: 0,
+        detail: ""
+    };
+}
+
+# subjectOf reads the account's subject. A registry older than the `subject`
+# field sends only a numeric `accountId`, which is the same id in decimal.
+func subjectOf(doc as json.Value) {
+    def subject as string init stringAt($doc, "/subject");
+    if (not ($subject == "") or not json.has($doc, "/accountId")) {
+        return $subject;
+    }
+    return convert.toString(json.asInt($doc, "/accountId"));
+}
+
+def const DIGITS as string init "0123456789";
+
+/**
+ * Read a response's `Retry-After` as seconds. Only the delta-seconds form is
+ * read; an HTTP date or a malformed value reads as 0 (not given).
+ * @param resp {http.Response} the response
+ * @return {int} the seconds to wait, or 0 when the response names none
+ */
+export func retryAfterOf(resp as http.Response) {
+    if (not maps.has($resp.headers, "retry-after")) {
+        return 0;
+    }
+    def value as string init strings.trim($resp.headers["retry-after"]);
+    if ($value == "" or len($value) > 6) {
+        return 0;
+    }
+    for (def ch in strings.chars($value)) {
+        if (not strings.contains(DIGITS, $ch)) {
+            return 0;
+        }
+    }
+    return convert.toInt($value);
+}
+
+# openReply is a reply that leaves the login undecided: keep polling, and keep
+# any stored credential.
+func openReply(slowDown as bool, fault as bool, detail as string) {
+    return TokenReply{
+        done: false,
+        pending: true,
+        slowDown: $slowDown,
+        fault: $fault,
+        token: "",
+        refreshToken: "",
+        expiresIn: 0,
+        login: "",
+        subject: "",
+        retryAfter: 0,
+        detail: $detail,
+        error: ""
+    };
+}
+
+# refusedReply is a final answer: the registry considered the code or token and
+# said no.
+func refusedReply(detail as string, error as string) {
+    return TokenReply{
+        done: false,
+        pending: false,
+        slowDown: false,
+        fault: false,
+        token: "",
+        refreshToken: "",
+        expiresIn: 0,
+        login: "",
+        subject: "",
+        retryAfter: 0,
+        detail: $detail,
+        error: $error
     };
 }
 
@@ -943,58 +1100,80 @@ export func parseDeviceStart(body as string) {
  * Parse a token-endpoint reply, branching on the status code rather than the
  * body, which is what the specification requires: a registry may put anything
  * in a `202` body, and the code is the part that is guaranteed.
+ *
+ * Only `400`, `401`, `403` and `410` refuse. A `404`, `405` or `408` says
+ * something about the route or the connection, not about the token, and
+ * calling it a refusal made a refresh discard a login that was still good; it
+ * is reported as an open reply that backs off instead. A `200` whose body is
+ * not JSON is treated the same way (a proxy's page says nothing about the
+ * login), and a `200` that carries no token is an error rather than a success
+ * holding an empty token.
  * @param status {int} the HTTP status code
  * @param body {string} the response body (only read when the status says to)
  * @return {TokenReply} what the client should do next
  */
 export func parseTokenReply(status as int, body as string) {
     if ($status == 202) {
-        return TokenReply{ done: false, pending: true, slowDown: false, token: "",
-            refreshToken: "", expiresIn: 0, login: "", accountId: 0, detail: "", error: "" };
+        return openReply(false, false, "");
     }
     if ($status == 429) {
-        return TokenReply{ done: false, pending: true, slowDown: true, token: "",
-            refreshToken: "", expiresIn: 0, login: "", accountId: 0, detail: "", error: "" };
+        return openReply(true, false, errorDetail($body));
     }
-    # A server-side fault is not an answer about the login. The registry sits in
-    # front of an identity provider, so a `502` or `503` here usually means that
-    # provider was briefly unavailable while the registry was resolving an
-    # account that the user had *already approved*. The device code is still
-    # live, so the only sensible move is to wait and ask again: giving up throws
-    # away an authorization the user completed, and calling it a refusal blames
-    # the wrong party. Backing off matters because whatever is broken upstream
-    # will not be fixed by asking faster.
+    # A 5xx is not an answer about the login: usually the identity provider was
+    # briefly down after the user approved. The device code is still live, so
+    # back off and poll again.
     if ($status >= 500) {
-        return TokenReply{ done: false, pending: true, slowDown: true, token: "",
-            refreshToken: "", expiresIn: 0, login: "", accountId: 0,
-            detail: errorDetail($body), error: "" };
+        return openReply(true, true, errorDetail($body));
     }
+    def code as string init "HTTP " + convert.toString($status);
     if ($status == 403) {
-        return TokenReply{ done: false, pending: false, slowDown: false, token: "",
-            refreshToken: "", expiresIn: 0, login: "", accountId: 0, detail: "",
-            error: "the login was denied" };
+        return refusedReply(errorDetail($body), "the login was denied");
     }
     if ($status == 410) {
-        return TokenReply{ done: false, pending: false, slowDown: false, token: "",
-            refreshToken: "", expiresIn: 0, login: "", accountId: 0, detail: "",
-            error: "the code expired before it was approved" };
+        return refusedReply(errorDetail($body), "the code expired before it was approved");
+    }
+    if ($status == 400 or $status == 401) {
+        def why as string init errorDetail($body);
+        def error as string init "the registry rejected the login (" + $code + ")";
+        if (not ($why == "")) {
+            $error = $error + ": " + $why;
+        }
+        return refusedReply($why, $error);
     }
     if (not ($status == 200)) {
-        return TokenReply{ done: false, pending: false, slowDown: false, token: "",
-            refreshToken: "", expiresIn: 0, login: "", accountId: 0, detail: "",
-            error: "the registry rejected the login (HTTP " +
-                convert.toString($status) + ")" };
+        def detail as string init errorDetail($body);
+        if ($detail == "") {
+            $detail = "the repository answered " + $code;
+        } else {
+            $detail = "the repository answered " + $code + ": " + $detail;
+        }
+        # A status the flow does not define is a fault too: it says nothing
+        # about the login, and a poll loop that does not count it waits out the
+        # whole device code against a misrouted endpoint.
+        return openReply(true, true, $detail);
+    }
+    if (not isJson($body)) {
+        return openReply(true, false, unreadableReply($status, $body));
     }
     def doc as json.Value init json.decode($body);
+    def token as string init strOr($doc, "/token");
+    # A success with no token is the registry failing, not an answer about the
+    # login: refusing here would make a refresh discard a stored login the
+    # registry never rejected.
+    if ($token == "") {
+        return openReply(true, true, "the registry issued no token");
+    }
     return TokenReply{
         done: true,
         pending: false,
         slowDown: false,
-        token: strOr($doc, "/token"),
+        fault: false,
+        token: $token,
         refreshToken: strOr($doc, "/refreshToken"),
         expiresIn: intOr($doc, "/expiresIn", 0),
         login: strOr($doc, "/login"),
-        accountId: intOr($doc, "/accountId", 0),
+        subject: subjectOf($doc),
+        retryAfter: 0,
         detail: "",
         error: ""
     };
@@ -1006,28 +1185,86 @@ export func parseTokenReply(status as int, body as string) {
  * is never combined with the negotiated API base path, because the document
  * already says where the endpoint is.
  * @param client {Client} the registry client
- * @param endpoint {string} the advertised endpoint, absolute or rooted path
+ * @param endpoint {string} the advertised endpoint: an absolute URL or a path
  * @return {string} the absolute URL to call
+ * @throws {Error} kind `registry` when an absolute endpoint is on another origin
  */
 export func authUrl(client as Client, endpoint as string) {
     if (strings.startsWith($endpoint, "http://") or
         strings.startsWith($endpoint, "https://")) {
-        return $endpoint;
+        # Credentials go to this URL. The specification (server 4.1) makes
+        # these rooted paths, so an absolute one is tolerated only on the
+        # registry's own origin: a document naming another host, or plain http
+        # for an https registry, would send a refresh token somewhere else.
+        if (originOf($endpoint) == originOf($client.baseUrl)) {
+            return $endpoint;
+        }
+        throw Error{
+            kind: "registry",
+            message: "the registry advertises an auth endpoint on another origin (" +
+                $endpoint + "); refusing to send credentials there",
+            file: "",
+            line: 0,
+            col: 0
+        };
+    }
+    if (not strings.startsWith($endpoint, "/")) {
+        return $client.baseUrl + "/" + $endpoint;
     }
     return $client.baseUrl + $endpoint;
+}
+
+# originOf returns a URL's scheme and authority, lowercased: everything before
+# the first `/` after `://`.
+func originOf(url as string) {
+    def at as int init strings.indexOf($url, "://");
+    if ($at < 0) {
+        return "";
+    }
+    def rest as string init strings.substring($url, $at + 3, len($url));
+    def slash as int init strings.indexOf($rest, "/");
+    if ($slash >= 0) {
+        $rest = strings.substring($rest, 0, $slash);
+    }
+    return strings.lower(strings.substring($url, 0, $at + 3) + $rest);
 }
 
 /**
  * Start a device authorization (a network call).
  * @param client {Client} the registry client
  * @param auth {Auth} the advertised auth block
- * @return {DeviceStart} the user code and polling terms
- * @throws {Error} when the registry cannot be reached or replies with nonsense
+ * @return {DeviceStart} the user code and polling terms, or a throttled start
+ *     on a `429`
+ * @throws {Error} kind `registry` on a status other than a 2xx or a `429`; otherwise when
+ *     the registry cannot be reached or replies with nonsense
  */
 export func startDevice(client as Client, auth as Auth) {
     def headers as map of string to string init {};
     def resp as http.Response init http.post(
-        authUrl($client, $auth.deviceUrl), "application/json", '{}', $headers);
+        authUrl($client, $auth.deviceUrl),
+        "application/json",
+        '{}',
+        $headers);
+    return deviceStartOf($resp);
+}
+
+# deviceStartOf reads a device authorization response. A `429` is a throttled
+# start the caller may retry; any other non-2xx is an error, not a start with no
+# code.
+func deviceStartOf(resp as http.Response) {
+    if ($resp.status == 429) {
+        return DeviceStart{
+            deviceCode: "",
+            userCode: "",
+            verificationUri: "",
+            expiresIn: 0,
+            interval: 0,
+            throttled: true,
+            retryAfter: retryAfterOf($resp),
+            detail: errorDetail($resp.body)
+        };
+    }
+    requireSuccess($resp, "device authorization");
     return parseDeviceStart($resp.body);
 }
 
@@ -1041,10 +1278,23 @@ export func startDevice(client as Client, auth as Auth) {
  */
 export func pollToken(client as Client, auth as Auth, deviceCode as string) {
     def headers as map of string to string init {};
-    def body as string init '{"deviceCode":"' + $deviceCode + '"}';
+    def body as string init jsonObject(["deviceCode", $deviceCode]);
     def resp as http.Response init http.post(
-        authUrl($client, $auth.tokenUrl), "application/json", $body, $headers);
-    return parseTokenReply($resp.status, $resp.body);
+        authUrl($client, $auth.tokenUrl),
+        "application/json",
+        $body,
+        $headers);
+    return tokenReplyOf($resp);
+}
+
+# tokenReplyOf reads a token or refresh response, carrying a `429`'s
+# `Retry-After` along.
+func tokenReplyOf(resp as http.Response) {
+    def reply as TokenReply init parseTokenReply($resp.status, $resp.body);
+    if ($resp.status == 429) {
+        $reply.retryAfter = retryAfterOf($resp);
+    }
+    return $reply;
 }
 
 /**
@@ -1058,10 +1308,13 @@ export func pollToken(client as Client, auth as Auth, deviceCode as string) {
  */
 export func refreshToken(client as Client, auth as Auth, refreshToken as string) {
     def headers as map of string to string init {};
-    def body as string init '{"refreshToken":"' + $refreshToken + '"}';
+    def body as string init jsonObject(["refreshToken", $refreshToken]);
     def resp as http.Response init http.post(
-        authUrl($client, $auth.refreshUrl), "application/json", $body, $headers);
-    return parseTokenReply($resp.status, $resp.body);
+        authUrl($client, $auth.refreshUrl),
+        "application/json",
+        $body,
+        $headers);
+    return tokenReplyOf($resp);
 }
 
 /**
@@ -1125,12 +1378,18 @@ export func parseScopes(body as string) {
  * @param client {Client} the registry client
  * @param basePath {string} the negotiated API base path
  * @return {list of Scope} the scopes
- * @throws {Error} when the registry cannot be reached
+ * @throws {Error} kind `registry` on a status other than a 2xx; otherwise
+ *     when the registry cannot be reached or the body is not JSON
  */
 export func scopes(client as Client, basePath as string) {
     def headers as map of string to string init {};
-    def resp as http.Response init http.get(
-        apiRoot($client, $basePath) + "/scopes", $headers);
+    return scopesOf(http.get(apiRoot($client, $basePath) + "/scopes", $headers));
+}
+
+# scopesOf reads a `/scopes` response. A non-2xx is an error, not an empty
+# listing.
+func scopesOf(resp as http.Response) {
+    requireSuccess($resp, "scope listing");
     return parseScopes($resp.body);
 }
 
@@ -1147,9 +1406,8 @@ export func scopes(client as Client, basePath as string) {
  * @return {string} the body, or the body with the responder named
  */
 export func withResponder(status as int, body as string, via as string) {
-    # Only ever applied to a failure. A success carries JSON the caller is about
-    # to parse, so appending anything to it makes that parse fail, and a publish
-    # that actually landed is reported back as broken.
+    # A success carries JSON the caller is about to parse; tagging it would
+    # break that parse.
     if ($status < 400) {
         return $body;
     }
@@ -1223,8 +1481,22 @@ export func parseScopeReply(status as int, body as string) {
     def none as list of string init [];
     if ($status >= 400) {
         def why as string init errorDetail($body);
-        return ScopeReply{ status: $status, scope: "", owner: "",
-            owners: $none, error: failureLine($status, "request", $why) };
+        return ScopeReply{
+            status: $status,
+            scope: "",
+            owner: "",
+            owners: $none,
+            error: failureLine($status, "request", $why)
+        };
+    }
+    if (not isJson($body)) {
+        return ScopeReply{
+            status: $status,
+            scope: "",
+            owner: "",
+            owners: $none,
+            error: unreadableReply($status, $body)
+        };
     }
     def doc as json.Value init json.decode($body);
     def ids as list of string init [];
@@ -1251,11 +1523,12 @@ export func parseScopeReply(status as int, body as string) {
  * @return {ScopeReply} what the registry decided
  * @throws {Error} when the registry cannot be reached
  */
-export func claimScope(client as Client, basePath as string, scope as string,
-    token as string) {
-    def body as string init '{"scope":"' + deckname.fold($scope) + '"}';
+export func claimScope(client as Client, basePath as string, scope as string, token as string) {
+    def body as string init scopeBody($scope);
     def resp as http.Response init http.post(
-        apiRoot($client, $basePath) + "/claim", "application/json", $body,
+        apiRoot($client, $basePath) + "/claim",
+        "application/json",
+        $body,
         bearer($token));
     return parseScopeReply($resp.status, $resp.body);
 }
@@ -1271,16 +1544,18 @@ export func claimScope(client as Client, basePath as string, scope as string,
  * @return {ScopeReply} what the registry decided
  * @throws {Error} when the registry cannot be reached
  */
-export func setOwner(client as Client, basePath as string, scope as string,
-    subject as string, add as bool, token as string) {
-    def action as string init "remove";
-    if ($add) {
-        $action = "add";
-    }
-    def body as string init '{"scope":"' + deckname.fold($scope) +
-        '","subject":"' + $subject + '","action":"' + $action + '"}';
+export func setOwner(
+    client as Client,
+    basePath as string,
+    scope as string,
+    subject as string,
+    add as bool,
+    token as string) {
+    def body as string init ownersBody($scope, $subject, $add);
     def resp as http.Response init http.post(
-        apiRoot($client, $basePath) + "/owners", "application/json", $body,
+        apiRoot($client, $basePath) + "/owners",
+        "application/json",
+        $body,
         bearer($token));
     return parseScopeReply($resp.status, $resp.body);
 }
@@ -1329,8 +1604,7 @@ func padSegment(seg as string) {
 # single-byte codecs, and reaching for `iso-8859-1` there mangles any claim that
 # is not ASCII.
 func segmentText(seg as string) {
-    return convert.stringFromBytes(
-        encoding.fromText(padSegment($seg), "base64-url"), "utf-8");
+    return convert.stringFromBytes(encoding.fromText(padSegment($seg), "base64-url"), "utf-8");
 }
 
 /**
@@ -1346,10 +1620,14 @@ func segmentText(seg as string) {
  */
 export func decodeClaims(token as string) {
     def parts as list of string init strings.split($token, ".");
-    if (len($parts) < 2) {
-        throw Error{ kind: "registry",
+    if (not (len($parts) == 3)) {
+        throw Error{
+            kind: "registry",
             message: "this does not look like a token (expected three parts)",
-            file: "", line: 0, col: 0 };
+            file: "",
+            line: 0,
+            col: 0
+        };
     }
     def doc as json.Value init json.decode(segmentText($parts[1]));
     return Claims{
@@ -1370,16 +1648,36 @@ func readOrgs(doc as json.Value) {
     }
     if (json.typeOf($doc, "/orgs") == "list") {
         for (def i as int init 0; $i < json.length($doc, "/orgs"); $i = $i + 1) {
-            $out[] = json.asString($doc, "/orgs/" + convert.toString($i));
+            $out[] = scalarText($doc, "/orgs/" + convert.toString($i));
         }
         return $out;
     }
     if (json.typeOf($doc, "/orgs") == "map") {
         for (def name in json.keys($doc, "/orgs")) {
-            $out[] = $name + " (" + strOr($doc, "/orgs/" + deckname.ptrEscape($name)) + ")";
+            $out[] = $name + " (" + scalarText($doc, "/orgs/" + deckname.ptrEscape($name)) + ")";
         }
     }
     return $out;
+}
+
+# scalarText renders a claim value as text whatever JSON type it arrived as. A
+# provider id is a number at GitHub and is minted as one by some registries, and
+# `json.asString` throws on a number, which made `whoami` die on a valid token.
+func scalarText(doc as json.Value, pointer as string) {
+    def kind as string init json.typeOf($doc, $pointer);
+    if ($kind == "string") {
+        return json.asString($doc, $pointer);
+    }
+    if ($kind == "int") {
+        return convert.toString(json.asInt($doc, $pointer));
+    }
+    if ($kind == "float") {
+        return convert.toString(json.asFloat($doc, $pointer));
+    }
+    if ($kind == "bool") {
+        return convert.toString(json.asBool($doc, $pointer));
+    }
+    return "";
 }
 
 /**
@@ -1421,8 +1719,22 @@ export def struct PublishReply {
 export func parsePublishReply(status as int, body as string) {
     if ($status >= 400) {
         def why as string init errorDetail($body);
-        return PublishReply{ status: $status, name: "", version: "", commit: "",
-            error: failureLine($status, "publish", $why) };
+        return PublishReply{
+            status: $status,
+            name: "",
+            version: "",
+            commit: "",
+            error: failureLine($status, "publish", $why)
+        };
+    }
+    if (not isJson($body)) {
+        return PublishReply{
+            status: $status,
+            name: "",
+            version: "",
+            commit: "",
+            error: unreadableReply($status, $body)
+        };
     }
     def doc as json.Value init json.decode($body);
     return PublishReply{
@@ -1441,7 +1753,7 @@ export func parsePublishReply(status as int, body as string) {
  * @return {string} the request body
  */
 export func publishBody(repository as string, tag as string) {
-    return '{"repository":"' + $repository + '","tag":"' + $tag + '"}';
+    return jsonObject(["repository", $repository, "tag", $tag]);
 }
 
 /**
@@ -1468,8 +1780,22 @@ export def struct YankReply {
  */
 export func parseYankReply(status as int, body as string) {
     if ($status >= 400) {
-        return YankReply{ status: $status, name: "", version: "", yanked: false,
-            error: failureLine($status, "request", errorDetail($body)) };
+        return YankReply{
+            status: $status,
+            name: "",
+            version: "",
+            yanked: false,
+            error: failureLine($status, "request", errorDetail($body))
+        };
+    }
+    if (not isJson($body)) {
+        return YankReply{
+            status: $status,
+            name: "",
+            version: "",
+            yanked: false,
+            error: unreadableReply($status, $body)
+        };
     }
     def doc as json.Value init json.decode($body);
     return YankReply{
@@ -1502,5 +1828,29 @@ export func yankUrl(client as Client, basePath as string, yanking as bool) {
  * @return {string} the request body
  */
 export func yankBody(name as string, version as string) {
-    return '{"name":"' + deckname.fold($name) + '","version":"' + $version + '"}';
+    return jsonObject(["name", deckname.fold($name), "version", $version]);
+}
+
+/**
+ * The JSON body a scope claim carries.
+ * @param scope {string} the scope, with or without the leading `@`
+ * @return {string} the request body
+ */
+export func scopeBody(scope as string) {
+    return jsonObject(["scope", deckname.fold($scope)]);
+}
+
+/**
+ * The JSON body an owners change carries.
+ * @param scope {string} the scope to change
+ * @param subject {string} the principal to add or remove
+ * @param add {bool} true to add, false to remove
+ * @return {string} the request body
+ */
+export func ownersBody(scope as string, subject as string, add as bool) {
+    def action as string init "remove";
+    if ($add) {
+        $action = "add";
+    }
+    return jsonObject(["scope", deckname.fold($scope), "subject", $subject, "action", $action]);
 }
