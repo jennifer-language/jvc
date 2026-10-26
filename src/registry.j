@@ -226,18 +226,20 @@ func hexByte(n as int) {
  * @return {string} the percent-encoded component
  */
 export func percentEncode(s as string) {
-    def out as string init "";
+    # Pieces appended in place and joined once, rather than a string rebuilt
+    # per character.
+    def out as list of string init [];
     for (def ch in strings.chars($s)) {
         if (strings.indexOf(UNRESERVED, $ch) >= 0) {
-            $out = $out + $ch;
+            $out[] = $ch;
         } else {
             def raw as bytes init convert.bytesFromString($ch, "utf-8");
             for (def i as int init 0; $i < len($raw); $i = $i + 1) {
-                $out = $out + "%" + hexByte($raw[$i]);
+                $out[] = "%" + hexByte($raw[$i]);
             }
         }
     }
-    return $out;
+    return strings.join($out, "");
 }
 
 # trimTrailingSlash drops a single trailing "/" from a base URL.
@@ -534,14 +536,35 @@ export func discoveryUrl(baseUrl as string) {
  */
 export func parseDiscovery(body as string) {
     def doc as json.Value init json.decode($body);
+    # A field of the wrong type is the registry's mistake, and reported as one
+    # naming the document, not as the decoder's bare "json.asInt: node is a
+    # string" from somewhere inside this function.
+    try {
+        return discoveryOf($doc);
+    } catch (err) {
+        throw Error{
+            kind: "registry",
+            message: "the registry's discovery document is malformed: " + $err.message,
+            file: "",
+            line: 0,
+            col: 0
+        };
+    }
+}
+
+# discoveryOf reads a decoded discovery document, raising on a field of the
+# wrong type (`expectKind`); parseDiscovery reports that as the registry's.
+func discoveryOf(doc as json.Value) {
     def mounts as list of ApiVersion init [];
     if (json.has($doc, "/apis")) {
         for (def i as int init 0; $i < json.length($doc, "/apis"); $i = $i + 1) {
             def p as string init "/apis/" + convert.toString($i);
             def deprecated as bool init false;
             if (json.has($doc, $p + "/deprecated")) {
+                expectKind($doc, $p + "/deprecated", "bool");
                 $deprecated = json.asBool($doc, $p + "/deprecated");
             }
+            expectKind($doc, $p + "/version", "int");
             def mount as string init trimTrailingSlash(strOr($doc, $p + "/basePath"));
             # Concatenated onto the base URL, so a path that does not start with
             # `/` (`@other.host`, `.evil.example`) would change the host.
@@ -563,6 +586,24 @@ export func parseDiscovery(body as string) {
         features: readStringList($doc, "/features"),
         auth: parseAuth($doc)
     };
+}
+
+# expectKind raises when the node at pointer is absent or not of the JSON kind
+# wanted, naming the field, so a caller can say which document held it.
+func expectKind(doc as json.Value, pointer as string, wanted as string) {
+    def actual as string init "absent";
+    if (json.has($doc, $pointer)) {
+        $actual = json.typeOf($doc, $pointer);
+    }
+    if (not ($actual == $wanted)) {
+        throw Error{
+            kind: "registry",
+            message: $pointer + " is " + $actual + ", expected " + $wanted,
+            file: "",
+            line: 0,
+            col: 0
+        };
+    }
 }
 
 # parseAuth reads the discovery document's `auth` object. Absent means the
@@ -996,10 +1037,21 @@ func cleanText(text as string) {
     return strings.join($out, "");
 }
 
-# intOr reads an integer field at pointer, or a fallback when it is absent.
+# intOr reads an integer field at pointer, or a fallback when it is absent or
+# not a number. A float is truncated: JSON has one number type, and a JWT's
+# `"exp": 1790000000.0` is the same instant, which once broke `jvc whoami`.
+# Never throws, since some callers run after a token was issued, where a throw
+# would lose it.
 func intOr(doc as json.Value, pointer as string, fallback as int) {
-    if (json.has($doc, $pointer)) {
+    if (not json.has($doc, $pointer)) {
+        return $fallback;
+    }
+    def kind as string init json.typeOf($doc, $pointer);
+    if ($kind == "int") {
         return json.asInt($doc, $pointer);
+    }
+    if ($kind == "float") {
+        return convert.toInt(json.asFloat($doc, $pointer));
     }
     return $fallback;
 }
@@ -1025,13 +1077,22 @@ export func parseDeviceStart(body as string) {
 }
 
 # subjectOf reads the account's subject. A registry older than the `subject`
-# field sends only a numeric `accountId`, which is the same id in decimal.
+# field sends only `accountId`, the same id in decimal, normally a number but
+# accepted as a string. Never throws: it runs after the token was issued, and a
+# throw there lost a rotating refresh token with it.
 func subjectOf(doc as json.Value) {
     def subject as string init stringAt($doc, "/subject");
     if (not ($subject == "") or not json.has($doc, "/accountId")) {
         return $subject;
     }
-    return convert.toString(json.asInt($doc, "/accountId"));
+    def kind as string init json.typeOf($doc, "/accountId");
+    if ($kind == "string") {
+        return json.asString($doc, "/accountId");
+    }
+    if ($kind == "int" or $kind == "float") {
+        return convert.toString(intOr($doc, "/accountId", 0));
+    }
+    return "";
 }
 
 def const DIGITS as string init "0123456789";
@@ -1169,9 +1230,11 @@ export func parseTokenReply(status as int, body as string) {
         slowDown: false,
         fault: false,
         token: $token,
-        refreshToken: strOr($doc, "/refreshToken"),
+        # Read without throwing, every one: the token is issued by now, and a
+        # throw would lose it and, with a rotating refresh, the login too.
+        refreshToken: stringAt($doc, "/refreshToken"),
         expiresIn: intOr($doc, "/expiresIn", 0),
-        login: strOr($doc, "/login"),
+        login: scalarText($doc, "/login"),
         subject: subjectOf($doc),
         retryAfter: 0,
         detail: "",
@@ -1499,16 +1562,18 @@ export func parseScopeReply(status as int, body as string) {
         };
     }
     def doc as json.Value init json.decode($body);
+    # An owner is a subject, which some registries send as a number, so each
+    # field is read as text whatever its type rather than thrown on.
     def ids as list of string init [];
-    if (json.has($doc, "/owners")) {
+    if (json.has($doc, "/owners") and json.typeOf($doc, "/owners") == "list") {
         for (def i as int init 0; $i < json.length($doc, "/owners"); $i = $i + 1) {
-            $ids[] = json.asString($doc, "/owners/" + convert.toString($i));
+            $ids[] = scalarText($doc, "/owners/" + convert.toString($i));
         }
     }
     return ScopeReply{
         status: $status,
-        scope: strOr($doc, "/scope"),
-        owner: strOr($doc, "/owner"),
+        scope: scalarText($doc, "/scope"),
+        owner: scalarText($doc, "/owner"),
         owners: $ids,
         error: ""
     };
@@ -1660,10 +1725,14 @@ func readOrgs(doc as json.Value) {
     return $out;
 }
 
-# scalarText renders a claim value as text whatever JSON type it arrived as. A
-# provider id is a number at GitHub and is minted as one by some registries, and
-# `json.asString` throws on a number, which made `whoami` die on a valid token.
+# scalarText renders a claim value as text whatever JSON type it arrived as, or
+# "" when it is absent or a list or object. A provider id is a number at GitHub
+# and is minted as one by some registries, and `json.asString` throws on a
+# number, which made `whoami` die on a valid token.
 func scalarText(doc as json.Value, pointer as string) {
+    if (not json.has($doc, $pointer)) {
+        return "";
+    }
     def kind as string init json.typeOf($doc, $pointer);
     if ($kind == "string") {
         return json.asString($doc, $pointer);

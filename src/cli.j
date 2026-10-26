@@ -224,6 +224,11 @@ export def struct Target {
  * `$JVC_TOKEN` to the public default. A `--registry` that contradicts the
  * mapping is refused, since one of the two is a mistake and jvc cannot tell
  * which.
+ *
+ * Two more refusals guard the credential that goes with the write: a plain
+ * `http://` registry off this machine (`cleartextProblem`), and an unpinned
+ * `$JVC_TOKEN` that the mapping would send somewhere other than where the flag,
+ * `$JVC_REGISTRY` or the default point (`unpinnedTokenProblem`).
  * @param args {list of string} the command line
  * @param registries {list of manifest.Dependency} the project's `[registries]`
  * @param name {string} the deck the write is about (`@scope/deck`, or `@scope/x` for a scope)
@@ -236,7 +241,7 @@ export func writeTarget(
     def given as string init registryBase($args);
     def mapped as string init scopemap.registryFor($registries, $name, "");
     if ($mapped == "") {
-        return Target{url: $given, error: ""};
+        return guardedTarget($given, cleartextProblem($given));
     }
     def flag as string init flagValue($args, "--registry");
     if (not ($flag == "") and not (credentialKey($flag) == credentialKey($mapped))) {
@@ -247,7 +252,117 @@ export func writeTarget(
                 $flag + ". Drop the flag, or change the mapping with `jvc registry`."
         };
     }
-    return Target{url: $mapped, error: ""};
+    def why as string init cleartextProblem($mapped);
+    if ($why == "") {
+        $why = unpinnedTokenProblem($mapped, $given);
+    }
+    return guardedTarget($mapped, $why);
+}
+
+# guardedTarget is a Target at url, refused when why is non-empty.
+func guardedTarget(url as string, why as string) {
+    if (not ($why == "")) {
+        return Target{url: "", error: $why};
+    }
+    return Target{url: $url, error: ""};
+}
+
+/** The variable that allows credentials to an `http://` registry off this machine. */
+export def const ENV_INSECURE as string init "JVC_INSECURE_HTTP";
+
+/**
+ * Say why a credential must not be sent to a registry, or "" when it may: a
+ * plain `http://` base URL whose host is not this machine. A bearer token, a
+ * refresh token and `$JVC_TOKEN` all travel in the clear there, so a typo in
+ * `[registries]` or a mirror set up without TLS would hand them to anyone on
+ * the path. `localhost`, `127.0.0.0/8` and `[::1]` are allowed, since a
+ * registry run for development never leaves the machine, and
+ * `$JVC_INSECURE_HTTP=1` allows the rest on purpose.
+ * @param base {string} the registry base URL
+ * @return {string} the refusal, or ""
+ */
+export func cleartextProblem(base as string) {
+    def u as string init strings.lower(strings.trim($base));
+    if (not strings.startsWith($u, "http://")) {
+        return "";
+    }
+    if (isLoopbackUrl($u) or os.getEnv(ENV_INSECURE) == "1") {
+        return "";
+    }
+    return "refusing to send credentials to " + $base + " over plain http://, where " +
+        "anyone on the network path can read them; use https://, or set " +
+        ENV_INSECURE + "=1 to allow it on purpose";
+}
+
+# isLoopbackUrl reports whether a lowercased http(s) URL names this machine:
+# `localhost`, an address in 127.0.0.0/8, or `[::1]`, with or without a port
+# and userinfo.
+func isLoopbackUrl(u as string) {
+    def rest as string init strings.substring($u, strings.indexOf($u, "://") + 3, len($u));
+    def slash as int init strings.indexOf($rest, "/");
+    if ($slash >= 0) {
+        $rest = strings.substring($rest, 0, $slash);
+    }
+    def at as int init strings.lastIndexOf($rest, "@");
+    if ($at >= 0) {
+        $rest = strings.substring($rest, $at + 1, len($rest));
+    }
+    if (strings.startsWith($rest, "[")) {
+        return strings.startsWith($rest, "[::1]");
+    }
+    def colon as int init strings.indexOf($rest, ":");
+    if ($colon >= 0) {
+        $rest = strings.substring($rest, 0, $colon);
+    }
+    return $rest == "localhost" or isLoopbackV4($rest);
+}
+
+# isLoopbackV4 reports whether a host is a dotted IPv4 address in 127.0.0.0/8.
+# All four parts must be digits: `127.evil.example` is a name, which resolves
+# wherever its owner likes.
+func isLoopbackV4(host as string) {
+    def parts as list of string init strings.split($host, ".");
+    if (not (len($parts) == 4) or not ($parts[0] == "127")) {
+        return false;
+    }
+    for (def part in $parts) {
+        if ($part == "" or len($part) > 3) {
+            return false;
+        }
+        for (def ch in strings.chars($part)) {
+            if (not strings.contains("0123456789", $ch)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * Say why a write would hand an unpinned `$JVC_TOKEN` to a registry it was
+ * probably not meant for, or "" when it would not.
+ *
+ * Unpinned, the token goes wherever the write goes, and with a `[registries]`
+ * mapping that is decided by the checked-out manifest, which a pull request
+ * can change. So when the mapping sends the write somewhere other than the
+ * registry the flag, `$JVC_REGISTRY` or the default name, the write is
+ * refused until `$JVC_TOKEN_REGISTRY` says that registry is the one the token
+ * is for. A pinned token needs no such check (`ciauth.environmentGrantFor`
+ * withholds it from anywhere else), and neither does a mapping that agrees.
+ * @param mapped {string} the registry the mapping sends the write to
+ * @param given {string} the registry named by `--registry`, `$JVC_REGISTRY` or the default
+ * @return {string} the refusal, or ""
+ */
+export func unpinnedTokenProblem(mapped as string, given as string) {
+    if (strings.trim(os.getEnv(ciauth.ENV_TOKEN)) == "" or
+        not (strings.trim(os.getEnv(ciauth.ENV_TOKEN_REGISTRY)) == "") or
+        scopemap.sameRegistry($mapped, $given)) {
+        return "";
+    }
+    return "refusing: $JVC_TOKEN is set and not pinned to a registry, and this " +
+        "project's [registries] sends this write to " + $mapped + ", not " + $given +
+        ". Set " + ciauth.ENV_TOKEN_REGISTRY + "=" + $mapped + " if the token is " +
+        "meant for it.";
 }
 
 # scopeName turns a scope argument (`acme` or `@acme`) into a deck name in that
@@ -1619,8 +1734,15 @@ func isTrustedTarget(base as string, auth as registry.Auth, requestUrl as string
     if (not registry.offersTrustedPublishing($auth)) {
         return false;
     }
-    return registry.authUrl(registry.newClient($base), $auth.trustedUrl) ==
-        $requestUrl;
+    # `authUrl` throws on an endpoint off the registry's origin. That means "not
+    # here", not a failure: thrown, it stopped every write by every user, though
+    # the identity token was never going to be sent there.
+    try {
+        return registry.authUrl(registry.newClient($base), $auth.trustedUrl) ==
+            $requestUrl;
+    } catch (err) {
+        return false;
+    }
 }
 
 /**
@@ -1865,6 +1987,12 @@ export func startRetryWait(retryAfter as int) {
  * @return {Outcome} what happened, with the account name on success
  */
 export func runLogin(base as string) {
+    # Before anything is sent: the device code, the token and the refresh token
+    # all cross the wire in this flow.
+    def cleartext as string init cleartextProblem($base);
+    if (not ($cleartext == "")) {
+        return fail($cleartext);
+    }
     def client as registry.Client init registry.newClient($base);
     def api as registry.Negotiated init agreeApi($client);
     if (not $api.ok) {
@@ -1924,7 +2052,8 @@ export func runLogin(base as string) {
     }
     def faults as int init 0;
     def lastDetail as string init "";
-    while ($waited < $start.expiresIn) {
+    def window as int init loginWindow($start.expiresIn);
+    while ($waited < $window) {
         time.sleep(time.fromSeconds($interval));
         $waited = $waited + $interval;
         def reply as registry.TokenReply init pollOnce($client, $api.auth, $start.deviceCode);
@@ -1955,6 +2084,24 @@ export func runLogin(base as string) {
         $interval = nextInterval($interval, $reply.slowDown, $reply.retryAfter);
     }
     return fail("the code expired before it was approved; run `jvc login` again");
+}
+
+/** The longest `jvc login` polls for an approval, whatever the registry offers. */
+export def const MAX_LOGIN_WAIT as int init 900;
+
+/**
+ * How long to poll for a device approval: the code's `expiresIn`, capped at
+ * `MAX_LOGIN_WAIT`. Uncapped, a registry answering `expiresIn` of a day kept
+ * jvc polling for a day; the cap matches the spec's default lifetime, and an
+ * approval nobody gave in fifteen minutes is not coming.
+ * @param expiresIn {int} the device code's lifetime in seconds
+ * @return {int} the seconds to poll for
+ */
+export func loginWindow(expiresIn as int) {
+    if ($expiresIn > MAX_LOGIN_WAIT) {
+        return MAX_LOGIN_WAIT;
+    }
+    return $expiresIn;
 }
 
 # noTerminalRefusal explains why no device code was printed, and what to do
@@ -2529,6 +2676,12 @@ export func runRegistry(dir as string, pattern as string, url as string) {
             "\n  give the registry's base URL, starting http:// or https://");
     }
     def warning as string init shadowWarning($dir, $m.registries, $key, $url);
+    # Said where the mapping is made, not first at a publish that refuses it.
+    if (not (cleartextProblem($url) == "")) {
+        $warning = $warning + "\nwarning: " + $url + " is plain http://, so jvc will " +
+            "not send it credentials (publish, yank, claim, owners, login) unless " +
+            ENV_INSECURE + "=1 is set";
+    }
     manifest.save(manifest.addRegistry($m, $key, $url), $loc.path);
     return ok($key + " now resolves at " + $url + $warning);
 }

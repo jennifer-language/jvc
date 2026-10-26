@@ -1462,7 +1462,7 @@ func testRegistryVerbIsQuietWhenNothingMoves() {
     def dir as string init fs.makeTempDir("", "jvc-regverb");
     manifest.save(manifest.empty("@acme/app", "0.1.0"), $dir + "/deck.toml");
     writeLock($dir, [lockedAt("@other/thing", "1.0.0", "http://public.example")]);
-    def out as Outcome init runRegistry($dir, "@acme", "http://internal.example");
+    def out as Outcome init runRegistry($dir, "@acme", "https://internal.example");
     testing.assertTrue($out.ok);
     testing.assertFalse(strings.contains($out.message, "warning"));
     fs.removeAll($dir);
@@ -3329,4 +3329,109 @@ func testNameIsAValuedFlag() {
     def pos as list of string init positionals($args, 1);
     testing.assertEqual($pos[len($pos) - 1], "https://x/y.git");
     testing.assertFalse(listHas($pos, "tool"));
+}
+
+# --- credentials in transit -------------------------------------------------
+
+func testCleartextIsRefusedOffThisMachine() {
+    def was as string init os.getEnv("JVC_INSECURE_HTTP");
+    os.setEnv("JVC_INSECURE_HTTP", "");
+    testing.assertContains(cleartextProblem("http://registry.example"), "plain http://");
+    testing.assertContains(cleartextProblem("HTTP://127.evil.example"), "plain http://");
+    testing.assertContains(cleartextProblem("http://localhost.evil:80"), "plain http://");
+    testing.assertContains(cleartextProblem("http://127.0.0.1.evil.example"), "plain http://");
+    testing.assertContains(cleartextProblem("http://127.0.0.1@evil.example"), "plain http://");
+    testing.assertEqual(cleartextProblem("https://registry.example"), "");
+    testing.assertEqual(cleartextProblem("http://127.0.0.1:8080"), "");
+    testing.assertEqual(cleartextProblem("http://localhost/reg"), "");
+    testing.assertEqual(cleartextProblem("http://u@[::1]:9/"), "");
+    os.setEnv("JVC_INSECURE_HTTP", "1");
+    testing.assertEqual(cleartextProblem("http://registry.example"), "");
+    os.setEnv("JVC_INSECURE_HTTP", $was);
+}
+
+func testAWriteToAnHttpRegistryIsRefused() {
+    def was as string init os.getEnv("JVC_INSECURE_HTTP");
+    os.setEnv("JVC_INSECURE_HTTP", "");
+    def t as Target init writeTarget(
+        ["jvc", "yank"],
+        mapped({"@acme/*": "http://registry.internal.example"}),
+        "@acme/tool");
+    def flagged as Target init writeTarget(
+        ["jvc", "yank", "--registry", "http://registry.example"],
+        mapped({}),
+        "@acme/tool");
+    os.setEnv("JVC_INSECURE_HTTP", $was);
+    testing.assertEqual($t.url, "");
+    testing.assertContains($t.error, "plain http://");
+    testing.assertContains($flagged.error, "plain http://");
+}
+
+func testLoginRefusesAnHttpRegistry() {
+    def was as string init os.getEnv("JVC_INSECURE_HTTP");
+    os.setEnv("JVC_INSECURE_HTTP", "");
+    def out as Outcome init runLogin("http://registry.example");
+    os.setEnv("JVC_INSECURE_HTTP", $was);
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "plain http://");
+}
+
+# A checked-out manifest decides where an unpinned token goes, so a mapping
+# that sends it elsewhere needs the pin to say so.
+func testAnUnpinnedTokenDoesNotFollowAMappingElsewhere() {
+    def token as string init os.getEnv("JVC_TOKEN");
+    def pin as string init os.getEnv("JVC_TOKEN_REGISTRY");
+    os.setEnv("JVC_TOKEN", "secret");
+    os.setEnv("JVC_TOKEN_REGISTRY", "");
+    # The registry the write would otherwise go to, as $JVC_REGISTRY names it
+    # (a contradicting --registry is refused on its own).
+    def registryWas as string init os.getEnv("JVC_REGISTRY");
+    os.setEnv("JVC_REGISTRY", "https://public.example");
+    def args as list of string init ["jvc", "yank"];
+    def plain as list of string init ["jvc", "yank"];
+    def evil as list of manifest.Dependency init mapped({"@acme/*": "https://evil.example"});
+    def agrees as list of manifest.Dependency init mapped({"@acme/*": "https://public.example/"});
+    def away as Target init writeTarget($args, $evil, "@acme/x");
+    def same as Target init writeTarget($args, $agrees, "@acme/x");
+    os.setEnv("JVC_TOKEN_REGISTRY", "https://evil.example");
+    def pinned as Target init writeTarget($plain, $evil, "@acme/x");
+    os.setEnv("JVC_TOKEN", "");
+    os.setEnv("JVC_TOKEN_REGISTRY", "");
+    def noToken as Target init writeTarget($plain, $evil, "@acme/x");
+    os.setEnv("JVC_TOKEN", $token);
+    os.setEnv("JVC_TOKEN_REGISTRY", $pin);
+    os.setEnv("JVC_REGISTRY", $registryWas);
+    testing.assertContains($away.error, "not pinned");
+    testing.assertContains($away.error, "JVC_TOKEN_REGISTRY=https://evil.example");
+    testing.assertEqual($same.error, "");
+    testing.assertEqual($pinned.url, "https://evil.example");
+    testing.assertEqual($noToken.url, "https://evil.example");
+}
+
+# An identity-token endpoint off the registry's origin means "not here", not a
+# failure of every write.
+func testATrustedEndpointOffOriginIsNotTheTarget() {
+    def auth as registry.Auth init trustedPublishingAuth();
+    $auth.trustedUrl = "https://elsewhere.example/v1/publish";
+    def url as string init "https://r.example/v1/publish";
+    testing.assertFalse(isTrustedTarget("https://r.example", $auth, $url));
+}
+
+func testTheLoginWindowIsCapped() {
+    testing.assertEqual(loginWindow(600), 600);
+    testing.assertEqual(loginWindow(86400), MAX_LOGIN_WAIT);
+}
+
+func testMappingAnHttpRegistryWarnsAtOnce() {
+    def was as string init os.getEnv("JVC_INSECURE_HTTP");
+    os.setEnv("JVC_INSECURE_HTTP", "");
+    def dir as string init freshDir("registryhttp");
+    runInit($dir, "demo");
+    def plain as Outcome init runRegistry($dir, "@acme", "http://registry.internal");
+    def local as Outcome init runRegistry($dir, "@dev", "http://127.0.0.1:8080");
+    os.setEnv("JVC_INSECURE_HTTP", $was);
+    testing.assertTrue($plain.ok);
+    testing.assertContains($plain.message, "will not send it credentials");
+    testing.assertFalse(strings.contains($local.message, "credentials"));
+    fs.removeAll($dir);
 }

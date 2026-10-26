@@ -329,7 +329,16 @@ never from a hard-coded path: the provider, the flow and the endpoints. So:
   one past 60 s is reported rather than waited out;
 - polling waits the interval the repository asks for and doubles it on a `429`
   or a server fault, or waits a longer `Retry-After` (capped at 60 s), giving
-  up after four faults in a row or when the code expires.
+  up after four faults in a row or when the code expires, and after fifteen
+  minutes whatever lifetime the repository gave the code.
+
+**Credentials never travel over plain `http://` to another machine.** `login`
+and every write (`publish`, `yank`, `claim`, `owners`) refuse a registry whose
+base URL is `http://` unless its host is this machine (`localhost`,
+`127.0.0.0/8`, `[::1]`), because the device code, the tokens and `$JVC_TOKEN`
+would all cross the network readable. Set `JVC_INSECURE_HTTP=1` to allow one on
+purpose, a registry on a network you trust, say. `jvc registry` warns as soon as
+you map a scope to such a URL.
 
 The token is stored in `$XDG_CONFIG_HOME/jvc/credentials.json` (override with
 `$JVC_CREDENTIALS`), owner-readable only, **keyed by repository URL** so a token
@@ -452,6 +461,12 @@ nothing more, so it is never written to the credential file and never printed.
 The variable names no registry, so in a project that talks to two it would be
 offered to both. Set **`$JVC_TOKEN_REGISTRY`** to the base URL it was minted
 for, and jvc offers it to that registry only.
+
+Unpinned, the token goes wherever the write goes, and a `[registries]` mapping
+in the checked-out manifest decides that, which a pull request can change. So
+when the mapping sends a write somewhere other than the registry `--registry`,
+`$JVC_REGISTRY` or the default name, jvc refuses until `$JVC_TOKEN_REGISTRY`
+names that registry. A mapping that agrees needs no pin.
 
 ```sh
 JVC_TOKEN=... jvc publish --tag 0.2.0

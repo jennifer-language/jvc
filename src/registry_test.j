@@ -989,3 +989,67 @@ func testASuccessWhoseBodyIsNotJsonSaysSo() {
     testing.assertContains(parseYankReply(200, "<html>").error, "not JSON");
     testing.assertContains(parseScopeReply(201, "").error, "not JSON");
 }
+
+# --- replies of the wrong type ----------------------------------------------
+
+# The token is issued by now, so nothing after it may throw: a string
+# `accountId`, a numeric login and a float lifetime are all read.
+func testATokenReplyWithOddTypesKeepsTheToken() {
+    def r as TokenReply init parseTokenReply(
+        200,
+        '{"token":"t","refreshToken":"r","accountId":"1234","login":42,"expiresIn":3600.0}');
+    testing.assertTrue($r.done);
+    testing.assertEqual($r.token, "t");
+    testing.assertEqual($r.refreshToken, "r");
+    testing.assertEqual($r.subject, "1234");
+    testing.assertEqual($r.login, "42");
+    testing.assertEqual($r.expiresIn, 3600);
+    def oddBody as string init '{"token":"t","refreshToken":7,"accountId":[1]}';
+    def odd as TokenReply init parseTokenReply(200, $oddBody);
+    testing.assertEqual($odd.token, "t");
+    testing.assertEqual($odd.refreshToken, "");
+    testing.assertEqual($odd.subject, "");
+}
+
+# A JWT `exp` written as a float is the same instant.
+func testAFloatExpiryIsRead() {
+    def payload as string init '{"sub":"1","exp":1790000000.0,"iat":"soon"}';
+    def b64 as string init encoding.toText(convert.bytesFromString($payload, "utf-8"), "base64");
+    def segment as string init strings.replace(
+        strings.replace(strings.replace($b64, "=", ""), "+", "-"),
+        "/",
+        "_");
+    def claims as Claims init decodeClaims("h." + $segment + ".s");
+    testing.assertEqual($claims.expiresAt, 1790000000);
+    testing.assertEqual($claims.issuedAt, 0);
+}
+
+func testAMalformedDiscoveryIsTheRegistrysError() {
+    testing.assertThrows("discoveryWithStringVersion", "registry");
+    def msg as string init "";
+    try {
+        discoveryWithStringVersion();
+    } catch (e) {
+        $msg = $e.message;
+    }
+    testing.assertContains($msg, "discovery document is malformed");
+    testing.assertContains($msg, "/apis/0/version is string, expected int");
+}
+
+func discoveryWithStringVersion() {
+    parseDiscovery('{"apis":[{"version":"1","basePath":"/v1"}]}');
+}
+
+func testScopeReplyOwnersMayBeNumbers() {
+    def body as string init '{"scope":"acme","owner":17,"owners":[17,"u-2"]}';
+    def r as ScopeReply init parseScopeReply(200, $body);
+    testing.assertEqual($r.error, "");
+    testing.assertEqual($r.owner, "17");
+    testing.assertEqual($r.owners[0], "17");
+    testing.assertEqual($r.owners[1], "u-2");
+}
+
+func testPercentEncodeStillEncodes() {
+    testing.assertEqual(percentEncode("@acme/routeros"), "%40acme%2Frouteros");
+    testing.assertEqual(percentEncode("a b~ü"), "a%20b~%C3%BC");
+}
