@@ -842,3 +842,37 @@ func testReadBlobsAnswersEveryNameInOrder() {
     testing.assertContains($r.blobs[3].content, "v1.0.0");
     fs.removeAll($repo);
 }
+
+# --- SHA-256 repositories ---------------------------------------------------
+
+func testACommitIdIsFortyOrSixtyFourHexDigits() {
+    testing.assertTrue(isCommit("37a9149cb59d6cc6bf8a20926d45166dbed269fe"));
+    def long as string init "37a9149cb59d6cc6bf8a20926d45166dbed269fe" + "0123456789abcdef01234567";
+    testing.assertTrue(isCommit($long));
+    testing.assertFalse(isCommit(strings.substring($long, 0, 63)));
+    testing.assertFalse(isCommit(strings.upper($long)));
+    testing.assertTrue(git.looksLikeObjectId($long));
+}
+
+# A repository created with `--object-format=sha256` has 64-digit ids; every
+# version used to read as "not pinned to a commit".
+func testASha256RepositoryIsASource() {
+    def dir as string init os.tempDir() + "/jvc_git_sha256";
+    fs.removeAll($dir);
+    fs.mkdirAll($dir);
+    if (not git.run(["git", "-C", $dir, "init", "-q", "--object-format=sha256", "-b", "main"]).ok) {
+        # A git too old for SHA-256 has nothing to test here.
+        fs.removeAll($dir);
+        return;
+    }
+    commitTag($dir, "@acme/beta", "1.0.0", "v1.0.0", "");
+    def cache as string init freshCache("sha256");
+    def r as Fetch init candidates($cache, $dir, "@acme/beta");
+    testing.assertTrue($r.ok);
+    testing.assertEqual(len($r.candidates), 1);
+    testing.assertEqual(len($r.candidates[0].commit), 64);
+    def data as bytes init archiveBytes($cache, $r.candidates[0]);
+    testing.assertTrue(len(safepath.unpack($data, "tar")) > 0);
+    fs.removeAll($dir);
+    fs.removeAll($cache);
+}

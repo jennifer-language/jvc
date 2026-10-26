@@ -3272,3 +3272,46 @@ func testAFailedPruneIsReportedNotThrown() {
     testing.assertContains($lines[0], "could not remove @jennifer/routeros 0.1.0");
     fs.removeAll($dir);
 }
+
+# --- where a registry may send a fetch --------------------------------------
+
+func testARegistryGitRecordForALocalPathIsNotCloned() {
+    testing.assertThrows("fetchRegistryLocalGit", "fetch");
+}
+
+func fetchRegistryLocalGit() {
+    def c as catalog.Candidate init catalog.candidate("@acme/x", "1.0.0");
+    $c.kind = "git";
+    $c.url = "/home/me/private-repo";
+    $c.commit = "37a9149cb59d6cc6bf8a20926d45166dbed269fe";
+    $c.registry = "https://r.example";
+    fetchArchive($c);
+}
+
+# A lock is a file anyone can edit, so a tarball entry with no recorded
+# registry is not read off disk either.
+func testALockedTarballWithNoRegistryIsNotReadOffDisk() {
+    testing.assertThrows("fetchUnregisteredLocal", "fetch");
+}
+
+func fetchUnregisteredLocal() {
+    def c as catalog.Candidate init catalog.candidate("@acme/x", "1.0.0");
+    $c.kind = "tar.gz";
+    $c.checksum = "sha256:00";
+    $c.url = "/etc/passwd";
+    fetchArchive($c);
+}
+
+func testAnAppRecordForALocalRepositoryIsRefused() {
+    def found as list of catalog.Candidate init [
+        published("@acme/tool", "1.0.0", "git", "file:///home/me/private-repo")
+    ];
+    def s as AppSource init pickApp($found, "@acme/tool", "*", "http://r");
+    testing.assertEqual($s.url, "");
+    testing.assertContains($s.error, "not a network remote");
+    def ok as list of catalog.Candidate init [
+        published("@acme/tool", "1.0.0", "git", "https://git.example/tool.git")
+    ];
+    def good as AppSource init pickApp($ok, "@acme/tool", "*", "http://r");
+    testing.assertEqual($good.url, "https://git.example/tool.git");
+}

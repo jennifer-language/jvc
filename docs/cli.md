@@ -560,12 +560,21 @@ How a git deck resolves:
   `1.0.0` is refused, rather than locking a version the vendored code disagrees
   with, and so is a tag holding two manifests.
 - **The pin is the commit.** `camcorder.lock` records `ref` (the tag) and
-  `commit` (the full forty-character id it pointed at) instead of an artifact
+  `commit` (the full id it pointed at: forty hex digits, or sixty-four in a
+  SHA-256 repository) instead of an artifact
   checksum, and installs archive the *commit*, so moving a tag cannot change
   what a lockfile installs. A commit the repository cannot produce is a hard
   failure, never a fallback to the ref, the default branch or a generated
   archive. The same holds for a registry version of `kind = "git"`, whose URL
   is only a coordinate that can come to name someone else's repository.
+- **A registry names network remotes only.** A registry version's git URL must
+  be `https://`, `http://`, `ssh://`, `git://` or the scp-like `host:path`, and
+  a tarball URL (from a registry or from `camcorder.lock`) must be http(s).
+  A local path or `file://` would have jvc clone, or read, something on your
+  machine on someone else's say-so. A local repository works as a `[sources]`
+  entry or a `jvc app install` URL, which are your own choice. A git URL with
+  leading or trailing whitespace, or a control character, is refused wherever
+  it comes from.
 - **A ref may not share its name with the commit.** git puts refs and object ids
   in one namespace, so a repository can carry a tag or branch *named after* a
   commit id, and on GitLab, Bitbucket and self-hosted git nothing prevents it.
@@ -995,7 +1004,7 @@ instead of replacing the first.
 
 Only a version the registry records as `kind = "git"` can be installed this
 way: a published tarball has no repository to check out, and jvc says so up
-front.
+front. Its URL has to be a network remote, as for a deck.
 
 This is the user-wide counterpart of the next section: the same published deck,
 installed for you, not for one project.

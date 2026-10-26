@@ -434,7 +434,8 @@ export func candidates(root as string, url as string, name as string) {
 }
 
 /**
- * Report whether a string is a full commit id: forty lowercase hex digits.
+ * Report whether a string is a full commit id: forty lowercase hex digits (a
+ * SHA-1 repository) or sixty-four (SHA-256, `git init --object-format=sha256`).
  *
  * Nothing shorter counts. An abbreviated id can become ambiguous as a
  * repository grows, and a ref is not an identity at all.
@@ -442,7 +443,7 @@ export func candidates(root as string, url as string, name as string) {
  * @return {bool} true when it identifies exactly one commit
  */
 export func isCommit(s as string) {
-    if (not (len($s) == 40)) {
+    if (not (len($s) == 40) and not (len($s) == 64)) {
         return false;
     }
     for (def ch in strings.chars($s)) {
@@ -482,7 +483,7 @@ export def const MISSING as string init "missing";
  * deleted tag or a moved repository. Hosts that allow object-id-shaped refs
  * (GitLab, Bitbucket, self-hosted git) make the first possible.
  * @param dir {string} the mirror directory
- * @param commit {string} the full 40-character commit id demanded
+ * @param commit {string} the full commit id demanded (40 or 64 hex digits)
  * @return {string} `HELD`, `AMBIGUOUS`, or `MISSING`
  */
 export func commitState(dir as string, commit as string) {
@@ -506,7 +507,7 @@ export func commitState(dir as string, commit as string) {
 /**
  * Report whether a mirror holds this commit unambiguously.
  * @param dir {string} the mirror directory
- * @param commit {string} the full 40-character commit id demanded
+ * @param commit {string} the full commit id demanded (40 or 64 hex digits)
  * @return {bool} true only when the mirror holds that exact commit and no ref shares its name
  */
 export func hasCommit(dir as string, commit as string) {

@@ -483,6 +483,16 @@ func pickApp(found as list of catalog.Candidate, name as string, spec as string,
                         " archive, which has no repository to install an app from"
                 };
             }
+            # As for a deck (fetchArchive): a registry names a network remote,
+            # never a repository on this machine.
+            if (not git.isNetworkRemote($c.url)) {
+                return AppSource{
+                    url: "",
+                    version: "",
+                    error: $from + " gives " + $name + " " + $best + " the git URL " +
+                        $c.url + ", which is not a network remote; refusing it"
+                };
+            }
             return AppSource{url: $c.url, version: $best, error: ""};
         }
     }
@@ -3206,17 +3216,10 @@ func isHttpUrl(url as string) {
     return strings.startsWith($u, "https://") or strings.startsWith($u, "http://");
 }
 
-# archiveBytesFrom obtains a deck archive's raw bytes from a URL. A file://
-# URL, or a path starting with `/` or `./`, is read from disk; anything else is
-# fetched with http.getBytes so the binary content arrives intact. A non-2xx
-# response raises.
+# archiveBytesFrom downloads a deck archive's raw bytes from an http(s) URL with
+# http.getBytes, so the binary content arrives intact. A non-2xx response
+# raises. fetchArchive has refused any other URL by now.
 func archiveBytesFrom(url as string) {
-    if (strings.startsWith($url, "file://")) {
-        return fs.readBytes(strings.substring($url, 7, len($url)));
-    }
-    if (strings.startsWith($url, "/") or strings.startsWith($url, "./")) {
-        return fs.readBytes($url);
-    }
     def headers as map of string to string init {};
     def resp as http.BytesResponse init http.getBytes($url, $headers);
     if ($resp.status < 200 or $resp.status >= 300) {
@@ -3257,6 +3260,21 @@ export def struct Fetched {
  */
 export func fetchArchive(res as catalog.Candidate) {
     if ($res.kind == "git") {
+        # A registry's git record is cloned from the network, never from this
+        # machine: `/home/me/private-repo` or `file://` would have jvc vendor
+        # the user's own repository on a registry's say-so. A local repository
+        # is a `[sources]` entry, which has no registry.
+        if (not ($res.registry == "") and not git.isNetworkRemote($res.url)) {
+            throw Error{
+                kind: "fetch",
+                message: $res.name + " " + $res.version + " names the git URL " + $res.url +
+                    ", which is not a network remote; refusing to clone it on " +
+                    $res.registry + "'s say-so",
+                file: "",
+                line: 0,
+                col: 0
+            };
+        }
         return Fetched{
             data: gitsource.archiveBytes(gitsource.cacheRoot(), $res),
             format: "tar",
@@ -3277,10 +3295,12 @@ export func fetchArchive(res as catalog.Candidate) {
                 col: 0
             };
         }
-        # A URL a registry supplied is fetched over the network, never read off
-        # this machine: a record naming `/etc/...` or `file://` would otherwise
-        # have jvc read local files on a registry's say-so.
-        if (not ($res.registry == "") and not isHttpUrl($res.url)) {
+        # A tarball is fetched over the network, never read off this machine:
+        # a record or lock entry naming `/etc/...` or `file://` would otherwise
+        # have jvc read local files on a registry's, or a committed lock's,
+        # say-so. That holds with no recorded registry too, since a lock is a
+        # file anyone can edit, and no jvc verb writes a local tarball URL.
+        if (not isHttpUrl($res.url)) {
             throw Error{
                 kind: "fetch",
                 message: $res.name + " " + $res.version + " names " + $res.url +

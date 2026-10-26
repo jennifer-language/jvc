@@ -475,3 +475,43 @@ func testNoTagsAtAllPrefersTheVersionAsWritten() {
     def none as list of string init [];
     testing.assertEqual(tagPrefix($none), "");
 }
+
+# The URL is used as given, so a padded or multi-line one is refused, not
+# trimmed: trimmed, it would key a second mirror and reach `--git-dir=` raw.
+func testRemoteProblemRefusesWhitespaceAndControlCharacters() {
+    testing.assertContains(remoteProblem(" https://example.com/a.git"), "whitespace");
+    testing.assertContains(remoteProblem("https://example.com/a.git\n"), "whitespace");
+    testing.assertContains(remoteProblem("https://example.com/a\n.git"), "control character");
+    testing.assertContains(remoteProblem("https://example.com/a\t.git"), "control character");
+    testing.assertContains(
+        remoteProblem("https://example.com/a" + convert.fromCodepoint(0x7f)),
+        "control character");
+    testing.assertEqual(remoteProblem("https://example.com/a.git"), "");
+}
+
+func testANetworkRemoteIsOneThatLeavesTheMachine() {
+    for (def url in [
+        "https://github.com/acme/deck.git",
+        "HTTP://git.example/deck",
+        "ssh://git@host/acme/deck.git",
+        "git://host/deck",
+        "git@github.com:acme/deck.git",
+        "host:acme/deck"
+    ]) {
+        testing.assertTrue(isNetworkRemote($url));
+    }
+    for (def url in [
+        "/home/me/private-repo",
+        "./repo",
+        "../repo",
+        "repo",
+        "file:///home/me/repo",
+        "FILE:///x",
+        "https://",
+        "./a:b",
+        "dir/a:b",
+        "svn://host/x"
+    ]) {
+        testing.assertFalse(isNetworkRemote($url));
+    }
+}

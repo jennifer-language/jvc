@@ -232,7 +232,8 @@ export func isAmbiguousRef(text as string) {
  * @return {bool} true when the name is hex of an object-id length
  */
 export func looksLikeObjectId(name as string) {
-    if (len($name) < 4 or len($name) > 40) {
+    # 64 is a SHA-256 repository's full id; a SHA-1 one tops out at 40.
+    if (len($name) < 4 or len($name) > 64) {
         return false;
     }
     for (def ch in strings.chars(strings.lower($name))) {
@@ -255,6 +256,10 @@ export func looksLikeObjectId(name as string) {
  * arbitrary command; git disables `ext` by default, but a manifest is not the
  * place to find out whether this machine re-enabled it.
  *
+ * A URL with leading or trailing whitespace, or any control character (below
+ * U+0020, and U+007F), is refused too, rather than trimmed: callers use the
+ * string as given.
+ *
  * Any other unknown transport is left to git, which refuses it: the builders
  * run with `protocol.allow=never` and allow only `https`, `http`, `ssh`, `git`
  * and `file`, so a `<scheme>://` URL cannot reach a `git-remote-<scheme>`
@@ -263,13 +268,26 @@ export func looksLikeObjectId(name as string) {
  * @return {string} the reason the URL is refused, or "" when it is acceptable
  */
 export func remoteProblem(url as string) {
-    def u as string init strings.trim($url);
-    if ($u == "") {
+    def u as string init $url;
+    if (strings.trim($u) == "") {
         return "an empty git URL names no repository";
     }
-    if (strings.startsWith($u, "-")) {
-        return "refusing git URL \"" + $u + "\": it starts with `-`, which git " +
-            "would read as an option";
+    if (strings.startsWith(strings.trim($u), "-")) {
+        return "refusing git URL \"" + strings.trim($u) + "\": it starts with `-`, " +
+            "which git would read as an option";
+    }
+    # Checked as given, not trimmed: the callers clone, cache and lock the raw
+    # string, so a leading space or a newline accepted here would key a second
+    # mirror and land verbatim in `--git-dir=` and the lockfile.
+    if (not (strings.trim($u) == $u)) {
+        return "refusing git URL \"" + strings.trim($u) + "\": it has leading or " +
+            "trailing whitespace";
+    }
+    for (def ch in strings.chars($u)) {
+        def code as int init convert.toCodepoint($ch);
+        if ($code < 0x20 or $code == 0x7f) {
+            return "refusing git URL \"" + $u + "\": it holds a control character";
+        }
     }
     def helper as int init strings.indexOf($u, "::");
     if ($helper > 0 and isTransportName(strings.substring($u, 0, $helper))) {
@@ -277,6 +295,38 @@ export func remoteProblem(url as string) {
             "a git remote helper, which can execute commands";
     }
     return "";
+}
+
+/**
+ * Report whether a git URL reaches another machine: an `https://`, `http://`,
+ * `ssh://` or `git://` URL, or the scp-like `[user@]host:path` that git reads as
+ * ssh. A local path, a `file://` URL, or anything else is not.
+ *
+ * This is the check for a URL a **registry** supplies. A version record naming
+ * `/home/me/private-repo` would otherwise have jvc clone and vendor the user's
+ * own repository on the registry's say-so, and `jvc app install` would pick the
+ * commit from that clone's own tags. A local repository stays usable, but only
+ * as the user's own choice: a `[sources]` entry or a URL on the command line.
+ * @param url {string} the git URL as received
+ * @return {bool} true when it names a remote transport
+ */
+export func isNetworkRemote(url as string) {
+    def u as string init strings.lower($url);
+    for (def scheme in ["https://", "http://", "ssh://", "git://"]) {
+        if (strings.startsWith($u, $scheme)) {
+            return len($u) > len($scheme);
+        }
+    }
+    if (strings.contains($u, "://")) {
+        return false;
+    }
+    # git's own rule for the scp form: a colon with no slash before it. A path
+    # starting `/` or `.` has its slash first, so it is never one.
+    def colon as int init strings.indexOf($u, ":");
+    if ($colon < 1) {
+        return false;
+    }
+    return not strings.contains(strings.substring($u, 0, $colon), "/");
 }
 
 # isTransportName reports whether text could be the `<transport>` of git's
