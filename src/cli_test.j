@@ -3493,3 +3493,10 @@ func testAVendoringFailureIsReported() {
     testing.assertContains($vr.message, "cannot vendor @jennifer/routeros");
     fs.removeAll($dir);
 }
+
+# A deck still missing after it was fetched would be fetched again every round
+# until the bound, then reported as "did not converge".
+func testADeckMissingAfterItsFetchIsNamed() {
+    testing.assertEqual(fetchedBefore({"@acme/a": true}, ["@acme/b", "@acme/a"]), "@acme/a");
+    testing.assertEqual(fetchedBefore({"@acme/a": true}, ["@acme/b"]), "");
+}

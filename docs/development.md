@@ -57,8 +57,9 @@ The publish gate does not run fmt: formatting is not correctness.
 ## The registry is a separate repository
 
 It carries its own copies of the four pure modules `catalog.j`, `resolver.j`,
-`constraint.j` and `deckname.j`, byte-identical to these (overlays included)
-as of 2026-10-22. A change to one here belongs there too, with its overlay. Diff
+`constraint.j` and `deckname.j`.
+A change to one here belongs there too, with
+its overlay. Diff
 both ways before copying: the registry has held fixes of its own before.
 
 ## Continuous integration

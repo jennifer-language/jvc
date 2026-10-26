@@ -3870,8 +3870,12 @@ export def struct Resolved {
     error as string
 };
 
-# The most fetch rounds before giving up. Each round fetches every deck still
-# missing, so rounds track the graph's depth, not its size.
+# The fetch rounds allowed beyond the number of decks fetched so far. Each round
+# fetches every deck still missing, so rounds track the graph's depth, and a
+# fixed 1000 failed every chain deeper than that as "did not converge". Every
+# round that does not fail fetches at least one deck, so the growing bound
+# still ends a loop that makes no progress; one asked for a deck it already
+# fetched is stopped at once (`fetchedBefore`).
 def const MAX_FETCH_ROUNDS as int init 1000;
 
 # resolveFailed builds a failed Resolved with a message.
@@ -3996,7 +4000,8 @@ export func resolveRoots(
     roots as map of string to string,
     sources as list of manifest.Dependency) {
     def cat as catalog.Catalog init $seed;
-    for (def round as int init 0; $round < MAX_FETCH_ROUNDS; $round = $round + 1) {
+    def fetched as map of string to bool init {};
+    for (def round as int init 0; $round < MAX_FETCH_ROUNDS + len($fetched); $round = $round + 1) {
         def g as resolver.GraphResult init resolver.resolveGraph($cat, $roots);
         if ($g.ok) {
             return Resolved{ok: true, decks: $g.resolved, error: ""};
@@ -4004,8 +4009,14 @@ export func resolveRoots(
         if (len($g.missing) == 0) {
             return resolveFailed($g.error);
         }
+        def again as string init fetchedBefore($fetched, $g.missing);
+        if (not ($again == "")) {
+            return resolveFailed($again + " is still missing after it was fetched; its " +
+                "source answered without the versions the graph needs");
+        }
         def batch as list of catalog.Candidate init [];
         for (def name in $g.missing) {
+            $fetched[$name] = true;
             # A dependency's requirements are publisher-controlled metadata (a
             # registry record, a tag's deck.toml), so a name is checked before
             # it is fetched, let alone vendored.
@@ -4033,6 +4044,18 @@ export func resolveRoots(
         $cat = catalog.addAll($cat, $batch);
     }
     return resolveFailed("dependency resolution did not converge");
+}
+
+# fetchedBefore names the first of missing that an earlier round already
+# fetched, or "". Fetching it again would bring back the same answer, so the
+# loop would only spin until its bound.
+func fetchedBefore(fetched as map of string to bool, missing as list of string) {
+    for (def name in $missing) {
+        if (maps.has($fetched, $name)) {
+            return $name;
+        }
+    }
+    return "";
 }
 
 # binDirOf returns the directory vendored commands are written to: `[package]
