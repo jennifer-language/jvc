@@ -513,3 +513,8 @@ func testPublishRefusesABinThatIsNotThere() {
     testing.assertEqual(validate($m, $dir), "");
     fs.removeAll($dir);
 }
+
+func testAUseInABlockCommentIsNotADeclaration() {
+    testing.assertEqual(len(usesOf("/*\nuse term;\n*/\nuse io;\n")), 1);
+    testing.assertEqual(len(usesOf("def t as string init '\nuse gpio;\n';\n")), 0);
+}

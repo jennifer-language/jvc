@@ -1156,7 +1156,7 @@ After both, `jvc publish` sends a repository and a tag (see
 | ----------------- | --------------------------------------------------------- |
 | `--remote <name>` | which git remote to publish from (default `origin`)        |
 | `--repository <url>` | a clone URL directly, bypassing remotes                 |
-| `--tag <tag>`     | the tag to publish (default: the one on `HEAD` matching the version) |
+| `--tag <tag>`     | the tag to publish (default: the one on `HEAD` matching the version; a matching tag on another commit is reported as such) |
 | `--no-verify`     | skip the quality gate (the output says so)                 |
 
 `jvc pack` builds an artifact (see [Packing a release](#packing-a-release)):
@@ -1214,7 +1214,14 @@ its includer rather than a module: in a "topics" deck, `src/tool.j` includes
 `src/topics/*.j` and `src/tool_test.j` includes their overlays. Such a file is
 linted and tested through its includer, needs no overlay of its own, and an
 included overlay is not run alone. `jvc install --runtests` skips included
-overlays the same way.
+overlays the same way. Only a real `include` statement counts: one inside a
+block comment or a multi-line string is text, and the file it names is still
+checked on its own. The `use` scan behind the `jennifer-tiny` check reads code
+the same way.
+
+An overlay "defines no test" when the runner refuses it as an empty suite: its
+message begins a line of a failed run. A test that merely prints those words
+is a passing test.
 
 Every check runs even when an earlier one fails, so one attempt shows everything
 to fix:

@@ -699,6 +699,18 @@ export func publishSource(
         $tag = tagForVersion($dir, $version);
     }
     if ($tag == "") {
+        # A tag that exists on another commit is a different mistake from a
+        # missing one, and "tag the release" would fail on it.
+        def elsewhere as string init tagElsewhere($dir, $version);
+        if (not ($elsewhere == "")) {
+            return Source{
+                repository: $repo,
+                tag: "",
+                error: "the tag for " + $version + " exists but is not on HEAD: " + $elsewhere +
+                    ". Check out that commit to publish it, or bump the version for " +
+                    "this one (or pass --tag)"
+            };
+        }
         # The suggested spelling follows whatever this repository already uses,
         # since jvc reads `1.2.3` and `v1.2.3` alike and naming the other one
         # would start a second convention beside the first.
@@ -773,6 +785,19 @@ func remoteHasTag(dir as string, remote as string, tag as string) {
         return true;
     }
     return not (strings.trim($got.output) == "");
+}
+
+# tagElsewhere names a tag for version that points somewhere other than HEAD,
+# as `<tag> (at <short commit>)`, or "" when there is none.
+func tagElsewhere(dir as string, version as string) {
+    for (def tag in [$version, "v" + $version]) {
+        def got as git.Result init git.run(git.tagCommitArgv($dir, $tag));
+        if ($got.ok and not (strings.trim($got.output) == "")) {
+            def commit as string init strings.trim($got.output);
+            return $tag + " (at " + strings.substring($commit, 0, 12) + ")";
+        }
+    }
+    return "";
 }
 
 # tagForVersion finds the tag naming this version, accepting both the bare and

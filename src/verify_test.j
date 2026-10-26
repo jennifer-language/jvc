@@ -377,9 +377,21 @@ func testReportTextMarksPassAndFail() {
 # Both spellings the runner has used are recognised, so the gate reads the same
 # on a build from either side of the rewording.
 func testEitherEmptySuiteSpellingIsRecognised() {
-    testing.assertTrue(saysNoTests("jennifer test: no test methods found"));
-    testing.assertTrue(saysNoTests("jennifer test: no test functions found (default convention)"));
-    testing.assertFalse(saysNoTests("3 passed, 0 failed, 3 total"));
+    testing.assertTrue(saysNoTests("jennifer test: no test methods found", 2));
+    def reworded as string init "jennifer test: no test functions found (default convention)";
+    testing.assertTrue(saysNoTests($reworded, 2));
+    testing.assertFalse(saysNoTests("3 passed, 0 failed, 3 total", 0));
+    # a build before +126 exited 0 with the message alone
+    testing.assertTrue(saysNoTests("no test methods found\n", 0));
+}
+
+# A passing test that prints the words is a passing test: the message has to
+# begin a line of a failed run, or be the run's only output.
+func testATestPrintingTheMessageIsNotAnEmptySuite() {
+    def passing as string init "no test functions found\nPASS testA (0 ms)\n\n" +
+        "1 passed, 0 failed, 1 total";
+    testing.assertFalse(saysNoTests($passing, 0));
+    testing.assertFalse(saysNoTests("FAIL testB: expected no test functions found", 1));
 }
 
 # `jennifer test` prints `no test functions found` for an overlay with no test
@@ -530,4 +542,15 @@ func testAThrowingRunIsAFindingNotACrash() {
     testing.assertFalse($gate.ok);
     testing.assertContains($gate.findings[0].detail, "cannot run ");
     fs.removeAll($dir);
+}
+
+# An include that is only text in a comment or a string names no included
+# file, so the file it names is still checked on its own.
+func testAnIncludeInACommentOrStringDoesNotCount() {
+    def src as string init "/*\ninclude \"a.j\"\n*/\n" +
+        "def t as string init '\ninclude \"b.j\"\n';\n" +
+        "include \"c.j\";\n";
+    def got as list of string init includeTargets($src);
+    testing.assertEqual(len($got), 1);
+    testing.assertEqual($got[0], "c.j");
 }

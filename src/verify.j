@@ -45,6 +45,7 @@ use strings;
 use convert;
 use maps;
 import "docblock.j" as docblock;
+import "./pragma.j" as pragma;
 
 # The interpreter jvc shells out to for lint and test. Overridable for an
 # unusual install layout; resolved from PATH otherwise.
@@ -164,10 +165,13 @@ export func includedFiles(dir as string) {
     return $out;
 }
 
-# includeTargets returns the paths a source's `include` statements name.
+# includeTargets returns the paths a source's `include` statements name. It
+# reads the code the lexer sees (`pragma.codeLines`), so an `include` line
+# inside a block comment or a multi-line string does not count: counted, it
+# exempted the file it named from being linted and tested on its own.
 func includeTargets(source as string) {
     def out as list of string init [];
-    for (def line in strings.split($source, "\n")) {
+    for (def line in pragma.codeLines($source)) {
         def t as string init strings.trim($line);
         if (not strings.startsWith($t, INCLUDE_HEAD)) {
             continue;
@@ -335,12 +339,27 @@ func cannotRun(message as string) {
     return "cannot run " + interpreter() + ": " + $message;
 }
 
-# saysNoTests reports whether runner output is the empty-suite message, in any
-# spelling an interpreter has used.
-func saysNoTests(output as string) {
-    for (def head in NO_TESTS) {
-        if (strings.contains($output, $head)) {
-            return true;
+# saysNoTests reports whether a run is the runner's empty-suite refusal, in any
+# spelling an interpreter has used. The message has to begin a line (bare, or
+# after the runner's `jennifer test: `), and the run has to have failed (exit 2
+# since +126) or printed nothing else (a build before +126 exited 0): a passing
+# test that prints the same words is a passing test.
+func saysNoTests(output as string, exitCode as int) {
+    def lines as list of string init [];
+    for (def line in strings.split($output, "\n")) {
+        if (not (strings.trim($line) == "")) {
+            $lines[] = strings.trim($line);
+        }
+    }
+    if ($exitCode == 0 and not (len($lines) == 1)) {
+        return false;
+    }
+    for (def line in $lines) {
+        for (def head in NO_TESTS) {
+            if (strings.startsWith($line, $head) or
+                strings.startsWith($line, "jennifer test: " + $head)) {
+                return true;
+            }
         }
     }
     return false;
@@ -362,7 +381,7 @@ func runOverlay(dir as string, overlay as string) {
         return $broken;
     }
     def output as string init strings.trim($r.stdout + $r.stderr);
-    if (saysNoTests($output)) {
+    if (saysNoTests($output, $r.exitCode)) {
         return rel($dir, $overlay) + " defines no test function, so it tests " +
             "nothing (the runner discovers functions whose names start with `test`)";
     }

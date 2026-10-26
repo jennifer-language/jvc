@@ -325,3 +325,55 @@ func testAVeryLongOneLineCommentIsScanned() {
     testing.assertEqual(len($caps), 1);
     testing.assertEqual($caps[0], "net");
 }
+
+# --- codeLines --------------------------------------------------------------
+
+func testCodeLinesDropsCommentsAndCarriedStrings() {
+    def src as string init "use io;\n" +
+        "/* include \"a.j\"\n" +
+        "   use term; /* nested */ still comment\n" +
+        "*/ use gpio;\n" +
+        "def t as string init '\n" +
+        "include \"b.j\"\n" +
+        "';\n" +
+        "include \"c.j\" # a comment\n" +
+        "def s as string init \"# not a comment\";\n";
+    def lines as list of string init codeLines($src);
+    testing.assertEqual(strings.trim($lines[0]), "use io;");
+    testing.assertEqual(strings.trim($lines[1]), "");
+    testing.assertEqual(strings.trim($lines[2]), "");
+    testing.assertEqual(strings.trim($lines[3]), "use gpio;");
+    testing.assertEqual(strings.trim($lines[5]), "");
+    testing.assertEqual(strings.trim($lines[6]), ";");
+    testing.assertEqual(strings.trim($lines[7]), "include \"c.j\"");
+    testing.assertEqual(strings.trim($lines[8]), "def s as string init \"# not a comment\";");
+}
+
+# A cooked string's `{...}` slot may hold strings of its own, `#` included.
+func testCodeLinesFollowsInterpolationSlots() {
+    def src as string init 'def a as string init "x {f("#", {"k": "}"})} y"; use term;' + "\n" +
+        "use gpio;\n";
+    def lines as list of string init codeLines($src);
+    testing.assertTrue(strings.endsWith(strings.trim($lines[0]), "use term;"));
+    testing.assertEqual(strings.trim($lines[1]), "use gpio;");
+}
+
+func testCodeLinesKeepsEscapedQuotes() {
+    def src as string init 'def a as string init "a \" # b";' + "\nuse io;";
+    def lines as list of string init codeLines($src);
+    testing.assertTrue(strings.endsWith($lines[0], "# b\";"));
+    testing.assertEqual($lines[1], "use io;");
+}
+
+# skipBlock over many openers before one closer still ends at the right depth.
+func testSkipBlockCountsManyOpeners() {
+    def s as string init "";
+    for (def i in 0..200) {
+        $s = $s + "/*";
+    }
+    def r as Skipped init skipBlock($s + "*/ x", 1);
+    testing.assertEqual($r.depth, 200);
+    def closed as Skipped init skipBlock("a /* b */ c */ tail", 1);
+    testing.assertEqual($closed.depth, 0);
+    testing.assertEqual($closed.rest, " tail");
+}

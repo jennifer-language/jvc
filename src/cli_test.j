@@ -3435,3 +3435,22 @@ func testMappingAnHttpRegistryWarnsAtOnce() {
     testing.assertFalse(strings.contains($local.message, "credentials"));
     fs.removeAll($dir);
 }
+
+# A version tag on an earlier commit is not a missing tag: "tag the release"
+# would fail on it, since the tag exists.
+func testATagOnAnotherCommitIsNamed() {
+    def dir as string init fs.makeTempDir("", "jvc-oldtag");
+    git.run(["git", "-C", $dir, "init", "-q", "-b", "main"]);
+    git.run(["git", "-C", $dir, "config", "user.email", "t@x"]);
+    git.run(["git", "-C", $dir, "config", "user.name", "t"]);
+    fs.writeString($dir + "/a", "1");
+    git.run(["git", "-C", $dir, "add", "-A"]);
+    git.run(["git", "-C", $dir, "commit", "-q", "-m", "one"]);
+    git.run(["git", "-C", $dir, "tag", "v0.1.0"]);
+    fs.writeString($dir + "/a", "2");
+    git.run(["git", "-C", $dir, "commit", "-q", "-am", "two"]);
+    def src as Source init publishSource($dir, "0.1.0", "https://x/y.git", "", "");
+    testing.assertContains($src.error, "exists but is not on HEAD: v0.1.0 (at ");
+    testing.assertFalse(strings.contains($src.error, "git tag "));
+    fs.removeAll($dir);
+}

@@ -766,6 +766,17 @@ export func tagsAtArgv(dir as string, ref as string) {
 }
 
 /**
+ * Build the argv that resolves a tag to the commit it points at, printing
+ * nothing and failing when there is no such tag.
+ * @param dir {string} the working tree
+ * @param tag {string} the tag name
+ * @return {list of string} the git argv
+ */
+export func tagCommitArgv(dir as string, tag as string) {
+    return [GIT, "-C", $dir, "rev-parse", "--verify", "--quiet", tagRef($tag) + '^{commit}'];
+}
+
+/**
  * Normalise a remote URL to the `https://` clone URL a registry can fetch.
  *
  * A `git@host:owner/name.git` remote is the common case for a repository you

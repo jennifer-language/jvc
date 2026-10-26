@@ -56,6 +56,175 @@ def const CAPABILITY_KEY as string init "capability";
 def const VERSION_KEY as string init "version";
 
 /**
+ * The source as the lexer sees it, one entry per line: block comments (nested)
+ * and `#` comments removed, and the part of a string literal that began on an
+ * earlier line removed too, so each entry holds only what starts a statement
+ * or continues one. A string that starts on a line is kept, contents and all,
+ * so `include "x.j"` still reads as written.
+ *
+ * This is for the line-based scans that look for a statement (`include`,
+ * `use`): read from the raw text, an `include "x.j"` inside a block comment or
+ * a multi-line raw string counted as one. Cooked strings honour `\` escapes
+ * and `{...}` interpolation slots, so `"{f("#")}"` is one string, not a string
+ * and a comment.
+ * @param source {string} the file's text
+ * @return {list of string} each line's code, "" where a line is all comment or string
+ */
+export func codeLines(source as string) {
+    def out as list of string init [];
+    def state as Lexed init Lexed{stack: [CODE], comment: 0, line: ""};
+    for (def raw in strings.split($source, "\n")) {
+        # Most lines open nothing: no quote, no comment. Those are code as
+        # written, which keeps a file of thousands of lines cheap to scan.
+        if ($state.comment == 0 and len($state.stack) == 1 and not hasMarker($raw)) {
+            $out[] = $raw;
+            continue;
+        }
+        $state = lexLine($raw, $state);
+        $out[] = $state.line;
+    }
+    return $out;
+}
+
+# Lexed is codeLines' state between lines: the open constructs (innermost
+# last), the block-comment depth, and the code kept from the line just read.
+def struct Lexed {
+    stack as list of string,
+    comment as int,
+    line as string
+};
+
+# hasMarker reports whether a line holds anything that opens or closes a
+# string or a comment.
+func hasMarker(line as string) {
+    return strings.contains($line, "\"") or strings.contains($line, "'") or
+        strings.contains($line, "#") or strings.contains($line, "/*") or
+        strings.contains($line, "*/");
+}
+
+# lexLine reads one line from state, keeping its code (`codeLines`). The
+# stack holds CODE at the bottom, then COOKED, RAW, SLOT (a cooked string's
+# `{...}`) and BRACE (a `{` inside a slot). Whatever was open when the line
+# began is not kept until the scan is back above it.
+#
+# It jumps from one marker that matters in the current state to the next with
+# `strings.indexOf`, copying the stretch between whole: stepping a character
+# at a time cost seconds over a tree the size of jvc's own.
+func lexLine(raw as string, state as Lexed) {
+    def stack as list of string init $state.stack;
+    def comment as int init $state.comment;
+    def carried as int init 0;
+    if (len($stack) > 1 and $comment == 0) {
+        $carried = len($stack);
+    }
+    def kept as list of string init [];
+    def n as int init len($raw);
+    def i as int init 0;
+    while ($i < $n) {
+        def keep as bool init $carried == 0 or len($stack) < $carried;
+        def top as string init $stack[len($stack) - 1];
+        if ($comment > 0) {
+            $top = COMMENT;
+        }
+        def at as int init nextMarker($raw, $i, MARKERS[$top]);
+        if ($at < 0) {
+            if ($keep and not ($top == COMMENT)) {
+                $kept[] = strings.substring($raw, $i, $n);
+            }
+            break;
+        }
+        if ($keep and not ($top == COMMENT)) {
+            $kept[] = strings.substring($raw, $i, $at);
+        }
+        def c as string init strings.substring($raw, $at, $at + 1);
+        def two as string init strings.substring($raw, $at, minInt($at + 2, $n));
+        $i = $at + 1;
+        if ($top == COMMENT) {
+            $i = $at + 2;
+            $comment = $comment - 1;
+            if ($two == "/*") {
+                $comment = $comment + 2;
+            }
+            # A closed comment still separates what stood either side.
+            if ($comment == 0 and $keep) {
+                $kept[] = " ";
+            }
+            continue;
+        }
+        if ($c == "#") {
+            # A line comment runs to the end of the line.
+            break;
+        }
+        if ($two == "/*") {
+            $comment = 1;
+            $i = $at + 2;
+            continue;
+        }
+        if ($c == "\\") {
+            # An escape: the next character is the string's, whatever it is.
+            $i = minInt($at + 2, $n);
+            $c = $two;
+        } elseif ($c == "\"" and $top == COOKED or $c == "'" and $top == RAW or
+            $c == '}') {
+            $stack = lists.slice($stack, 0, len($stack) - 1);
+        } elseif ($c == "\"") {
+            $stack[] = COOKED;
+        } elseif ($c == "'") {
+            $stack[] = RAW;
+        } elseif ($top == COOKED) {
+            $stack[] = SLOT;
+        } else {
+            $stack[] = BRACE;
+        }
+        if ($keep) {
+            $kept[] = $c;
+        }
+    }
+    return Lexed{stack: $stack, comment: $comment, line: strings.join($kept, "")};
+}
+
+# nextMarker is the position of the first of markers in s at or after from, or
+# -1 when there is none.
+func nextMarker(s as string, from as int, markers as list of string) {
+    def best as int init -1;
+    for (def m in $markers) {
+        def at as int init strings.indexOf($s, $m, $from);
+        if ($at >= 0 and ($best < 0 or $at < $best)) {
+            $best = $at;
+        }
+    }
+    return $best;
+}
+
+# minInt is the smaller of two ints.
+func minInt(a as int, b as int) {
+    if ($a < $b) {
+        return $a;
+    }
+    return $b;
+}
+
+# MARKERS are what ends a stretch in each state: in code a quote, a comment or
+# (inside a slot) a brace; in a cooked string a quote, an escape or a slot; in
+# a raw string only its quote; in a block comment an opener or a closer.
+def const MARKERS as map of string to list of string init {
+    "code": ["\"", "'", "#", "/*"],
+    "slot": ["\"", "'", "#", "/*", '{', '}'],
+    "brace": ["\"", "'", "#", "/*", '{', '}'],
+    "cooked": ["\"", "\\", '{'],
+    "raw": ["'"],
+    "comment": ["/*", "*/"]
+};
+
+# The lexical states codeLines tracks.
+def const CODE as string init "code";
+def const COOKED as string init "cooked";
+def const RAW as string init "raw";
+def const SLOT as string init "slot";
+def const BRACE as string init "brace";
+def const COMMENT as string init "comment";
+
+/**
  * The capabilities the interpreter knows. A deck declaring anything else is
  * rejected by the interpreter at read time, so jvc rejects it on publish.
  * @return {list of string} the known capability names
@@ -93,13 +262,23 @@ def struct Skipped {
 # and the nearer of the next opener and the next closer is exactly that pair
 # (the two cannot start at the same place). Stepping a character at a time
 # with `strings.substring` was quadratic in the line length.
+#
+# Each marker's next position is searched for again only once the scan has
+# passed it: re-searching both on every step made a line of k openers before
+# one closer cost k searches to that closer.
 func skipBlock(s as string, depth as int) {
     def d as int init $depth;
     def i as int init 0;
     def size as int init len($s);
+    def open as int init strings.indexOf($s, "/*", 0);
+    def close as int init strings.indexOf($s, "*/", 0);
     while ($i + 1 < $size) {
-        def open as int init strings.indexOf($s, "/*", $i);
-        def close as int init strings.indexOf($s, "*/", $i);
+        if ($open >= 0 and $open < $i) {
+            $open = strings.indexOf($s, "/*", $i);
+        }
+        if ($close >= 0 and $close < $i) {
+            $close = strings.indexOf($s, "*/", $i);
+        }
         if ($close < 0 and $open < 0) {
             break;
         }

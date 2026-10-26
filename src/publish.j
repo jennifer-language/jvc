@@ -275,22 +275,17 @@ def const DEFAULT_ONLY as list of string init ["term", "serial", "spi", "i2c", "
  * The library names a Jennifer source file declares with `use`.
  *
  * Line-based, which is what the language allows: a `use` is a declaration at
- * the top level of a file, one per line. A docblock line mentioning one begins
- * with its own ` * `, so it does not match once trimmed. A trailing `#` comment
- * is dropped first, and an alias is ignored, so `use term as t;` and
- * `use term; # tty` both yield `term`.
+ * the top level of a file, one per line. The lines are the code the lexer sees
+ * (`pragma.codeLines`), so a `use` inside a block comment or a multi-line
+ * string, or after a `#`, is not one. An alias is ignored, so `use term as t;`
+ * and `use term; # tty` both yield `term`.
  * @param source {string} the file's text
  * @return {list of string} the library names declared, in order, with repeats kept
  */
 export func usesOf(source as string) {
     def out as list of string init [];
-    for (def line in strings.split($source, "\n")) {
-        def t as string init $line;
-        def cut as int init strings.indexOf($t, "#");
-        if ($cut >= 0) {
-            $t = strings.substring($t, 0, $cut);
-        }
-        $t = strings.trim($t);
+    for (def line in pragma.codeLines($source)) {
+        def t as string init strings.trim($line);
         if (not strings.startsWith($t, "use ") or not strings.endsWith($t, ";")) {
             continue;
         }
