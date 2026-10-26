@@ -232,6 +232,7 @@ _jvc() {
             app) flags="$flags --scope --system --version --name" ;;
             owners) flags="$flags --remove" ;;
             trust) flags="$flags --workflow --refs --provider --repository-id --remove" ;;
+            login) flags="$flags --no-browser" ;;
         esac
         _jvc_offer "$flags" "$cur"
         return

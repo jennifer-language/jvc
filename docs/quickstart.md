@@ -20,7 +20,7 @@ resolves and rewrites the lock. Never change a version by editing the lockfile.
 ## Talking to a registry
 
 ```sh
-jvc login                    # device flow via the registry's provider
+jvc login                    # device flow (or a browser) via the registry's provider
 jvc whoami                   # what your stored token says, without a call
 jvc scopes                   # who owns what on that registry
 jvc claim mplx               # claim a scope matching your username

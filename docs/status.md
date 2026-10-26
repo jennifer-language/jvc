@@ -42,11 +42,12 @@ tag to the commit that becomes the pin. `jvc pack` builds a tarball for a
 registry that accepts no publishes. `jvc yank` / `unyank` withdraw and restore
 a version.
 
-**Authentication.** A device flow for a human, against whichever provider the
-registry advertises. A pipeline publishes through trusted publishing (the CI
+**Authentication.** A device flow for a human, or authorization code with PKCE
+and a loopback redirect where the provider has no device grant, against
+whichever provider the registry advertises. A pipeline publishes through trusted publishing (the CI
 system mints a short-lived identity token, so the pipeline holds no
 credential) or `$JVC_TOKEN`. `jvc login` refuses where no terminal can read a
-device code.
+device code or a login page.
 
 **Scope ownership.** `jvc scopes` lists who owns what on a registry, `jvc claim`
 claims a scope, `jvc owners` lets the owner add or remove co-owners, and

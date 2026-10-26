@@ -4,7 +4,7 @@
 
 /**
  * The registry client: discovery and version negotiation, deck metadata
- * (`fetchDeck`, `resolve`), the device login and token refresh, scopes,
+ * (`fetchDeck`, `resolve`), the device and authcode logins, token refresh, scopes,
  * publish and yank. URL building and response parsing are pure and
  * unit-tested; the network calls are thin wrappers over `http` and need the
  * default `jennifer` binary. The registry stores metadata only: a version
@@ -126,8 +126,14 @@ export def struct Auth {
     trustedProviders as list of string
 };
 
-/** The only login flow this client implements. */
+/** The device login flow: the registry drives the grant, the client polls. */
 export def const FLOW_DEVICE as string init "device";
+
+/**
+ * The authorization-code login flow: the client runs PKCE against the provider
+ * with a loopback redirect, then exchanges the code at `tokenUrl` once.
+ */
+export def const FLOW_AUTHCODE as string init "authcode";
 
 /**
  * An `Auth` for a registry that advertised none, which is how a client
@@ -1342,6 +1348,76 @@ func tokenReplyOf(resp as http.Response) {
         $reply.retryAfter = retryAfterOf($resp);
     }
     return $reply;
+}
+
+/**
+ * The provider authorization URL an `authcode` login opens (RFC 6749 4.1.1,
+ * RFC 7636 4.3): the advertised `authorizeUrl` with the request in its query.
+ * Every value is percent-encoded, and the scopes are joined with spaces, as the
+ * provider reads them.
+ * @param auth {Auth} the advertised auth block
+ * @param redirectUri {string} the loopback listener's redirect URI
+ * @param state {string} this run's state
+ * @param challenge {string} the S256 code challenge
+ * @return {string} the URL to open
+ */
+export func authorizeRequestUrl(
+    auth as Auth,
+    redirectUri as string,
+    state as string,
+    challenge as string) {
+    def pairs as list of string init [
+        "response_type=code",
+        "client_id=" + percentEncode($auth.clientId),
+        "redirect_uri=" + percentEncode($redirectUri)
+    ];
+    if (len($auth.scopes) > 0) {
+        $pairs[] = "scope=" + percentEncode(strings.join($auth.scopes, " "));
+    }
+    $pairs[] = "state=" + percentEncode($state);
+    $pairs[] = "code_challenge=" + percentEncode($challenge);
+    $pairs[] = "code_challenge_method=S256";
+    def joiner as string init "?";
+    if (strings.indexOf($auth.authorizeUrl, "?") >= 0) {
+        $joiner = "&";
+    }
+    return $auth.authorizeUrl + $joiner + strings.join($pairs, "&");
+}
+
+/**
+ * Exchange an authorization code at `tokenUrl` (a network call), once: the
+ * registry redeems it with the provider and answers like an approved device
+ * code (server specification 8.4). Nothing is polled, since a code is
+ * single-use.
+ * @param client {Client} the registry client
+ * @param auth {Auth} the advertised auth block
+ * @param code {string} the code the redirect carried
+ * @param verifier {string} the PKCE code verifier
+ * @param redirectUri {string} the redirect URI the authorization used
+ * @return {TokenReply} the token, or why there is none
+ * @throws {Error} when the registry cannot be reached
+ */
+export func exchangeCode(
+    client as Client,
+    auth as Auth,
+    code as string,
+    verifier as string,
+    redirectUri as string) {
+    def headers as map of string to string init {};
+    def body as string init jsonObject([
+        "code",
+        $code,
+        "codeVerifier",
+        $verifier,
+        "redirectUri",
+        $redirectUri
+    ]);
+    def resp as http.Response init http.post(
+        authUrl($client, $auth.tokenUrl),
+        "application/json",
+        $body,
+        $headers);
+    return tokenReplyOf($resp);
 }
 
 /**

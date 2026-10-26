@@ -54,6 +54,7 @@ import "./verify.j" as verify;
 import "./pragma.j" as pragma;
 import "./safepath.j" as safepath;
 import "./forge.j" as forge;
+import "./authcode.j" as authcode;
 import "http.j" as http;
 import "semver.j" as semver;
 
@@ -2189,11 +2190,16 @@ export func authOutcome(base as string, detail as string, fatal as bool) {
  * Explain why a registry cannot be logged into, or "" when it can.
  *
  * The specification keeps these answers apart. A registry with no `auth`
- * object, or one whose `auth` has neither a `flow` nor a `deviceUrl` (it
- * offers trusted publishing only, server spec 4.1), accepts no logins. A flow
- * this client does not implement is refused by its name.
+ * object, or one whose `auth` has no `flow` (it offers trusted publishing
+ * only, server spec 4.1), accepts no logins. A flow this client does not
+ * implement is refused by its name, and so is a known flow advertised without
+ * the fields needed to run it.
+ *
+ * Under `authcode` the authorize URL is opened in a browser, so one that is not
+ * `https://` (or `http://` on this machine) is refused: an opener runs
+ * whatever handler a scheme names.
  * @param auth {registry.Auth} the advertised auth block
- * @return {string} the refusal, or "" when the device flow is on offer
+ * @return {string} the refusal, or "" when a flow jvc runs is on offer
  */
 export func loginRefusal(auth as registry.Auth) {
     if (not $auth.present) {
@@ -2204,10 +2210,22 @@ export func loginRefusal(auth as registry.Auth) {
     if ($auth.flow == "") {
         return "this registry accepts no logins (its auth block advertises no `flow`)";
     }
+    if ($auth.flow == registry.FLOW_AUTHCODE) {
+        if ($auth.authorizeUrl == "" or $auth.clientId == "" or $auth.tokenUrl == "") {
+            return "this registry advertises the `" + registry.FLOW_AUTHCODE +
+                "` flow without the endpoints to run it (it needs authorizeUrl, " +
+                "clientId and tokenUrl)";
+        }
+        if (not authcode.isBrowserUrl($auth.authorizeUrl)) {
+            return "this registry's authorizeUrl is not an https:// URL, so jvc will " +
+                "not open it: " + $auth.authorizeUrl;
+        }
+        return "";
+    }
     if (not ($auth.flow == registry.FLOW_DEVICE)) {
         return "this registry wants the `" + $auth.flow +
             "` login flow, which this jvc does not implement (it implements `" +
-            registry.FLOW_DEVICE + "`)";
+            registry.FLOW_DEVICE + "` and `" + registry.FLOW_AUTHCODE + "`)";
     }
     if ($auth.deviceUrl == "" or $auth.tokenUrl == "") {
         return "this registry advertises the `" + registry.FLOW_DEVICE +
@@ -2272,17 +2290,22 @@ export func startRetryWait(retryAfter as int) {
 }
 
 /**
- * Log in to a registry with the device authorization flow.
+ * Log in to a registry, with whichever flow it advertises.
  *
- * Prints the user code, then polls until the user approves, the device code
- * expires, or the registry gives up. A throttled start (`429`) is retried
- * once after its `Retry-After`. Polling waits the interval the registry asked
- * for and backs off further on a `429`, at least its `Retry-After`; both are the
- * registry's call, not this client's.
+ * Under `device`, prints the user code, then polls until the user approves,
+ * the device code expires, or the registry gives up. A throttled start (`429`)
+ * is retried once after its `Retry-After`. Polling waits the interval the
+ * registry asked for and backs off further on a `429`, at least its
+ * `Retry-After`; both are the registry's call, not this client's.
+ *
+ * Under `authcode`, opens the provider's authorization page (unless
+ * `openBrowser` is false, and prints it either way), waits on a loopback port
+ * for the redirect, and exchanges the code at the registry once.
  * @param base {string} the registry base URL
+ * @param openBrowser {bool} false for `--no-browser`: print the URL only
  * @return {Outcome} what happened, with the account name on success
  */
-export func runLogin(base as string) {
+export func runLogin(base as string, openBrowser as bool) {
     # Before anything is sent: the device code, the token and the refresh token
     # all cross the wire in this flow.
     def cleartext as string init cleartextProblem($base);
@@ -2298,12 +2321,20 @@ export func runLogin(base as string) {
     if (not ($refusal == "")) {
         return fail($refusal);
     }
-    # A device grant ends with a human typing a code into a browser. Where there
-    # is no human, printing the code and then polling for ten minutes wastes the
+    # Either flow ends with a human approving in a browser. Where there is no
+    # human, printing a code or a URL and then waiting for minutes wastes the
     # build and tells nobody anything; the reason is the useful output.
     if (not ciauth.isInteractive()) {
         return fail(noTerminalRefusal($base));
     }
+    if ($api.auth.flow == registry.FLOW_AUTHCODE) {
+        return authcodeLogin($base, $client, $api.auth, $openBrowser);
+    }
+    return deviceLogin($base, $client, $api.auth);
+}
+
+# deviceLogin runs the device flow: start, show the code, poll.
+func deviceLogin(base as string, client as registry.Client, auth as registry.Auth) {
     def start as registry.DeviceStart init registry.DeviceStart{
         deviceCode: "",
         userCode: "",
@@ -2315,7 +2346,7 @@ export func runLogin(base as string) {
         detail: ""
     };
     try {
-        $start = registry.startDevice($client, $api.auth);
+        $start = registry.startDevice($client, $auth);
         if ($start.throttled) {
             def wait as int init startRetryWait($start.retryAfter);
             if ($wait < 0) {
@@ -2323,7 +2354,7 @@ export func runLogin(base as string) {
             }
             io.printf("waiting: %s; retrying in %ds\n", throttleLine($start.detail), $wait);
             time.sleep(time.fromSeconds($wait));
-            $start = registry.startDevice($client, $api.auth);
+            $start = registry.startDevice($client, $auth);
         }
     } catch (err) {
         return fail("could not start a login at " + $base + ": " + $err.message);
@@ -2352,7 +2383,7 @@ export func runLogin(base as string) {
     while ($waited < $window) {
         time.sleep(time.fromSeconds($interval));
         $waited = $waited + $interval;
-        def reply as registry.TokenReply init pollOnce($client, $api.auth, $start.deviceCode);
+        def reply as registry.TokenReply init pollOnce($client, $auth, $start.deviceCode);
         if (not ($reply.error == "")) {
             return fail($reply.error);
         }
@@ -2382,6 +2413,90 @@ export func runLogin(base as string) {
     return fail("the code expired before it was approved; run `jvc login` again");
 }
 
+/** The longest `jvc login` waits for the browser under `authcode`. */
+export def const MAX_AUTHCODE_WAIT as int init 300;
+
+# authcodeLogin runs the authorization-code flow: listen on loopback, open the
+# provider's page, wait for the redirect, then exchange the code once. The
+# verifier is sent to the registry only, with the code, never to the browser.
+func authcodeLogin(
+    base as string,
+    client as registry.Client,
+    auth as registry.Auth,
+    openBrowser as bool) {
+    def l as authcode.Listener;
+    try {
+        $l = authcode.listen();
+    } catch (err) {
+        return fail("could not listen on 127.0.0.1 for the login redirect: " + $err.message);
+    }
+    def verifier as string init authcode.newVerifier();
+    def state as string init authcode.newState();
+    def url as string init registry.authorizeRequestUrl(
+        $auth,
+        $l.redirectUri,
+        $state,
+        authcode.challengeOf($verifier));
+    io.printf("%s\n", authcodePrompt($url, $l.port, $openBrowser and authcode.openBrowser($url)));
+    def got as authcode.Callback init authcode.awaitCallback($l, $state, MAX_AUTHCODE_WAIT);
+    if (not ($got.error == "")) {
+        return fail($got.error);
+    }
+    def reply as registry.TokenReply init emptyTokenReply();
+    try {
+        $reply = registry.exchangeCode($client, $auth, $got.code, $verifier, $l.redirectUri);
+    } catch (err) {
+        return fail("could not reach " + $base + " to finish the login: " + $err.message);
+    }
+    if ($reply.done) {
+        return finishLogin($base, $reply);
+    }
+    if (not ($reply.error == "")) {
+        return fail($reply.error);
+    }
+    # A code is single-use, so a pending or faulted answer cannot be polled
+    # again: the login has to start over.
+    def why as string init $reply.detail;
+    if ($why == "") {
+        $why = "it gave no reason";
+    }
+    return fail($base + " could not finish the login (" + $why + "); run `jvc login` again");
+}
+
+# authcodePrompt is what the terminal shows while the browser is out: the URL
+# always, since the opener may have done nothing, and over SSH the tunnel that
+# lets a browser on the other machine reach the listener.
+func authcodePrompt(url as string, port as string, opened as bool) {
+    def out as string init "open this page to log in:\n  " + $url;
+    if ($opened) {
+        $out = "opened your browser to log in; if nothing appeared, open:\n  " + $url;
+    }
+    if (not (os.getEnv("SSH_CONNECTION") == "")) {
+        $out = $out + "\n  (over SSH, the redirect comes back to this machine: forward " +
+            "the port first, ssh -L " + $port + ":127.0.0.1:" + $port + ")";
+    }
+    return $out + "\nwaiting for the redirect (up to " +
+        convert.toString(convert.toInt(MAX_AUTHCODE_WAIT / 60)) + " min)...";
+}
+
+# emptyTokenReply is the zero value the exchange starts from.
+func emptyTokenReply() {
+    return registry.TokenReply{
+        done: false,
+        pending: false,
+        slowDown: false,
+        fault: false,
+        token: "",
+        refreshToken: "",
+        expiresIn: 0,
+        login: "",
+        subject: "",
+        retryAfter: 0,
+        detail: "",
+        error: ""
+    };
+}
+
 /** The longest `jvc login` polls for an approval, whatever the registry offers. */
 export def const MAX_LOGIN_WAIT as int init 900;
 
@@ -2400,11 +2515,11 @@ export func loginWindow(expiresIn as int) {
     return $expiresIn;
 }
 
-# noTerminalRefusal explains why no device code was printed, and what to do
-# instead. Both alternatives authorise the write without a login.
+# noTerminalRefusal explains why no login was started, and what to do instead.
+# Both alternatives authorise the write without a login.
 func noTerminalRefusal(base as string) {
-    return "`jvc login` needs a terminal: it prints a code somebody has to " +
-        "type into a browser, and nobody is reading this.\n" +
+    return "`jvc login` needs a terminal: somebody has to approve it in a " +
+        "browser, and nobody is reading this.\n" +
         "  To authorise a write from a build, do not log in at all:\n" +
         "    trusted publishing - give the job `permissions: id-token: write` " +
         "and publish with no secret\n" +
@@ -5905,7 +6020,7 @@ func helpText() {
         "  trust <deck|@scope> <owner/name> --workflow FILE\n" +
         "                              let a CI workflow publish with no secret\n" +
         "      --refs P  --provider P  --repository-id N  --remove\n" +
-        "  login                       log in to the repository (device flow)\n" +
+        "  login [--no-browser]        log in to the repository\n" +
         "  logout                      discard the token held for it\n" +
         "  version                     print the jvc version\n" +
         "  help                        show this message\n" +
@@ -5964,7 +6079,7 @@ export func dispatch(args as list of string) {
         return $scoped;
     }
     if ($command == "login") {
-        return runLogin(registryBase($args));
+        return runLogin(registryBase($args), not hasFlag($args, "--no-browser"));
     }
     if ($command == "logout") {
         return runLogout(registryBase($args));

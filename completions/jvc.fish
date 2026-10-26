@@ -220,7 +220,7 @@ complete -c jvc -n __jvc_needs_verb -a scopes -d 'list the scopes a repository k
 complete -c jvc -n __jvc_needs_verb -a claim -d 'claim a scope for your account'
 complete -c jvc -n __jvc_needs_verb -a owners -d 'add or drop a co-owner'
 complete -c jvc -n __jvc_needs_verb -a trust -d 'let a CI workflow publish with no secret'
-complete -c jvc -n __jvc_needs_verb -a login -d 'log in to the repository (device flow)'
+complete -c jvc -n __jvc_needs_verb -a login -d 'log in to the repository'
 complete -c jvc -n __jvc_needs_verb -a logout -d 'discard the token held for it'
 complete -c jvc -n __jvc_needs_verb -a version -d 'print the jvc version'
 complete -c jvc -n __jvc_needs_verb -a help -d 'show the usage summary'
@@ -262,6 +262,7 @@ complete -c jvc -n '__jvc_verb_is app' -l system -d 'install under /usr/local'
 complete -c jvc -n '__jvc_verb_is app' -l name -x -d 'the command to install it as'
 complete -c jvc -n '__jvc_verb_is owners' -l remove -d 'drop the co-owner instead of adding'
 complete -c jvc -n '__jvc_verb_is trust' -l remove -d 'remove the binding instead of registering'
+complete -c jvc -n '__jvc_verb_is login' -l no-browser -d 'print the login page instead of opening it'
 complete -c jvc -n '__jvc_verb_is trust' -l workflow -x \
     -a '(for f in .github/workflows/*.yml .github/workflows/*.yaml; path basename $f; end)' \
     -d 'the workflow file allowed to publish'

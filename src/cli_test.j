@@ -1220,10 +1220,61 @@ func testAnUnknownFlowIsRefusedByName() {
     # The spec asks for the flow's own name, so a user can tell an unsupported
     # flow apart from a broken registry.
     def a as registry.Auth init deviceAuth();
-    $a.flow = "authcode";
+    $a.flow = "saml";
     def why as string init loginRefusal($a);
-    testing.assertContains($why, "authcode");
+    testing.assertContains($why, "`saml`");
     testing.assertContains($why, "device");
+    testing.assertContains($why, "authcode");
+}
+
+# authcodeAuth is a complete `authcode` advertisement.
+func authcodeAuth() {
+    def a as registry.Auth init registry.noAuth();
+    $a.present = true;
+    $a.provider = "oidc";
+    $a.flow = "authcode";
+    $a.tokenUrl = "/v1/auth/token";
+    $a.authorizeUrl = "https://idp.example/authorize";
+    $a.clientId = "jvc";
+    $a.scopes = ["openid", "profile"];
+    return $a;
+}
+
+func testTheAuthcodeFlowIsAccepted() {
+    testing.assertEqual(loginRefusal(authcodeAuth()), "");
+}
+
+func testAnAuthcodeFlowNeedsItsFields() {
+    def a as registry.Auth init authcodeAuth();
+    $a.clientId = "";
+    testing.assertContains(loginRefusal($a), "needs authorizeUrl, clientId and tokenUrl");
+}
+
+# The authorize URL is handed to a browser opener, which runs whatever handler
+# a scheme names.
+func testAnAuthorizeUrlThatIsNotHttpsIsRefused() {
+    def a as registry.Auth init authcodeAuth();
+    $a.authorizeUrl = "file:///etc/passwd";
+    testing.assertContains(loginRefusal($a), "not an https:// URL");
+    $a.authorizeUrl = "http://idp.example/authorize";
+    testing.assertContains(loginRefusal($a), "not an https:// URL");
+}
+
+func testTheAuthcodePromptAlwaysShowsTheUrl() {
+    def url as string init "https://idp.example/authorize?x=1";
+    def shown as string init authcodePrompt($url, "5000", false);
+    testing.assertContains($shown, "open this page to log in:\n  " + $url);
+    def opened as string init authcodePrompt($url, "5000", true);
+    testing.assertContains($opened, "if nothing appeared, open:\n  " + $url);
+    testing.assertContains($opened, "up to 5 min");
+}
+
+func testOverSshThePromptNamesTheTunnel() {
+    def was as string init os.getEnv("SSH_CONNECTION");
+    os.setEnv("SSH_CONNECTION", "10.0.0.1 5555 10.0.0.2 22");
+    def text as string init authcodePrompt("https://idp.example/a", "5000", false);
+    os.setEnv("SSH_CONNECTION", $was);
+    testing.assertContains($text, "ssh -L 5000:127.0.0.1:5000");
 }
 
 func testAFlowWithoutEndpointsIsRefused() {
@@ -3530,7 +3581,7 @@ func testAWriteToAnHttpRegistryIsRefused() {
 func testLoginRefusesAnHttpRegistry() {
     def was as string init os.getEnv("JVC_INSECURE_HTTP");
     os.setEnv("JVC_INSECURE_HTTP", "");
-    def out as Outcome init runLogin("http://registry.example");
+    def out as Outcome init runLogin("http://registry.example", false);
     os.setEnv("JVC_INSECURE_HTTP", $was);
     testing.assertFalse($out.ok);
     testing.assertContains($out.message, "plain http://");

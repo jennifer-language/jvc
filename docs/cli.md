@@ -44,7 +44,7 @@ so no `-I` flag is needed.
 | `claim <scope>`                      | claim a scope for your account                  |
 | `owners <scope> <subject> [--remove]` | add or drop a co-owner of a scope              |
 | `trust <deck or @scope> <owner/name>` | let a CI workflow publish with no stored secret |
-| `login` / `logout`                   | obtain or discard a repository token (device flow) |
+| `login` / `logout`                   | obtain or discard a repository token            |
 | `version` / `help`                   | version, provenance, and interpreter / usage    |
 
 Aliases: `rm` (remove), `ls` (list), `sync` (install), `upgrade` (update),
@@ -317,16 +317,45 @@ installs; the next `jvc update` fills it in.
 
 ### Logging in
 
-`jvc login` authenticates against the repository with the OAuth 2.0 **device
-authorization grant**: it prints a short code, you approve it in a browser you
-are already signed into, and the repository issues its own token. There is no
-password path and no personal access token to paste.
+`jvc login` authenticates against the repository with whichever OAuth 2.0
+flow it advertises, and the repository issues its own token either way. There
+is no password path and no personal access token to paste.
+
+The **device authorization grant** (`flow: "device"`, GitHub's and the
+default) prints a short code, and you approve it in a browser you are already
+signed into:
 
 ```
 $ jvc login
 open https://github.com/login/device and enter code  WXYZ-1234
 logged in as @alice
 ```
+
+The **authorization code grant with PKCE** (`flow: "authcode"`) is for an
+identity provider with no device grant. jvc opens the provider's page in your
+browser and waits on `127.0.0.1`, on a port the system picks, for the
+redirect:
+
+```
+$ jvc login
+opened your browser to log in; if nothing appeared, open:
+  https://sso.example/authorize?response_type=code&client_id=...
+waiting for the redirect (up to 5 min)...
+logged in as @alice
+```
+
+- `--no-browser` prints the page without opening it;
+- over SSH the redirect comes back to the machine running jvc, so jvc names
+  the port to forward (`ssh -L <port>:127.0.0.1:<port>`); the device flow,
+  where a registry offers it, needs no tunnel;
+- the code goes to the repository once, with the PKCE verifier, and the
+  repository redeems it with the provider. **jvc never holds a provider
+  token**; only the repository's own is stored;
+- a request to the listener without this login's `state` (a page probing
+  local ports, an old tab) is answered and ignored, so it can neither finish
+  the login nor cut it short;
+- the authorize URL comes from the repository's discovery document, so jvc
+  opens it only if it is `https://` (or `http://` on this machine).
 
 Everything about the flow comes from the repository's discovery document,
 never from a hard-coded path: the provider, the flow and the endpoints. So:
@@ -336,10 +365,11 @@ never from a hard-coded path: the provider, the flow and the endpoints. So:
   says so;
 - a repository asking for a flow jvc does not implement is refused **by that
   flow's name**, so an unsupported flow is distinguishable from a broken
-  repository;
+  repository, and a known flow advertised without the fields to run it is
+  refused as such;
 - a `429` when starting the login is retried once, after its `Retry-After`;
   one past 60 s is reported rather than waited out;
-- polling waits the interval the repository asks for and doubles it on a `429`
+- under `device`, polling waits the interval the repository asks for and doubles it on a `429`
   or a server fault, or waits a longer `Retry-After` (capped at 60 s), giving
   up after four faults in a row or when the code expires, and after fifteen
   minutes whatever lifetime the repository gave the code.
@@ -423,14 +453,14 @@ refused when the token does not carry it.
 
 ### Publishing from a pipeline
 
-A device grant ends with a human typing a code into a browser, and a build
-runner has no human. `jvc login` therefore **refuses** instead of printing a
-code nobody will read:
+Either login flow ends with a human approving in a browser, and a build runner
+has no human. `jvc login` therefore **refuses** instead of printing a code or a
+page nobody will read:
 
 ```
 $ jvc login
-`jvc login` needs a terminal: it prints a code somebody has to type into a
-browser, and nobody is reading this.
+`jvc login` needs a terminal: somebody has to approve it in a browser, and
+nobody is reading this.
   To authorise a write from a build, do not log in at all:
     trusted publishing - give the job `permissions: id-token: write` and publish with no secret
     $JVC_TOKEN         - set it to a token minted for https://registry.jennifer-lang.dev

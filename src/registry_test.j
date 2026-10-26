@@ -9,6 +9,9 @@
 
 use testing;
 use maps;
+use httpd;
+use task;
+use convert;
 
 func testPercentEncodeUnreserved() {
     testing.assertEqual(percentEncode("ansi"), "ansi");
@@ -1124,4 +1127,79 @@ func testAPublishersRefusalKeepsTheRegistrysWords() {
     testing.assertContains($r.error, "only the owner of @acme");
     testing.assertEqual($r.binding.target, "");
     testing.assertContains(parsePublisherReply(200, "<html>").error, "200");
+}
+
+# --- the authcode flow ---------------------------------------------------------
+
+# codeAuth is an `authcode` advertisement whose authorize URL already carries a
+# query, as some providers' do.
+func codeAuth() {
+    def a as Auth init noAuth();
+    $a.present = true;
+    $a.flow = FLOW_AUTHCODE;
+    $a.tokenUrl = "/v1/auth/token";
+    $a.authorizeUrl = "https://idp.example/oauth/authorize?tenant=a";
+    $a.clientId = "jvc cli";
+    $a.scopes = ["openid", "read:user"];
+    return $a;
+}
+
+func testTheAuthorizeUrlCarriesTheWholeRequest() {
+    def url as string init authorizeRequestUrl(
+        codeAuth(),
+        "http://127.0.0.1:5000/callback",
+        "st&ate",
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    testing.assertTrue(strings.startsWith($url, "https://idp.example/oauth/authorize?tenant=a&"));
+    testing.assertContains($url, "response_type=code");
+    testing.assertContains($url, "client_id=jvc%20cli");
+    testing.assertContains($url, "redirect_uri=http%3A%2F%2F127.0.0.1%3A5000%2Fcallback");
+    testing.assertContains($url, "scope=openid%20read%3Auser");
+    testing.assertContains($url, "state=st%26ate");
+    testing.assertContains($url, "code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    testing.assertContains($url, "code_challenge_method=S256");
+}
+
+func testAnAuthorizeUrlWithNoScopesSendsNone() {
+    def a as Auth init codeAuth();
+    $a.scopes = [];
+    $a.authorizeUrl = "https://idp.example/authorize";
+    def url as string init authorizeRequestUrl($a, "http://127.0.0.1:1/callback", "s", "c");
+    testing.assertTrue(strings.startsWith($url, "https://idp.example/authorize?response_type"));
+    testing.assertFalse(strings.contains($url, "scope="));
+}
+
+# standInTokenEndpoint answers one POST with a token and hands back the body it
+# received, so a test can check exactly what the exchange sent.
+func standInTokenEndpoint(srv as httpd.Server) {
+    def req as httpd.Request init httpd.accept($srv);
+    def got as string init convert.stringFromBytes(httpd.body($req), "utf-8");
+    httpd.respond(
+        $req,
+        200,
+        '{"token":"reg-token","refreshToken":"r1","login":"alice","subject":"7"}');
+    return $got;
+}
+
+func testTheCodeIsExchangedOnceWithItsVerifier() {
+    def srv as httpd.Server init httpd.listen("127.0.0.1:0");
+    def t as task of string init spawn {
+        return standInTokenEndpoint($srv);
+    };
+    def client as Client init newClient("http://" + httpd.address($srv));
+    def reply as TokenReply init exchangeCode(
+        $client,
+        codeAuth(),
+        "the-code",
+        "the-verifier",
+        "http://127.0.0.1:5000/callback");
+    def sent as json.Value init json.decode(task.wait($t));
+    httpd.shutdown($srv);
+    testing.assertTrue($reply.done);
+    testing.assertEqual($reply.token, "reg-token");
+    testing.assertEqual($reply.login, "alice");
+    testing.assertEqual(json.asString($sent, "/code"), "the-code");
+    testing.assertEqual(json.asString($sent, "/codeVerifier"), "the-verifier");
+    testing.assertEqual(json.asString($sent, "/redirectUri"), "http://127.0.0.1:5000/callback");
+    testing.assertFalse(json.has($sent, "/deviceCode"));
 }
