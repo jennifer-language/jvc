@@ -2976,12 +2976,26 @@ func lockedEntry(doc as json.Value, name as string) {
     };
 }
 
-# lockedVersion returns a locked deck's version, or "" when it is not locked.
-func lockedVersion(locked as list of catalog.Candidate, name as string) {
-    for (def res in $locked) {
-        if (deckname.fold($res.name) == deckname.fold($name)) {
-            return $res.version;
+# versionIndex maps each deck in a set (folded name) to its version, built once
+# so a loop over the set looks each one up in constant time. Scanning the list
+# per lookup, inside loops over the same list, was quadratic in the lock.
+func versionIndex(decks as list of catalog.Candidate) {
+    def out as map of string to string init {};
+    for (def res in $decks) {
+        def key as string init deckname.fold($res.name);
+        # The first entry wins, as the scan it replaces returned the first.
+        if (not maps.has($out, $key)) {
+            $out[$key] = $res.version;
         }
+    }
+    return $out;
+}
+
+# versionIn looks a deck up in a versionIndex, "" when the set has none.
+func versionIn(index as map of string to string, name as string) {
+    def key as string init deckname.fold($name);
+    if (maps.has($index, $key)) {
+        return $index[$key];
     }
     return "";
 }
@@ -3007,8 +3021,9 @@ export func lockStaleReason(roots as map of string to string, locked as list of 
         }
         return "it records no decks";
     }
+    def index as map of string to string init versionIndex($locked);
     for (def name in $roots) {
-        def have as string init lockedVersion($locked, $name);
+        def have as string init versionIn($index, $name);
         if ($have == "") {
             return $name + " is required but not locked";
         }
@@ -3019,7 +3034,7 @@ export func lockStaleReason(roots as map of string to string, locked as list of 
     }
     for (def res in $locked) {
         for (def dep in $res.requires) {
-            def have as string init lockedVersion($locked, $dep);
+            def have as string init versionIn($index, $dep);
             if ($have == "") {
                 return $res.name + " " + $res.version + " needs " + $dep +
                     ", which is not locked";
@@ -3231,43 +3246,62 @@ export func installArchive(
     data as bytes,
     expected as string,
     format as string) {
+    def refused as string init archiveRefusal($dir, $name, $data, $expected);
+    if (not ($refused == "")) {
+        return vendorFailed($refused);
+    }
+    # The unpacked list goes straight into the call. Bound to a variable first,
+    # it was deep-copied whole (the archive's every byte, once per deck), and a
+    # parameter is not.
+    try {
+        return vendorEntries($dir, $name, safepath.unpack($data, $format));
+    } catch (e) {
+        return unpackFailed($name, $e.message);
+    }
+}
+
+# vendorFailed is a VendorResult refusing with message.
+func vendorFailed(message as string) {
+    return VendorResult{ok: false, files: 0, message: $message, bin: ""};
+}
+
+# unpackFailed reports an archive that did not unpack. The interpreter refuses
+# one naming a member with a `..` segment or an absolute path, so that is an
+# ordinary answer, not a crash.
+func unpackFailed(name as string, why as string) {
+    return vendorFailed("cannot unpack " + $name + ": " + $why);
+}
+
+# archiveRefusal says why an archive must not be vendored before it is even
+# unpacked, or "": a deck name that is not one, a checksum that does not match,
+# or a symbolic link on the way to its vendor directory.
+func archiveRefusal(dir as string, name as string, data as bytes, expected as string) {
     # The last line of defence for the vendor path: every boundary checks names
     # already, but this is where one turns into a removeAll.
     if (not isDeckName($name)) {
-        return VendorResult{
-            ok: false,
-            files: 0,
-            message: "refusing to vendor an invalid deck name: " + $name,
-            bin: ""
-        };
+        return "refusing to vendor an invalid deck name: " + $name;
     }
     if (not checksumMatches($data, $expected)) {
-        return VendorResult{
-            ok: false,
-            files: 0,
-            message: "checksum mismatch for " + $name,
-            bin: ""
-        };
+        return "checksum mismatch for " + $name;
     }
-    def deckDir as string init path.join($dir, VENDOR_DIR, deckname.vendorSubdir($name));
     # `vendor/<scope>` is per deck, so the up-front check cannot have seen it.
-    def linked as string init linkRefusal($dir, VENDOR_DIR + "/" + deckname.vendorSubdir($name));
-    if (not ($linked == "")) {
-        return VendorResult{ok: false, files: 0, message: $linked, bin: ""};
-    }
-    # The interpreter refuses an archive naming a member with a `..` segment or
-    # an absolute path, so that is an ordinary answer here, not a crash.
-    def entries as list of archive.Entry init [];
+    return linkRefusal($dir, VENDOR_DIR + "/" + deckname.vendorSubdir($name));
+}
+
+# vendorEntries writes an unpacked, already vetted archive's modules into the
+# deck's vendor directory (`installArchive`). Never throws: a filesystem
+# failure is a failed VendorResult, and the staging tree is removed.
+func vendorEntries(dir as string, name as string, entries as list of archive.Entry) {
     try {
-        $entries = safepath.unpack($data, $format);
-    } catch (e) {
-        return VendorResult{
-            ok: false,
-            files: 0,
-            message: "cannot unpack " + $name + ": " + $e.message,
-            bin: ""
-        };
+        return writeVendored($dir, $name, $entries);
+    } catch (err) {
+        return vendorFailed("cannot vendor " + $name + ": " + $err.message);
     }
+}
+
+# writeVendored is vendorEntries' work, which may throw.
+func writeVendored(dir as string, name as string, entries as list of archive.Entry) {
+    def deckDir as string init path.join($dir, VENDOR_DIR, deckname.vendorSubdir($name));
     # Unpack into a staging directory and swap it in at the end, so an interrupted
     # or invalid install leaves the previously vendored deck untouched rather than
     # a half-written tree. Staging sits inside the vendor root so the final rename
@@ -3504,33 +3538,51 @@ export func fetchArchive(res as catalog.Candidate) {
 # vendor/<scope>/<deck>/. Returns the VendorResult so the caller can both report
 # per deck and pick up any command the deck declares (never throws).
 func downloadDeck(dir as string, res as catalog.Candidate, runTests as bool) {
+    # Each result is handed straight on rather than bound to a variable, which
+    # would deep-copy the whole archive (see installArchive).
     try {
-        def got as Fetched init fetchArchive($res);
-        def vr as VendorResult init installArchive(
-            $dir,
-            $res.name,
-            $got.data,
-            $got.checksum,
-            $got.format);
-        if (not $vr.ok or not $runTests) {
-            return $vr;
-        }
-        return withTestRun($dir, $res, $got, $vr);
+        return deliverFetched($dir, $res, $runTests, fetchArchive($res));
     } catch (err) {
-        return VendorResult{ok: false, files: 0, message: $err.message, bin: ""};
+        return vendorFailed($err.message);
     }
+}
+
+# deliverFetched vendors fetched bytes, and with runTests also runs the deck's
+# overlays from the same unpacked archive, which is unpacked once.
+func deliverFetched(dir as string, res as catalog.Candidate, runTests as bool, got as Fetched) {
+    if (not $runTests) {
+        return installArchive($dir, $res.name, $got.data, $got.checksum, $got.format);
+    }
+    def refused as string init archiveRefusal($dir, $res.name, $got.data, $got.checksum);
+    if (not ($refused == "")) {
+        return vendorFailed($refused);
+    }
+    try {
+        return vendorAndTest($dir, $res, safepath.unpack($got.data, $got.format));
+    } catch (e) {
+        return unpackFailed($res.name, $e.message);
+    }
+}
+
+# vendorAndTest vendors an unpacked archive and then runs its overlays.
+func vendorAndTest(dir as string, res as catalog.Candidate, entries as list of archive.Entry) {
+    def vr as VendorResult init vendorEntries($dir, $res.name, $entries);
+    if (not $vr.ok) {
+        return $vr;
+    }
+    return withTestRun($dir, $entries, $vr);
 }
 
 # withTestRun runs a deck's own overlays on this machine and folds the result
 # into its VendorResult. The overlays are not vendored, so they are extracted
-# from the release into a temp directory and run there; the deck's own
-# dependencies resolve because the project's vendor tree is pointed at.
-func withTestRun(dir as string, res as catalog.Candidate, got as Fetched, vr as VendorResult) {
+# from the release (already unpacked, as entries) into a temp directory and run
+# there; the deck's own dependencies resolve because the project's vendor tree
+# is pointed at.
+func withTestRun(dir as string, entries as list of archive.Entry, vr as VendorResult) {
     def work as string init fs.makeTempDir("", "jvc-test");
     # Removed however this exits, a throwing overlay included.
     defer fs.removeAll($work);
     def count as int init 0;
-    def entries as list of archive.Entry init safepath.unpack($got.data, $got.format);
     def root as string init rootOf($entries);
     for (def e in $entries) {
         def sub as string init srcSubpath($e.name, $root);
@@ -3542,10 +3594,10 @@ func withTestRun(dir as string, res as catalog.Candidate, got as Fetched, vr as 
         fs.writeBytes($dest, $e.data);
         $count = $count + 1;
     }
-    def previous as string init os.getEnv("JENNIFER_VENDOR");
-    os.setEnv("JENNIFER_VENDOR", path.join($dir, VENDOR_DIR));
-    defer os.setEnv("JENNIFER_VENDOR", $previous);
-    def found as verify.Finding init verify.runOverlays($work);
+    # The vendor tree goes to the overlays' environment only. Set in jvc's own
+    # and restored, it came back as `""` rather than unset (there is no
+    # `os.unsetEnv`), which is not the same thing to everything run after.
+    def found as verify.Finding init verify.runOverlaysWith($work, path.join($dir, VENDOR_DIR));
     if (not $found.ok) {
         return VendorResult{
             ok: false,
@@ -4294,8 +4346,9 @@ export func runUpdate(
     for (def name in $only) {
         $named[] = deckname.fold($name);
     }
+    def index as map of string to string init versionIndex($locked.decks);
     for (def name in $named) {
-        if (not maps.has($roots, $name) and lockedVersion($locked.decks, $name) == "") {
+        if (not maps.has($roots, $name) and versionIn($index, $name) == "") {
             return fail($name + " is neither a requirement nor locked; nothing to update");
         }
     }
@@ -4399,16 +4452,18 @@ func listHas(items as list of string, want as string) {
 # buried in the per-deck install output.
 func changeReport(before as list of catalog.Candidate, after as list of catalog.Candidate) {
     def lines as string init "";
+    def had as map of string to string init versionIndex($before);
+    def now as map of string to string init versionIndex($after);
     for (def res in $after) {
-        def had as string init lockedVersion($before, $res.name);
-        if ($had == "") {
+        def was as string init versionIn($had, $res.name);
+        if ($was == "") {
             $lines = $lines + "\n  + " + $res.name + " " + $res.version + " (new)";
-        } elseif (not ($had == $res.version)) {
-            $lines = $lines + "\n  ^ " + $res.name + " " + $had + " -> " + $res.version;
+        } elseif (not ($was == $res.version)) {
+            $lines = $lines + "\n  ^ " + $res.name + " " + $was + " -> " + $res.version;
         }
     }
     for (def res in $before) {
-        if (lockedVersion($after, $res.name) == "") {
+        if (versionIn($now, $res.name) == "") {
             $lines = $lines + "\n  - " + $res.name + " " + $res.version + " (removed)";
         }
     }

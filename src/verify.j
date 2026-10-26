@@ -391,6 +391,20 @@ func runOverlay(dir as string, overlay as string) {
     return "";
 }
 
+# withVendor prefixes argv with a `JENNIFER_VENDOR=` assignment for `env`,
+# which `isolatedArgv` runs it through, or returns it as is for vendor "". It
+# comes after the PASSED_ENV assignments, so it wins over an inherited value.
+func withVendor(vendor as string, argv as list of string) {
+    if ($vendor == "") {
+        return $argv;
+    }
+    def out as list of string init ["JENNIFER_VENDOR=" + $vendor];
+    for (def a in $argv) {
+        $out[] = $a;
+    }
+    return $out;
+}
+
 # rel renders a path relative to the deck directory, for readable messages.
 func rel(dir as string, file as string) {
     def prefix as string init $dir + "/";
@@ -522,6 +536,18 @@ func docblockCheck(dir as string) {
  * @return {Finding} the outcome, named "tests"
  */
 export func runOverlays(dir as string) {
+    return runOverlaysWith($dir, "");
+}
+
+/**
+ * Run overlays as `runOverlays` does, with `$JENNIFER_VENDOR` set to vendor in
+ * their environment only (none when vendor is ""), so the caller's own
+ * environment is never changed and never has to be put back.
+ * @param dir {string} the directory to search for overlays
+ * @param vendor {string} the vendor tree the overlays import from, or ""
+ * @return {Finding} the outcome, named "tests"
+ */
+export func runOverlaysWith(dir as string, vendor as string) {
     def included as map of string to bool init includedFiles($dir);
     def overlays as list of string init [];
     for (def st in fs.walk($dir)) {
@@ -535,7 +561,8 @@ export func runOverlays(dir as string) {
     for (def overlay in $overlays) {
         def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
         try {
-            $r = runIsolated([interpreter(), "test", "--allow-empty", $overlay]);
+            def argv as list of string init [interpreter(), "test", "--allow-empty", $overlay];
+            $r = runIsolated(withVendor($vendor, $argv));
         } catch (err) {
             return Finding{check: "tests", ok: false, detail: cannotRun($err.message)};
         }

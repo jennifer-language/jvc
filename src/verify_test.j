@@ -554,3 +554,38 @@ func testAnIncludeInACommentOrStringDoesNotCount() {
     testing.assertEqual(len($got), 1);
     testing.assertEqual($got[0], "c.j");
 }
+
+# The vendor tree reaches the overlays' environment, and only theirs: jvc's
+# own is never set, so it never has to be put back.
+func testRunOverlaysWithPassesTheVendorTree() {
+    def dir as string init deckDir("withvendor");
+    writeModule(
+        $dir,
+        "demo",
+        goodModule(),
+        strings.join(
+            [
+                'use testing;',
+                'use os;',
+                '',
+                'func testVendor() {',
+                '    testing.assertEqual(os.getEnv("JENNIFER_VENDOR"), "/x/vendor");',
+                '}',
+                ''
+            ],
+            "\n"));
+    def before as string init os.getEnv("JENNIFER_VENDOR");
+    def with as Finding init runOverlaysWith($dir, "/x/vendor");
+    def without as Finding init runOverlays($dir);
+    testing.assertTrue($with.ok);
+    testing.assertFalse($without.ok);
+    testing.assertEqual(os.getEnv("JENNIFER_VENDOR"), $before);
+    fs.removeAll($dir);
+}
+
+func testWithVendorPrefixesAnAssignment() {
+    testing.assertEqual(withVendor("", ["a"])[0], "a");
+    def argv as list of string init withVendor("/v", ["jennifer", "test"]);
+    testing.assertEqual($argv[0], "JENNIFER_VENDOR=/v");
+    testing.assertEqual($argv[1], "jennifer");
+}

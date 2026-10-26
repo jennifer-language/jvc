@@ -3454,3 +3454,42 @@ func testATagOnAnotherCommitIsNamed() {
     testing.assertFalse(strings.contains($src.error, "git tag "));
     fs.removeAll($dir);
 }
+
+# --- the version index ------------------------------------------------------
+
+func testVersionIndexIsFoldedAndKeepsTheFirst() {
+    def index as map of string to string init versionIndex([
+        catalog.candidate("@acme/alpha", "1.0.0"),
+        catalog.candidate("@acme/alpha", "2.0.0")
+    ]);
+    testing.assertEqual(versionIn($index, "@Acme/Alpha"), "1.0.0");
+    testing.assertEqual(versionIn($index, "@acme/beta"), "");
+}
+
+# A lock of hundreds of decks, each requiring the next, is judged in one pass
+# over an index rather than one scan of the list per requirement.
+func testALargeLockIsJudgedQuickly() {
+    def locked as list of catalog.Candidate init [];
+    for (def i in 0..400) {
+        def c as catalog.Candidate init catalog.candidate("@big/d" + convert.toString($i), "1.0.0");
+        if ($i < 399) {
+            $c.requires = {"@big/d" + convert.toString($i + 1): "^1.0.0"};
+        }
+        $locked[] = $c;
+    }
+    testing.assertEqual(lockStaleReason({"@big/d0": "^1.0.0"}, $locked), "");
+    testing.assertContains(changeReport([], $locked), "+ @big/d399 1.0.0 (new)");
+}
+
+# Vendoring that fails on the filesystem is a result, not a throw.
+func testAVendoringFailureIsReported() {
+    def dir as string init freshDir("vendorfail");
+    fs.mkdirAll($dir + "/vendor");
+    fs.chmod($dir + "/vendor", 0o555);
+    def data as bytes init deckArchive();
+    def vr as VendorResult init installArchive($dir, "@jennifer/routeros", $data, "", "tar.gz");
+    fs.chmod($dir + "/vendor", 0o755);
+    testing.assertFalse($vr.ok);
+    testing.assertContains($vr.message, "cannot vendor @jennifer/routeros");
+    fs.removeAll($dir);
+}
