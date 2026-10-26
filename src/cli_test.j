@@ -3092,3 +3092,118 @@ func testAGitPathIsAnyCaseOfDotGit() {
     testing.assertFalse(isGitPath("src/.git/x"));
     testing.assertFalse(isGitPath(".github/workflows/ci.yml"));
 }
+
+# --- symbolic links a checkout can commit -----------------------------------
+
+# linkedProject makes a project dir and, beside it, an `outside` directory
+# holding one file, the thing a hostile link would aim jvc at. Returns the
+# project path; the outside one is `<project>_outside`.
+func linkedProject(label as string) {
+    def dir as string init freshDir("link_" + $label);
+    def outside as string init freshDir("link_" + $label + "_outside");
+    fs.writeString($outside + "/precious", "keep me");
+    return $dir;
+}
+
+# `vendor/jennifer -> <outside>` turns the replace of vendor/jennifer/routeros
+# into a removeAll and rename outside the project.
+func testInstallArchiveRefusesAVendorScopeLink() {
+    def dir as string init linkedProject("scope");
+    fs.mkdirAll($dir + "/vendor");
+    fs.symlink($dir + "_outside", $dir + "/vendor/jennifer");
+    fs.mkdirAll($dir + "_outside/routeros");
+    def vr as VendorResult init installArchive(
+        $dir,
+        "@jennifer/routeros",
+        deckArchive(),
+        "",
+        "tar.gz");
+    testing.assertFalse($vr.ok);
+    testing.assertContains($vr.message, "symbolic link");
+    testing.assertContains($vr.message, "vendor/jennifer");
+    testing.assertTrue(fs.exists($dir + "_outside/routeros"));
+    testing.assertFalse(fs.exists($dir + "_outside/routeros/routeros.j"));
+    fs.removeAll($dir);
+    fs.removeAll($dir + "_outside");
+}
+
+func testAProjectLinkAtVendorBinOrTheLockIsRefused() {
+    def dir as string init linkedProject("project");
+    testing.assertEqual(projectLinkProblem($dir, "bin"), "");
+    fs.symlink($dir + "_outside", $dir + "/vendor");
+    testing.assertContains(projectLinkProblem($dir, "bin"), $dir + "/vendor");
+    fs.remove($dir + "/vendor");
+    fs.mkdirAll($dir + "/tools");
+    fs.symlink($dir + "_outside", $dir + "/tools/bin");
+    testing.assertEqual(projectLinkProblem($dir, "bin"), "");
+    testing.assertContains(projectLinkProblem($dir, "tools/bin"), "tools/bin");
+    fs.symlink($dir + "_outside/precious", $dir + "/camcorder.lock");
+    testing.assertContains(projectLinkProblem($dir, "bin"), "camcorder.lock");
+    fs.removeAll($dir);
+    fs.removeAll($dir + "_outside");
+}
+
+# writeLock is the last line: it must not write through a lock that is a link,
+# whatever its caller checked.
+func testWriteLockRefusesALinkedLock() {
+    def dir as string init linkedProject("lock");
+    fs.symlink($dir + "_outside/precious", $dir + "/camcorder.lock");
+    testing.assertThrows("writeLinkedLock", "lock");
+    testing.assertEqual(fs.readString($dir + "_outside/precious"), "keep me");
+    fs.removeAll($dir);
+    fs.removeAll($dir + "_outside");
+}
+
+func writeLinkedLock() {
+    writeLock(os.tempDir() + "/jvc_cli_link_lock", []);
+}
+
+# A dropped deck behind a link is kept and reported, not removed through it.
+func testPruneVendorRemovesNothingThroughALink() {
+    def dir as string init linkedProject("prune");
+    fs.mkdirAll($dir + "/vendor");
+    fs.mkdirAll($dir + "_outside/routeros");
+    fs.symlink($dir + "_outside", $dir + "/vendor/jennifer");
+    def old as catalog.Candidate init catalog.candidate("@jennifer/routeros", "0.1.0");
+    def lines as list of string init pruneVendor($dir, "bin", [$old], []);
+    testing.assertEqual(len($lines), 1);
+    testing.assertContains($lines[0], "kept @jennifer/routeros");
+    testing.assertTrue(fs.exists($dir + "_outside/routeros"));
+    testing.assertTrue(fs.exists($dir + "_outside/precious"));
+    fs.removeAll($dir);
+    fs.removeAll($dir + "_outside");
+}
+
+func testNoProjectCommandIsLinkedThroughALinkedBinDir() {
+    def dir as string init linkedProject("bins");
+    installArchive($dir, "@jennifer/routeros", deckArchive(), "", "tar.gz");
+    fs.symlink($dir + "_outside", $dir + "/bin");
+    def deck as catalog.Candidate init catalog.candidate("@jennifer/routeros", "0.1.0");
+    def lines as list of string init writeProjectBins(
+        $dir,
+        "bin",
+        [$deck],
+        {"@jennifer/routeros": "routeros.j"});
+    testing.assertEqual(len($lines), 1);
+    testing.assertContains($lines[0], "no commands written");
+    testing.assertFalse(fs.exists($dir + "_outside/routeros.j"));
+    fs.removeAll($dir);
+    fs.removeAll($dir + "_outside");
+}
+
+# The project scope's store and bin come from the checkout; the other scopes'
+# directories are the user's own, where a link is their choice.
+func testAppWritesRefuseALinkedProjectStoreOrBin() {
+    def dir as string init linkedProject("app");
+    testing.assertEqual(appLinkProblem($dir, "project", "install"), "");
+    fs.symlink($dir + "_outside", $dir + "/.jvc");
+    testing.assertContains(appLinkProblem($dir, "project", "install"), "/.jvc");
+    testing.assertContains(appLinkProblem($dir, "project", "uninstall"), "/.jvc");
+    testing.assertEqual(appLinkProblem($dir, "project", "list"), "");
+    testing.assertEqual(appLinkProblem($dir, "user", "install"), "");
+    fs.remove($dir + "/.jvc");
+    fs.symlink($dir + "_outside", $dir + "/bin");
+    testing.assertContains(appLinkProblem($dir, "project", "update"), "/bin");
+    fs.removeAll($dir);
+    fs.removeAll($dir + "_outside");
+}

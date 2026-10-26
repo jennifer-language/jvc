@@ -91,3 +91,29 @@ func testUnderRoot() {
     testing.assertEqual(underRoot("src/a.j", ""), "src/a.j");
     testing.assertEqual(underRoot("./src/a.j", ""), "src/a.j");
 }
+
+# --- linkOnPath -------------------------------------------------------------
+
+func testLinkOnPathFindsTheFirstLink() {
+    def root as string init fs.makeTempDir("", "jvc_safepath_link");
+    fs.mkdirAll($root + "/vendor/acme");
+    testing.assertEqual(linkOnPath($root, "vendor/acme/tool"), "");
+    testing.assertEqual(linkOnPath($root, "missing/acme"), "");
+    fs.symlink("..", $root + "/vendor/evil");
+    testing.assertEqual(linkOnPath($root, "vendor/evil/tool"), $root + "/vendor/evil");
+    # a dangling link is a link
+    fs.symlink("/no/such/target", $root + "/vendor/acme/gone");
+    testing.assertEqual(linkOnPath($root, "vendor/acme/gone"), $root + "/vendor/acme/gone");
+    fs.removeAll($root);
+}
+
+# The root is the user's to place, behind a link or not.
+func testLinkOnPathDoesNotTestTheRoot() {
+    def real as string init fs.makeTempDir("", "jvc_safepath_real");
+    def alias as string init $real + "_alias";
+    fs.symlink($real, $alias);
+    fs.mkdirAll($real + "/vendor");
+    testing.assertEqual(linkOnPath($alias, "vendor"), "");
+    fs.remove($alias);
+    fs.removeAll($real);
+}

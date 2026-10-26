@@ -621,7 +621,11 @@ deck name, every constraint (in `[decks]`, `[dev-decks]`, `[conflicts]` and
 `[engines]`), every `[registries]` key and value (an `http://` or `https://`
 base URL), `[package] bin`, and `[package] bin-dir`, which must be a relative
 path inside the project. A bad entry is reported by table and name. `jvc new`
-and `jvc publish` run the same check.
+and `jvc publish` run the same check. Install and update also refuse a project
+where `vendor`, anything on the way to a deck's `vendor/<scope>/<deck>`, the
+bin directory or `camcorder.lock` is a symbolic link: git stores links, so a
+cloned project could otherwise point jvc's removals and writes outside itself
+(`vendor/acme -> ..`).
 A lock whose recorded registries the `[registries]` mapping has since moved is
 refused outright (see [One project, several
 repositories](#one-project-several-repositories)), not treated as stale.
@@ -917,6 +921,12 @@ The other scopes link by absolute path, since those trees are machine-local and
 do not move. `$JVC_APP_HOME` and `$JVC_BIN` override the user scope's two
 directories independently. Install warns when the command directory is not on
 your `PATH`.
+
+In the `project` scope, `install`, `update` and `uninstall` refuse when `.jvc`,
+`.jvc/apps` or `bin` is a symbolic link. Those come from the checkout, and a
+committed link would aim the store's renames and removals, or the command,
+outside the project. A link in the other scopes (`~/.local/bin` kept in a
+dotfiles repository, say) is yours, and is followed.
 
 **The command is a symlink**: `ls -l` shows where it points, `readlink`
 resolves it, and no extra process sits between the shell and the program. An

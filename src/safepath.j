@@ -24,7 +24,14 @@
  * wrapper from a real directory, and so read `src/template/` as a template
  * and `tools/src/` as the deck's sources.
  *
- * All functions here except `unpack` are pure string logic.
+ * **A checked path can still leave through a symbolic link** on disk. git
+ * stores links, so a cloned project can commit `vendor/acme -> ..` or
+ * `bin -> ~/.local/bin`, and every segment of `vendor/acme/tool` is then a
+ * safe segment while a `removeAll` of it deletes a directory outside the
+ * project. `linkOnPath` is the check for that, run before jvc removes, renames
+ * or writes under a directory a checkout supplies.
+ *
+ * All functions here except `unpack` and `linkOnPath` are pure string logic.
  * @module safepath
  * @example
  * import "./safepath.j" as safepath;
@@ -34,6 +41,7 @@
 
 use strings;
 use archive;
+use fs;
 
 /**
  * The options every archive jvc reads is unpacked with: the default size and
@@ -100,6 +108,41 @@ export func isSafeSegment(s as string) {
     }
     return not (strings.contains($s, "/") or strings.contains($s, "\\") or
         strings.contains($s, "\0"));
+}
+
+/**
+ * Find a symbolic link on the way from root to `root/rel`: each of rel's
+ * segments is tested in turn, and the first that is a link (dangling or not) is
+ * returned as `root/<prefix>`. root itself is not tested, since where a user
+ * keeps a project is theirs to decide. A segment that does not exist ends the
+ * walk: nothing below it can be a link yet.
+ *
+ * With no link on the path, and rel a safe relative path (`isSafeRelative`),
+ * `root/rel` is inside root on disk as well as on paper.
+ * @param root {string} the directory jvc owns, such as the project
+ * @param rel {string} the path below it, `/`-separated
+ * @return {string} the first link's path, or "" when there is none
+ */
+export func linkOnPath(root as string, rel as string) {
+    def at as string init $root;
+    for (def seg in strings.split($rel, "/")) {
+        if ($seg == "") {
+            continue;
+        }
+        $at = $at + "/" + $seg;
+        try {
+            fs.readlink($at);
+        } catch (err) {
+            # Not a link. `readlink` cannot tell a missing path from a plain
+            # file or directory, so ask `exists` before walking further.
+            if (not fs.exists($at)) {
+                return "";
+            }
+            continue;
+        }
+        return $at;
+    }
+    return "";
 }
 
 # stripDot drops one leading "./", the form some tar writers give every member.

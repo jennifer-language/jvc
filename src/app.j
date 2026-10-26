@@ -125,15 +125,18 @@ export func systemPrefix() {
  * Report whether a directory can be written to, by probing it rather than
  * guessing from the user id: a probe is right under `sudo`, inside a container,
  * with an ACL, or on a read-only mount, where a uid check is not.
+ *
+ * The probe is a fresh file with a random name (`fs.makeTempFile`), never a
+ * fixed one: a fixed name can be planted as a symbolic link, and a checkout
+ * shipping `bin/.jvc-write-probe -> ~/.ssh/authorized_keys` had that file
+ * truncated by a `--scope project` install.
  * @param dir {string} the directory to test
  * @return {bool} true when a file can be created there
  */
 export func isWritable(dir as string) {
-    def probe as string init path.join($dir, ".jvc-write-probe");
     try {
         fs.mkdirAll($dir);
-        fs.writeString($probe, "");
-        fs.remove($probe);
+        fs.remove(fs.makeTempFile($dir, ".jvc-write-probe"));
         return true;
     } catch (err) {
         return false;

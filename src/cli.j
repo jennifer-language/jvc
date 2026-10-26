@@ -2610,6 +2610,7 @@ export func runEngine(dir as string, name as string, constraint as string) {
  * @param dir {string} the directory to write the lockfile in
  * @param resolved {list of catalog.Candidate} the resolved decks
  * @return {string} the lockfile path
+ * @throws {Error} kind "lock" when the lockfile is a symbolic link
  */
 export func writeLock(dir as string, resolved as list of catalog.Candidate) {
     def doc as json.Value init json.map();
@@ -2650,6 +2651,10 @@ export func writeLock(dir as string, resolved as list of catalog.Candidate) {
         $doc = json.set($doc, "/decks/" + deckname.ptrEscape($res.name), $entry);
     }
     def path as string init $dir + "/" + LOCK_FILE;
+    def linked as string init linkRefusal($dir, LOCK_FILE);
+    if (not ($linked == "")) {
+        throw Error{kind: "lock", message: $linked, file: "", line: 0, col: 0};
+    }
     fs.writeString($path, json.encodePretty($doc));
     return $path;
 }
@@ -3041,6 +3046,11 @@ export func installArchive(
         };
     }
     def deckDir as string init path.join($dir, VENDOR_DIR, deckname.vendorSubdir($name));
+    # `vendor/<scope>` is per deck, so the up-front check cannot have seen it.
+    def linked as string init linkRefusal($dir, VENDOR_DIR + "/" + deckname.vendorSubdir($name));
+    if (not ($linked == "")) {
+        return VendorResult{ok: false, files: 0, message: $linked, bin: ""};
+    }
     # The interpreter refuses an archive naming a member with a `..` segment or
     # an absolute path, so that is an ordinary answer here, not a crash.
     def entries as list of archive.Entry init [];
@@ -3357,6 +3367,11 @@ export func writeProjectBins(
     decks as list of catalog.Candidate,
     bins as map of string to string) {
     def out as list of string init [];
+    def linked as string init linkRefusal($dir, $binDir);
+    if (not ($linked == "")) {
+        $out[] = "no commands written: " + $linked;
+        return $out;
+    }
     # Two decks shipping one command name would otherwise take turns: the
     # second relinks over the first without a word, since both links are jvc's.
     def taken as map of string to string init {};
@@ -3419,7 +3434,9 @@ func dropEmptyScope(dir as string, sub as string) {
  *
  * Without this a deck dropped by `update` stayed importable from `vendor/`, so
  * code that still used it kept working on this machine and failed on a fresh
- * clone, and its command stayed on the project's bin path.
+ * clone, and its command stayed on the project's bin path. Nothing is removed
+ * through a symbolic link (`projectLinkProblem`): such a deck is kept and
+ * reported.
  * @param dir {string} the project directory
  * @param binDir {string} the project's bin directory, relative to dir
  * @param before {list of catalog.Candidate} what the previous lock recorded
@@ -3442,10 +3459,18 @@ export func pruneVendor(
         }
         def sub as string init deckname.vendorSubdir($old.name);
         def gone as string init path.join($dir, VENDOR_DIR, $sub);
+        def linked as string init linkRefusal($dir, VENDOR_DIR + "/" + $sub);
+        if (not ($linked == "")) {
+            $out[] = "kept " + $old.name + ": " + $linked;
+            continue;
+        }
         if (fs.exists($gone)) {
             fs.removeAll($gone);
             dropEmptyScope($dir, $sub);
             $out[] = "removed " + $old.name + " " + $old.version + " (no longer required)";
+        }
+        if (not (linkRefusal($dir, $binDir) == "")) {
+            continue;
         }
         for (def cmd in commandsInto($dir, $binDir, $sub)) {
             fs.remove(path.join($dir, $binDir, $cmd));
@@ -3795,6 +3820,13 @@ func applySet(
         }
         return fail($blocked);
     }
+    # Before anything is fetched: a committed link at `vendor`, the bin
+    # directory or the lock would aim every removal and write below at
+    # wherever it points.
+    def linked as string init projectLinkProblem($dir, binDirOf($m));
+    if (not ($linked == "")) {
+        return fail($linked);
+    }
     def report as string init "";
     def failedAny as bool init false;
     def bins as map of string to string init {};
@@ -3825,6 +3857,39 @@ func applySet(
         $warned = $warned + "\n  warning: " + $line;
     }
     return ok($headline + $report + "\nlock: " + $lock + $warned);
+}
+
+/**
+ * Report a symbolic link where jvc is about to remove, rename or write inside a
+ * project: on the way to `vendor/`, the bin directory, or `camcorder.lock`. git
+ * stores links, so `git clone` of a hostile project followed by `jvc install`
+ * would otherwise delete and replace a directory outside it (`vendor/acme ->
+ * ..`), link commands into `~/.local/bin` (`bin -> ~/.local/bin`), or overwrite
+ * any file the user can write (`camcorder.lock -> ~/.bashrc`).
+ * @param dir {string} the project directory
+ * @param binDir {string} the project's bin directory, relative to dir
+ * @return {string} why the project is refused, or "" when no link is in the way
+ */
+export func projectLinkProblem(dir as string, binDir as string) {
+    for (def rel in [VENDOR_DIR, $binDir, LOCK_FILE]) {
+        def why as string init linkRefusal($dir, $rel);
+        if (not ($why == "")) {
+            return $why;
+        }
+    }
+    return "";
+}
+
+# linkRefusal is projectLinkProblem for one path below dir: the refusal naming
+# the first symbolic link on the way, or "" when there is none.
+func linkRefusal(dir as string, rel as string) {
+    def link as string init safepath.linkOnPath($dir, $rel);
+    if ($link == "") {
+        return "";
+    }
+    return "refusing to write through " + $link + ", which is a symbolic link: " +
+        "jvc removes and replaces what is under it, and the link would aim that " +
+        "outside the project. Replace it with a real directory (or file).";
 }
 
 /**
@@ -4719,6 +4784,38 @@ func withShadowNote(args as list of string, scope as string, out as Outcome) {
     return ok($out.message + "\n\n" + packagedJvcWarning($running, $loc.bin));
 }
 
+# APP_WRITERS are the `jvc app` subcommands that remove, rename or write in the
+# store and the bin directory.
+def const APP_WRITERS as list of string init [
+    "install",
+    "add",
+    "update",
+    "upgrade",
+    "uninstall",
+    "remove",
+    "rm"
+];
+
+# appLinkProblem refuses a writing `jvc app` subcommand in the project scope
+# when `.jvc`, `.jvc/apps` or `bin` is a symbolic link: those come from the
+# checkout, and a link there aims the store's renames and removals, or the
+# command, outside it. The other scopes are the user's or the system's own
+# directories, where a link (`~/.local/bin` into a dotfiles repository) is the
+# user's choice.
+func appLinkProblem(projectDir as string, scope as string, sub as string) {
+    if (not ($scope == "project") or not lists.contains(APP_WRITERS, $sub)) {
+        return "";
+    }
+    # The project scope's two directories (`app.locations`).
+    for (def rel in [".jvc/apps", "bin"]) {
+        def why as string init linkRefusal($projectDir, $rel);
+        if (not ($why == "")) {
+            return $why;
+        }
+    }
+    return "";
+}
+
 /**
  * Route a `jvc app ...` subcommand.
  * @param args {list of string} the full argument vector
@@ -4730,6 +4827,10 @@ export func runApp(args as list of string, pos as list of string) {
     def scope as string init flagValue($args, "--scope");
     if ($scope == "" and hasFlag($args, "--system")) {
         $scope = "system";
+    }
+    def linked as string init appLinkProblem(".", $scope, $sub);
+    if (not ($linked == "")) {
+        return fail($linked);
     }
     if ($sub == "install" or $sub == "add") {
         return withShadowNote(

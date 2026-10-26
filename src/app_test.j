@@ -1140,3 +1140,15 @@ func testLinkCommandRefusesAnOptionLikeName() {
     }
     fs.removeAll($root);
 }
+
+# A planted probe link must not be written through: the probe has a fresh name.
+func testIsWritableNeverWritesThroughAPlantedProbe() {
+    def root as string init scratch("probe");
+    fs.mkdirAll($root + "/bin");
+    fs.writeString($root + "/victim", "keep me");
+    fs.symlink($root + "/victim", $root + "/bin/.jvc-write-probe");
+    testing.assertTrue(isWritable($root + "/bin"));
+    testing.assertEqual(fs.readString($root + "/victim"), "keep me");
+    testing.assertEqual(len(fs.list($root + "/bin")), 1);
+    fs.removeAll($root);
+}
