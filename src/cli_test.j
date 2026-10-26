@@ -3315,3 +3315,18 @@ func testAnAppRecordForALocalRepositoryIsRefused() {
     def good as AppSource init pickApp($ok, "@acme/tool", "*", "http://r");
     testing.assertEqual($good.url, "https://git.example/tool.git");
 }
+
+# --name is a command name like any other, checked before anything is fetched.
+func testAppInstallRefusesABadCommandName() {
+    def url as string init "https://git.example/x.git";
+    def out as Outcome init runAppInstall($url, "", "-rf", "", "http://127.0.0.1:1");
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "--name -rf");
+}
+
+func testNameIsAValuedFlag() {
+    def args as list of string init ["jvc", "app", "install", "--name", "tool", "https://x/y.git"];
+    def pos as list of string init positionals($args, 1);
+    testing.assertEqual($pos[len($pos) - 1], "https://x/y.git");
+    testing.assertFalse(listHas($pos, "tool"));
+}

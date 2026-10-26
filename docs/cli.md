@@ -897,9 +897,11 @@ installed grimoire 1.0.0
 | `--version <range>` | the version constraint to install (default: the newest)      |
 | `--scope <scope>`   | where to install it (below); default `user`                  |
 | `--system`          | the same as `--scope system`                                 |
+| `--name <command>`  | the command to install it as, whatever the repository says   |
 
 `--scope` and `--system` also select the scope for `app list`, `app update`
-and `app uninstall`.
+and `app uninstall`. With `$HOME` unset, the user scope has no directory to
+use, and jvc refuses rather than installing under the working directory.
 
 ### Install scopes
 
@@ -959,13 +961,27 @@ into an unrelated script but a link's target cannot.
 satisfying `--version` is installed, and the resolved commit is what is recorded.
 A repository with **no** version tags installs its default branch head
 instead; an explicit `--version` is then an error, not a silent branch install.
+Two tags naming one version (`1.0.0` and `v1.0.0`) at different commits are
+refused, rather than letting tag order decide what runs.
 
 **An app names itself** in a `deck.toml` with a plain (unscoped) name and a
 `[package] bin` naming its entry script. Both are optional: without a manifest
 the app is named after its repository and its entry is the root file of that
 name. A scoped `@scope/deck` name installs under its deck half, as described
 under [installing a published deck as an
-app](#installing-a-published-deck-as-an-app). An entry script with no `#!` line
+app](#installing-a-published-deck-as-an-app). A manifest that does not parse
+fails the install; it is not read as no manifest.
+
+**The repository does not get the last word on the command's name**, since the
+command lands on your `PATH`. A manifest name that differs from the
+repository's own name (the URL's last segment) and already names a command
+elsewhere on `PATH` is refused: a repository saying `name = "sudo"` would
+otherwise put `~/.local/bin/sudo` in front of the real one. `--name <command>`
+chooses the name outright, in this case or any other; the entry script is still
+found under the repository's own name. `jvc app update` keeps each app's
+installed name.
+
+An entry script with no `#!` line
 is refused, since nothing could run it, and so is one whose `#!` line would
 start jennifer without `run`: write `#!/usr/bin/env -S jennifer run`, not
 `#!/usr/bin/env jennifer` or `#!/usr/bin/env jennifer run` (without `-S`,
@@ -998,7 +1014,9 @@ honoured the constraint and skipped anything yanked.
 
 **The command takes the deck half of the name.** `@mplx/grimoire` installs as
 `grimoire` (as does a git URL whose `deck.toml` names a scoped deck), since
-`@scope/deck` is neither a directory nor something a shell can invoke. Two
+`@scope/deck` is neither a directory nor something a shell can invoke. The
+name is the one you asked for: a repository whose manifest declares a different
+deck is refused, since the registry never checked what it points at. Two
 scopes shipping the same deck name would collide, so jvc refuses the second
 instead of replacing the first.
 

@@ -99,7 +99,7 @@ func valuedFlag(token as string) {
         $token == "--from" or $token == "--version" or $token == "--source" or
         $token == "--url" or $token == "--out" or
         $token == "--repository" or $token == "--tag" or
-        $token == "--remote" or $token == "--scope";
+        $token == "--remote" or $token == "--scope" or $token == "--name";
 }
 
 # verbAt returns the index of the verb: the first argument after the program
@@ -4594,8 +4594,9 @@ func fromApp(r as app.Outcome) {
 # appUsage is the help shown for a malformed `jvc app` invocation.
 func appUsage() {
     return "usage: jvc app <install|list|update|uninstall> [args]\n" +
-        "  install <git-url|@scope/deck> [--version C] [--scope S]\n" +
+        "  install <git-url|@scope/deck> [--version C] [--scope S] [--name N]\n" +
         "                                                fetch an app and put it on PATH\n" +
+        "      --name <command>    the command to install it as\n" +
         "      --scope project     into ./bin, pinned to this project\n" +
         "      --scope user        just this user (the default)\n" +
         "      --scope system      every user, under " + app.systemPrefix() + "\n" +
@@ -4631,7 +4632,12 @@ def struct AppStep {
 # installAppStep installs (or reinstalls) one app from a git URL or a published
 # `@scope/deck`, vendors its decks, and records how it was asked for, so that
 # `app update` can repeat the same request rather than a broader one.
-func installAppStep(loc as app.Locations, given as string, spec as string, baseUrl as string) {
+func installAppStep(
+    loc as app.Locations,
+    given as string,
+    spec as string,
+    command as string,
+    baseUrl as string) {
     def none as app.Record;
     # A scoped name is a published deck: resolve it to its clone URL, so
     # `app install` takes either form.
@@ -4655,7 +4661,8 @@ func installAppStep(loc as app.Locations, given as string, spec as string, baseU
         $source,
         $want,
         gitsource.cacheRoot(),
-        app.Prepare{run: vendorStagedDecks, context: $baseUrl});
+        app.Prepare{run: vendorStagedDecks, context: $baseUrl},
+        app.Naming{deck: $deck, command: $command});
     if (not $inst.ok) {
         return AppStep{ok: false, message: $inst.message, record: $none};
     }
@@ -4677,13 +4684,23 @@ func installAppStep(loc as app.Locations, given as string, spec as string, baseU
  * failure leaves that install working.
  * @param url {string} the app's git URL, or a scoped deck name
  * @param spec {string} the version constraint ("" for the newest)
+ * @param command {string} the command name (`--name`), or "" to derive it
  * @param scope {string} `project`, `user`, `system`, or a path ("" for user)
  * @param baseUrl {string} the repository base URL, for the app's own decks
  * @return {Outcome} the result to print
  */
-export func runAppInstall(url as string, spec as string, scope as string, baseUrl as string) {
+export func runAppInstall(
+    url as string,
+    spec as string,
+    command as string,
+    scope as string,
+    baseUrl as string) {
     if ($url == "") {
         return fail(appUsage());
+    }
+    if (not ($command == "") and not app.isAppName($command)) {
+        return fail("--name " + $command + ": a command name is one file name of letters, " +
+            "digits, `.`, `_` and `-`, not starting with `.` or `-`");
     }
     def loc as app.Locations init app.locations($scope, ".");
     # Probe before fetching anything: a system-wide install that cannot write its
@@ -4698,7 +4715,7 @@ export func runAppInstall(url as string, spec as string, scope as string, baseUr
         return fail("cannot write to " + $loc.bin + "\n" +
             "  pick a directory you can write with --scope <dir>, or fix its permissions");
     }
-    def step as AppStep init installAppStep($loc, $url, $spec, $baseUrl);
+    def step as AppStep init installAppStep($loc, $url, $spec, $command, $baseUrl);
     if (not $step.ok) {
         return fail($step.message);
     }
@@ -4749,7 +4766,9 @@ export func runAppUpdate(names as list of string, scope as string, baseUrl as st
         if (not ($was.deck == "")) {
             $given = $was.deck;
         }
-        def step as AppStep init installAppStep($loc, $given, $was.spec, $baseUrl);
+        # Under the name it already has: the repository may have renamed its
+        # command since, and an update is not the place to move it.
+        def step as AppStep init installAppStep($loc, $given, $was.spec, $was.name, $baseUrl);
         if (not $step.ok) {
             $report = $report + "\n  FAIL  " + $was.name + ": " + $step.message;
             $failedAny = true;
@@ -4896,6 +4915,10 @@ export func runApp(args as list of string, pos as list of string) {
     if (not ($linked == "")) {
         return fail($linked);
     }
+    def homeless as string init app.homeProblem(app.locations($scope, "."));
+    if (not ($homeless == "")) {
+        return fail($homeless);
+    }
     if ($sub == "install" or $sub == "add") {
         return withShadowNote(
             $args,
@@ -4903,6 +4926,7 @@ export func runApp(args as list of string, pos as list of string) {
             runAppInstall(
                 posAt($pos, 1),
                 flagValue($args, "--version"),
+                flagValue($args, "--name"),
                 $scope,
                 registryBase($args)));
     }

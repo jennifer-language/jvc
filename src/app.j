@@ -154,7 +154,8 @@ export func isWritable(dir as string) {
  * | *a path* | `<path>/share/jvc/apps` | `<path>/bin` | anything else is taken as a prefix |
  *
  * `$JVC_APP_HOME` and `$JVC_BIN` override the user scope's two directories
- * independently, for scripted and test use.
+ * independently, for scripted and test use. A user-scope directory that would
+ * come from an unset `$HOME` is left empty, for `homeProblem` to refuse.
  *
  * A `project` install is **relocatable**: its command locates the app relative to
  * itself, so the project can be moved or cloned. The other scopes write an
@@ -191,7 +192,32 @@ export func locations(scope as string, projectDir as string) {
     if ($bin == "") {
         $bin = path.join($home, ".local", "bin");
     }
+    # With HOME unset, `path.join("", ".local", "bin")` is relative and would
+    # install under whatever directory jvc runs in. An empty field is the
+    # caller's cue to refuse (`homeProblem`).
+    if ($home == "") {
+        if (os.getEnv("JVC_APP_HOME") == "" and os.getEnv("XDG_DATA_HOME") == "") {
+            $store = "";
+        }
+        if (os.getEnv("JVC_BIN") == "") {
+            $bin = "";
+        }
+    }
     return Locations{store: $store, bin: $bin, relocatable: false};
+}
+
+/**
+ * Say why app locations cannot be used, or "" when they can: `locations` leaves
+ * a directory empty when it would have come from an unset `$HOME`.
+ * @param loc {Locations} the resolved locations
+ * @return {string} the refusal, or ""
+ */
+export func homeProblem(loc as Locations) {
+    if ($loc.store == "" or $loc.bin == "") {
+        return "HOME is not set, so there is no user directory to install apps into; " +
+            "set HOME, or choose a directory with --scope <dir>";
+    }
+    return "";
 }
 
 # prefixLocations lays a prefix out the usual way: <prefix>/bin for commands,
@@ -727,17 +753,27 @@ export func pickRef(mirror as string, spec as string) {
         return pickFailed("no released version satisfies " + $spec +
             constraint.prereleaseHint($versions));
     }
+    # `1.0.0` and `v1.0.0` both name version 1.0.0. At one commit that is
+    # harmless; at two, taking whichever tag sorts first installs code chosen by
+    # tag order, so it is refused as `gitsource.candidates` refuses it.
+    def picked as Pick init pickFailed("no released version satisfies " + $spec +
+        constraint.prereleaseHint($versions));
     for (def tag in $tags) {
-        if (git.versionOfTag($tag) == $best) {
-            def commit as git.Result init git.run(git.revParseArgv($mirror, git.tagRef($tag)));
-            if (not $commit.ok) {
-                return pickFailed("cannot resolve " + $tag + " to a commit");
-            }
-            return Pick{ok: true, ref: $tag, version: $best, commit: $commit.output, error: ""};
+        if (not (git.versionOfTag($tag) == $best)) {
+            continue;
+        }
+        def commit as git.Result init git.run(git.revParseArgv($mirror, git.tagRef($tag)));
+        if (not $commit.ok) {
+            return pickFailed("cannot resolve " + $tag + " to a commit");
+        }
+        if (not $picked.ok) {
+            $picked = Pick{ok: true, ref: $tag, version: $best, commit: $commit.output, error: ""};
+        } elseif (not ($commit.output == $picked.commit)) {
+            return pickFailed("tags " + $picked.ref + " and " + $tag + " both name version " +
+                $best + " but point at different commits; remove one");
         }
     }
-    return pickFailed("no released version satisfies " + $spec +
-        constraint.prereleaseHint($versions));
+    return $picked;
 }
 
 # --- installing -------------------------------------------------------------
@@ -775,7 +811,8 @@ func noInstall(message as string) {
 # manifestAt reads the manifest (any of `manifest.manifestNames()`) out of the
 # mirror at a ref. Returns an empty manifest when the repository ships none,
 # which is the common case for an app that has no deck dependencies. Throws kind
-# "manifest" when it ships more than one (spec section 1).
+# "manifest" when it ships more than one (spec section 1), or one that does not
+# parse.
 func manifestAt(mirror as string, ref as string) {
     def present as list of string init [];
     def text as string init "";
@@ -799,10 +836,19 @@ func manifestAt(mirror as string, ref as string) {
     if (len($present) == 0) {
         return manifest.empty("", "");
     }
+    # A manifest that does not parse is an error, not an absent manifest: read
+    # as none, a TOML typo installed the app with no decks, the URL's basename
+    # as its name, and its `bin` ignored.
     try {
         return manifest.parse($text, manifest.detectFormat($present[0]));
     } catch (err) {
-        return manifest.empty("", "");
+        throw Error{
+            kind: "manifest",
+            message: $present[0] + ": " + $err.message,
+            file: "",
+            line: 0,
+            col: 0
+        };
     }
 }
 
@@ -1004,13 +1050,15 @@ func notPlaced(message as string) {
 
 # place unpacks a commit into the store as app `name`, validates it, writes its
 # command, and only then swaps it in for any previous install of the same name
-# (`swapIn`).
+# (`swapIn`). `natural` is the name the repository itself implies, which
+# decides the default entry script when `--name` renamed the command.
 func place(
     loc as Locations,
     mirror as string,
     commit as string,
     m as manifest.Manifest,
     name as string,
+    natural as string,
     prep as Prepare) {
     def dir as string init path.join($loc.store, $name);
     # Unpack and validate in a staging directory beside the store's apps, and
@@ -1028,16 +1076,20 @@ func place(
         return notPlaced("cannot stage " + $name + " under " + $loc.store + ": " +
             $err.message);
     }
-    defer fs.removeAll($staging);
+    # Quietly: a cleanup that throws (a store made read-only under it) would
+    # replace the error that made the install fail with its own.
+    defer removeQuietly($staging);
     def files as int init 0;
     try {
         $files = unpackInto($mirror, $commit, $staging);
     } catch (err) {
         return notPlaced($err.message);
     }
-    def entry as string init entryOf($staging, $m, $name);
+    # The default entry script is named after the app as the repository names
+    # it, whatever `--name` calls the command.
+    def entry as string init entryOf($staging, $m, $natural);
     if ($entry == "") {
-        return notPlaced($name + " has no entry script: expected " + $name +
+        return notPlaced($name + " has no entry script: expected " + $natural +
             " at the repository root, or a [package] bin in its manifest");
     }
     def unrunnable as string init entryProblem($entry, path.join($staging, $entry));
@@ -1072,10 +1124,27 @@ func place(
     if (not ($swapped == "")) {
         if (not ($previous.entry == "") and fs.exists(path.join($dir, $previous.entry))) {
             linkCommand($loc, $name, path.join($dir, $previous.entry));
+        } elseif ($previous.entry == "") {
+            # A first install has nothing to point back at, and a command left
+            # aimed at a directory that never arrived dangles on PATH.
+            def made as string init path.join($loc.bin, $name);
+            if (isOurs($made, $loc.store)) {
+                fs.remove($made);
+            }
         }
         return notPlaced("cannot move " + $name + " into place at " + $dir + ": " + $swapped);
     }
     return Placed{ok: true, entry: $entry, files: $files, message: ""};
+}
+
+# removeQuietly removes a tree jvc made, ignoring a failure: it is cleanup on a
+# path that has already succeeded or failed for its own reason.
+func removeQuietly(p as string) {
+    try {
+        fs.removeAll($p);
+    } catch (err) {
+        return;
+    }
 }
 
 # The prefix of the directory a replaced install is moved aside into for the
@@ -1152,7 +1221,107 @@ func sameNameFrom(loc as Locations, name as string, url as string) {
  * @return {Installation} what was installed, or the reason it failed
  */
 export func install(loc as Locations, url as string, spec as string, cacheRoot as string) {
-    return installWith($loc, $url, $spec, $cacheRoot, Prepare{run: preparedAsIs, context: ""});
+    return installWith(
+        $loc,
+        $url,
+        $spec,
+        $cacheRoot,
+        Prepare{run: preparedAsIs, context: ""},
+        Naming{deck: "", command: ""});
+}
+
+/**
+ * What the user asked to install, as far as naming the command goes.
+ * @field deck {string} the published `@scope/deck` requested, or "" for a git URL
+ * @field command {string} the command name given with `--name`, or "" to derive it
+ */
+export def struct Naming {
+    deck as string,
+    command as string
+};
+
+# NameChoice is the command name an install settled on, or why it would not.
+# `natural` is the name the request and the repository imply before `--name`.
+def struct NameChoice {
+    name as string,
+    natural as string,
+    error as string
+};
+
+# chooseName picks the command an install creates. The name is a file on the
+# user's PATH, so the repository being installed does not get the last word:
+#
+# - `--name` wins outright;
+# - a published deck is named after the deck asked for, and a repository whose
+#   manifest declares another deck is refused (the registry never verified it);
+# - a git URL takes the manifest's name, which is what lets a repository called
+#   `app-x` install as `x`, unless that name differs from the URL's basename
+#   and already names a command elsewhere on PATH: a manifest saying
+#   `name = "sudo"` would otherwise put `~/.local/bin/sudo` in front of the
+#   real one.
+func chooseName(loc as Locations, url as string, m as manifest.Manifest, asked as Naming) {
+    def declared as string init $m.pkg.name;
+    if (deckname.isScoped($declared)) {
+        $declared = deckname.deckOf($declared);
+    }
+    def fromUrl as string init nameFromUrl($url);
+    def natural as string init $declared;
+    if (not ($asked.deck == "")) {
+        $natural = deckname.deckOf($asked.deck);
+    } elseif ($natural == "") {
+        $natural = $fromUrl;
+    }
+    if (not ($asked.command == "")) {
+        return NameChoice{name: $asked.command, natural: $natural, error: ""};
+    }
+    if (not ($asked.deck == "")) {
+        if (not ($m.pkg.name == "") and
+            not (deckname.fold($m.pkg.name) == deckname.fold($asked.deck))) {
+            return NameChoice{
+                name: "",
+                natural: $natural,
+                error: $url + " declares itself " + $m.pkg.name + ", not " + $asked.deck +
+                    "; refusing it (give --name <command> to install it under a name you choose)"
+            };
+        }
+        return NameChoice{name: $natural, natural: $natural, error: ""};
+    }
+    if ($natural == $fromUrl) {
+        return NameChoice{name: $natural, natural: $natural, error: ""};
+    }
+    def taken as string init commandOnPath($natural, $loc.bin);
+    if (not ($taken == "")) {
+        return NameChoice{
+            name: "",
+            natural: $natural,
+            error: $url + " names its command " + $natural + ", and " + $taken +
+                " is already that command on your PATH; give --name <command> to choose " +
+                "the name (--name " + $natural + " to take it anyway)"
+        };
+    }
+    return NameChoice{name: $natural, natural: $natural, error: ""};
+}
+
+/**
+ * Find a command on `$PATH`, outside one directory: the first `<dir>/<name>`
+ * that exists, for every PATH entry except `skip` (the bin directory an install
+ * writes to, whose own commands are jvc's to replace).
+ * @param name {string} the command name
+ * @param skip {string} the directory to leave out
+ * @return {string} the command's path, or "" when PATH has none elsewhere
+ */
+export func commandOnPath(name as string, skip as string) {
+    def own as string init normalise($skip);
+    for (def dir in strings.split(os.getEnv("PATH"), ":")) {
+        if ($dir == "" or normalise($dir) == $own) {
+            continue;
+        }
+        def candidate as string init path.join($dir, $name);
+        if (fs.exists($candidate)) {
+            return $candidate;
+        }
+    }
+    return "";
 }
 
 /**
@@ -1184,6 +1353,7 @@ func preparedAsIs(dir as string, hasManifest as bool, context as string) {
  * @param spec {string} the version constraint ("" or "*" for the newest)
  * @param cacheRoot {string} the git mirror cache root
  * @param prep {Prepare} the step to run on the staged tree
+ * @param asked {Naming} the deck requested and any `--name`, which decide the command name
  * @return {Installation} what was installed, or the reason it failed
  */
 export func installWith(
@@ -1191,7 +1361,8 @@ export func installWith(
     url as string,
     spec as string,
     cacheRoot as string,
-    prep as Prepare) {
+    prep as Prepare,
+    asked as Naming) {
     if (not git.isAvailable()) {
         return noInstall("git is not on PATH, so " + $url + " cannot be installed");
     }
@@ -1219,17 +1390,15 @@ export func installWith(
         return noInstall($url + ": " + $err.message);
     }
     def hasManifest as bool init not ($m.pkg.name == "");
-    def name as string init $m.pkg.name;
-    if ($name == "") {
-        $name = nameFromUrl($url);
-    }
     # A scoped deck may ship a command too (`[package] bin`), and installing it
     # this way is the user-wide counterpart of vendoring it into one project.
     # The command takes the deck half of the name, since `@scope/deck` is neither
     # a directory nor something a shell can invoke.
-    if (deckname.isScoped($name)) {
-        $name = deckname.deckOf($name);
+    def choice as NameChoice init chooseName($loc, $url, $m, $asked);
+    if (not ($choice.error == "")) {
+        return noInstall($choice.error);
     }
+    def name as string init $choice.name;
     if ($name == "") {
         return noInstall("cannot work out an app name from " + $url);
     }
@@ -1260,7 +1429,14 @@ export func installWith(
         return noInstall($name + " declares [package] bin = \"" + $m.pkg.bin +
             "\", which is not a relative path inside the app");
     }
-    def placed as Placed init place($loc, $mirror, $picked.commit, $m, $name, $prep);
+    def placed as Placed init place(
+        $loc,
+        $mirror,
+        $picked.commit,
+        $m,
+        $name,
+        $choice.natural,
+        $prep);
     if (not $placed.ok) {
         return noInstall($placed.message);
     }

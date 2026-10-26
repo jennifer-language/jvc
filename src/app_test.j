@@ -1152,3 +1152,168 @@ func testIsWritableNeverWritesThroughAPlantedProbe() {
     testing.assertEqual(len(fs.list($root + "/bin")), 1);
     fs.removeAll($root);
 }
+
+# --- the command's name -----------------------------------------------------
+
+# A manifest naming its command after one already on PATH (here a fake `sudo`
+# in a directory put on PATH for the test) is refused unless --name says so.
+func testAManifestCannotNameItselfAfterACommandOnPath() {
+    def repo as string init appRepo("sudo", "sudo", manifestFor("sudo", "1.0.0", ""), "v1.0.0");
+    def root as string init scratch("sudoroot");
+    def real as string init path.join($root, "realbin");
+    fs.mkdirAll($real);
+    fs.writeString(path.join($real, "sudo"), "#!/bin/sh\n");
+    def oldPath as string init os.getEnv("PATH");
+    os.setEnv("PATH", $real + ":" + $oldPath);
+    def loc as Locations init where($root);
+    def refused as Installation init install($loc, $repo, "*", path.join($root, "cache"));
+    def named as Installation init installWith(
+        $loc,
+        $repo,
+        "*",
+        path.join($root, "cache"),
+        Prepare{run: preparedAsIs, context: ""},
+        Naming{deck: "", command: "notsudo"});
+    os.setEnv("PATH", $oldPath);
+    testing.assertFalse($refused.ok);
+    testing.assertContains($refused.message, "already that command on your PATH");
+    testing.assertContains($refused.message, "--name");
+    testing.assertFalse(fs.exists(path.join($loc.bin, "sudo")));
+    testing.assertTrue($named.ok);
+    testing.assertEqual($named.record.name, "notsudo");
+    testing.assertTrue(fs.exists(path.join($loc.bin, "notsudo")));
+    fs.removeAll($repo);
+    fs.removeAll($root);
+}
+
+func testChooseNameOrder() {
+    def loc as Locations init where("/nonexistent-root");
+    def m as manifest.Manifest init manifest.empty("@acme/tool", "1.0.0");
+    def none as manifest.Manifest init manifest.empty("", "");
+    def url as string init "https://git.example/acme/app-tool.git";
+    def plain as Naming init Naming{deck: "", command: ""};
+    # --name wins, and the natural name is kept for the entry script
+    def renamed as NameChoice init chooseName($loc, $url, $m, Naming{deck: "", command: "t"});
+    testing.assertEqual($renamed.name, "t");
+    testing.assertEqual($renamed.natural, "tool");
+    # a git URL takes the manifest's deck half, else the URL's basename
+    testing.assertEqual(chooseName($loc, $url, $m, $plain).name, "tool");
+    testing.assertEqual(chooseName($loc, $url, $none, $plain).name, "app-tool");
+    # a published deck is named after the deck asked for, and must be that deck
+    def asked as Naming init Naming{deck: "@acme/tool", command: ""};
+    testing.assertEqual(chooseName($loc, $url, $m, $asked).name, "tool");
+    testing.assertEqual(chooseName($loc, $url, $none, $asked).name, "tool");
+    def wrong as Naming init Naming{deck: "@acme/other", command: ""};
+    def other as NameChoice init chooseName($loc, $url, $m, $wrong);
+    testing.assertEqual($other.name, "");
+    testing.assertContains($other.error, "declares itself @acme/tool, not @acme/other");
+}
+
+func testCommandOnPathSkipsTheInstallDirectory() {
+    def root as string init scratch("onpath");
+    fs.mkdirAll($root + "/a");
+    fs.mkdirAll($root + "/b");
+    fs.writeString($root + "/a/x", "");
+    fs.writeString($root + "/b/x", "");
+    def oldPath as string init os.getEnv("PATH");
+    os.setEnv("PATH", $root + "/a::" + $root + "/b");
+    def found as string init commandOnPath("x", $root + "/a");
+    def missing as string init commandOnPath("y", "");
+    os.setEnv("PATH", $oldPath);
+    testing.assertEqual($found, $root + "/b/x");
+    testing.assertEqual($missing, "");
+    fs.removeAll($root);
+}
+
+# --- what the repository says ----------------------------------------------
+
+# A manifest that does not parse fails the install; it used to install the app
+# as if it had no manifest at all.
+func testABrokenAppManifestFailsTheInstall() {
+    def repo as string init appRepo("badtoml", "demo", "[package\nname = \"demo\"\n", "v1.0.0");
+    def root as string init scratch("badtomlroot");
+    def r as Installation init install(where($root), $repo, "*", path.join($root, "cache"));
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.message, "deck.toml");
+    testing.assertContains($r.message, "not valid TOML");
+    fs.removeAll($repo);
+    fs.removeAll($root);
+}
+
+# `1.0.0` and `v1.0.0` at two commits leave tag order to decide what runs.
+func testTwoTagsForOneVersionAtTwoCommitsAreRefused() {
+    def repo as string init appRepo("twotags", "demo", manifestFor("demo", "1.0.0", ""), "v1.0.0");
+    fs.writeString(path.join($repo, "demo"), "#!/bin/sh\necho other\n");
+    gitIn($repo, ["-c", "user.email=t@x", "-c", "user.name=t", "commit", "-qam", "two"]);
+    gitIn($repo, ["tag", "1.0.0"]);
+    def root as string init scratch("twotagsroot");
+    def r as Installation init install(where($root), $repo, "*", path.join($root, "cache"));
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.message, "both name version 1.0.0");
+    fs.removeAll($repo);
+    fs.removeAll($root);
+}
+
+func testTwoTagsForOneVersionAtOneCommitAreFine() {
+    def repo as string init appRepo("sametag", "demo", manifestFor("demo", "1.0.0", ""), "v1.0.0");
+    gitIn($repo, ["tag", "1.0.0"]);
+    def root as string init scratch("sametagroot");
+    def r as Installation init install(where($root), $repo, "*", path.join($root, "cache"));
+    testing.assertTrue($r.ok);
+    fs.removeAll($repo);
+    fs.removeAll($root);
+}
+
+# --- a first install that fails at the swap ---------------------------------
+
+# lockStore is a Prepare step that makes the store read-only, so the swap that
+# follows it fails; `context` is the store.
+func lockStore(dir as string, hasManifest as bool, context as string) {
+    fs.chmod($context, 0o555);
+    return "";
+}
+
+func testAFailedFirstInstallLeavesNoCommandBehind() {
+    def repo as string init appRepo("swapfail", "demo", manifestFor("demo", "1.0.0", ""), "v1.0.0");
+    def root as string init scratch("swapfailroot");
+    def loc as Locations init where($root);
+    def r as Installation init installWith(
+        $loc,
+        $repo,
+        "*",
+        path.join($root, "cache"),
+        Prepare{run: lockStore, context: $loc.store},
+        Naming{deck: "", command: ""});
+    fs.chmod($loc.store, 0o755);
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.message, "cannot move demo into place");
+    testing.assertFalse(occupied(path.join($loc.bin, "demo")));
+    fs.removeAll($repo);
+    fs.removeAll($root);
+}
+
+# --- HOME --------------------------------------------------------------------
+
+# With HOME unset, the user scope would resolve under the working directory.
+func testNoHomeMeansNoUserScope() {
+    def home as string init os.getEnv("HOME");
+    def appHome as string init os.getEnv("JVC_APP_HOME");
+    def bin as string init os.getEnv("JVC_BIN");
+    def xdg as string init os.getEnv("XDG_DATA_HOME");
+    os.setEnv("HOME", "");
+    os.setEnv("JVC_APP_HOME", "");
+    os.setEnv("JVC_BIN", "");
+    os.setEnv("XDG_DATA_HOME", "");
+    def homeless as Locations init locations("", ".");
+    os.setEnv("JVC_APP_HOME", "/opt/apps");
+    os.setEnv("JVC_BIN", "/opt/bin");
+    def overridden as Locations init locations("", ".");
+    def prefixed as Locations init locations("/opt/p", ".");
+    os.setEnv("HOME", $home);
+    os.setEnv("JVC_APP_HOME", $appHome);
+    os.setEnv("JVC_BIN", $bin);
+    os.setEnv("XDG_DATA_HOME", $xdg);
+    testing.assertContains(homeProblem($homeless), "HOME is not set");
+    testing.assertEqual(homeProblem($overridden), "");
+    testing.assertEqual(homeProblem($prefixed), "");
+}

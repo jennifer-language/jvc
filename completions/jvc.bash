@@ -163,7 +163,7 @@ _jvc() {
             COMPREPLY=($(compgen -d -- "$cur"))
             return
             ;;
-        --from|--version|--source|--url|--repository|--tag|--remote)
+        --from|--version|--source|--url|--repository|--tag|--remote|--name)
             return
             ;;
     esac
@@ -175,7 +175,7 @@ _jvc() {
         if (( skip )); then skip=0; continue; fi
         case $w in
             --registry|--from|--version|--source|--url|--out|--scope\
-                |--repository|--tag|--remote)
+                |--repository|--tag|--remote|--name)
                 skip=1; continue ;;
             -*) continue ;;
         esac
@@ -211,7 +211,7 @@ _jvc() {
             publish) flags="$flags --no-verify --repository --tag --remote" ;;
             pack) flags="$flags --out --url --no-verify --operator-command" ;;
             new) flags="$flags --from --version --source" ;;
-            app) flags="$flags --scope --system --version" ;;
+            app) flags="$flags --scope --system --version --name" ;;
             owners) flags="$flags --remove" ;;
         esac
         _jvc_offer "$flags" "$cur"

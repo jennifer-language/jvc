@@ -157,7 +157,7 @@ function __jvc_positionals
         end
         switch $w
             case --registry --from --version --source --url --out \
-                --scope --repository --tag --remote
+                --scope --repository --tag --remote --name
                 set skip 1
             case '-*'
                 # a flag that takes no value
@@ -258,6 +258,7 @@ complete -c jvc -n '__jvc_verb_is app' -l scope -x -a 'project user system' \
 complete -c jvc -n '__jvc_verb_is app' -l scope -x -a '(__fish_complete_directories)' \
     -d 'install under this prefix'
 complete -c jvc -n '__jvc_verb_is app' -l system -d 'install under /usr/local'
+complete -c jvc -n '__jvc_verb_is app' -l name -x -d 'the command to install it as'
 complete -c jvc -n '__jvc_verb_is owners' -l remove -d 'drop the co-owner instead of adding'
 
 # Arguments per verb: what the manifest requires is all remove, conflict and
