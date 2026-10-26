@@ -46,6 +46,7 @@ app-jvc/
 ├── src/            # every module, with a co-located *_test.j overlay
 │   ├── cli.j       #   command logic and dispatch
 │   ├── manifest.j  #   deck.toml / .yaml / .json read and write
+│   ├── manifestcheck.j # the manifest check install, new and publish share
 │   ├── deckname.j  #   deck-name grammar (@scope/deck) and vendor paths
 │   ├── catalog.j   #   the candidate set a resolution chooses from
 │   ├── resolver.j  #   transitive dependency graph resolver (pure)

@@ -478,3 +478,38 @@ func testEveryDefaultOnlyLibraryIsCaught() {
         fs.removeAll($dir);
     }
 }
+
+# jennifer-tiny refuses to load a file needing any capability, so a claim of
+# tiny next to declared capabilities is a contradiction in the manifest itself.
+func testClaimingTinyWithACapabilityIsRefused() {
+    def dir as string init tinyDeck("caps", "strings", true);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    $m.pkg.capabilities = ["net"];
+    def problem as string init tinyProblem($m, $dir);
+    testing.assertContains($problem, "jennifer-tiny");
+    testing.assertContains($problem, "net");
+    fs.removeAll($dir);
+}
+
+# Publish runs the check install runs, so a release cannot carry a bin-dir
+# every consumer's install would refuse.
+func testPublishRefusesWhatInstallWouldRefuse() {
+    def dir as string init makeDeck("bindir", "@acme/tool", false);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    $m.pkg.binDir = "../bin";
+    testing.assertContains(validate($m, $dir), "bin-dir");
+    $m.pkg.binDir = "";
+    $m.registries = manifest.depListSet($m.registries, "*", "/srv/registry");
+    testing.assertContains(validate($m, $dir), "not a registry URL");
+    fs.removeAll($dir);
+}
+
+func testPublishRefusesABinThatIsNotThere() {
+    def dir as string init makeDeck("nobin", "@acme/tool", false);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    $m.pkg.bin = "src/tool";
+    testing.assertContains(validate($m, $dir), "no such file");
+    fs.writeString($dir + "/src/tool", "#!/usr/bin/env jennifer\n");
+    testing.assertEqual(validate($m, $dir), "");
+    fs.removeAll($dir);
+}

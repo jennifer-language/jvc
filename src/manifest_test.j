@@ -480,13 +480,6 @@ func testTheRegistryClashNamesBothKeys() {
     testing.assertContains($msg, "scope pattern");
 }
 
-# [engines] keys keep their spelling at parse; only the deck tables fold.
-func testEngineKeysAreKeptAsWritten() {
-    def m as Manifest init parse("[engines]\nJennifer = \"*\"\njennifer = \"*\"\n", "toml");
-    testing.assertEqual(len($m.engines), 2);
-    testing.assertEqual($m.engines[0].name, "Jennifer");
-}
-
 func testTheRegistryEditorsStoreFolded() {
     def m as Manifest init addRegistry(empty("x", "0.1.0"), "@Acme/*", "https://a");
     testing.assertEqual($m.registries[0].name, "@acme/*");
@@ -544,4 +537,43 @@ func testAnUnquotedVersionSaysToQuoteIt() {
     def e as Error init wrongType("[package]\nversion = 1.0\n", "toml");
     testing.assertContains($e.message, "[package] version");
     testing.assertContains($e.message, "quote it");
+}
+
+# `[engines]` keys keep their spelling at parse (only the deck tables fold), but
+# are looked up case-insensitively, so two spellings of one engine are refused
+# like a deck table's.
+func testTwoSpellingsOfOneEngineAreRefused() {
+    testing.assertThrows("parseEngineClash", "manifest");
+    def m as Manifest init parse("[engines]\nJennifer = \">=0.25.0\"\n", "toml");
+    testing.assertEqual($m.engines[0].name, "Jennifer");
+}
+
+func parseEngineClash() {
+    parse("[engines]\njennifer = \">=0.25.0\"\nJennifer = \"*\"\n", "toml");
+}
+
+# A YAML scalar or a JSON array is valid syntax but no manifest; read as one it
+# came out empty, and a git tag holding it was reported as declaring "".
+func testADocumentThatIsNotATableIsRefused() {
+    testing.assertThrows("parseYamlScalar", "manifest");
+    testing.assertThrows("parseJsonArray", "manifest");
+    def msg as string init "";
+    try {
+        parseJsonArray();
+    } catch (e) {
+        $msg = $e.message;
+    }
+    testing.assertContains($msg, "the manifest: expected a table, found an array");
+}
+
+func parseYamlScalar() {
+    parse("hello", "yaml");
+}
+
+func parseJsonArray() {
+    parse("[1]", "json");
+}
+
+func testAnEmptyYamlDocumentIsAnEmptyManifest() {
+    testing.assertEqual(parse("", "yaml").pkg.name, "");
 }

@@ -36,6 +36,7 @@ use time;
 use meta;
 use convert;
 import "./manifest.j" as manifest;
+import "./manifestcheck.j" as manifestcheck;
 import "./deckname.j" as deckname;
 import "./publish.j" as publish;
 import "./git.j" as git;
@@ -2221,80 +2222,10 @@ export func isDeckName(name as string) {
     return deckname.isScoped($name) and deckname.isValid($name);
 }
 
-# constraintProblems appends one line per dependency in deps whose name is not a
-# deck name or whose constraint is outside the grammar. `table` names the
-# manifest table, so the user can find the line.
-func constraintProblems(
-    out as list of string,
-    table as string,
-    deps as list of manifest.Dependency) {
-    def found as list of string init $out;
-    for (def dep in $deps) {
-        if (not isDeckName($dep.name)) {
-            $found[] = "[" + $table + "] " + $dep.name + ": not a valid deck name";
-        } elseif (not constraint.isValidConstraint($dep.constraint)) {
-            $found[] = "[" + $table + "] " + $dep.name + " = \"" + $dep.constraint +
-                "\": not a valid constraint";
-        }
-    }
-    return $found;
-}
-
-/**
- * List what is wrong with a manifest, one line each, or an empty list when
- * nothing is. Checked: deck names and constraints in `[decks]`, `[dev-decks]`
- * and `[conflicts]`, constraints in `[engines]`, names in `[sources]`,
- * `bin-dir`, and `[registries]` keys.
- *
- * A constraint outside the grammar matches nothing, so unchecked it surfaces as
- * a misleading "no version satisfies" in `[decks]`, and in `[conflicts]` as no
- * conflict at all, which is the dangerous direction. A `[registries]` key that
- * is not a scope pattern is never consulted, so the scope it was meant to pin
- * silently resolves at the catch-all; two keys that fold to one scope are two
- * answers to a question that must have one.
- * @param m {manifest.Manifest} the loaded manifest
- * @return {list of string} the problems, empty when the manifest is usable
- */
-export func manifestProblems(m as manifest.Manifest) {
-    def out as list of string init [];
-    $out = constraintProblems($out, "decks", $m.decks);
-    $out = constraintProblems($out, "dev-decks", $m.devDecks);
-    $out = constraintProblems($out, "conflicts", $m.conflicts);
-    for (def dep in $m.engines) {
-        if (not constraint.isValidConstraint($dep.constraint)) {
-            $out[] = "[engines] " + $dep.name + " = \"" + $dep.constraint +
-                "\": not a valid constraint";
-        }
-    }
-    for (def dep in $m.sources) {
-        if (not isDeckName($dep.name)) {
-            $out[] = "[sources] " + $dep.name + ": not a valid deck name";
-        }
-    }
-    # bin-dir is joined onto the project and commands are linked into it, so a
-    # cloned project must not be able to point it at `~/.local/bin`.
-    if (not ($m.pkg.binDir == "") and not safepath.isSafeRelative($m.pkg.binDir)) {
-        $out[] = "[package] bin-dir = \"" + $m.pkg.binDir +
-            "\": must be a relative path inside the project";
-    }
-    def seen as map of string to string init {};
-    for (def dep in $m.registries) {
-        def key as string init deckname.fold($dep.name);
-        if (not scopemap.isPattern($dep.name)) {
-            $out[] = "[registries] " + $dep.name + ": not a scope mapping key";
-        } elseif (maps.has($seen, $key)) {
-            $out[] = "[registries] " + $dep.name + " and " + $seen[$key] +
-                " name the same scope";
-        } else {
-            $seen[$key] = $dep.name;
-        }
-    }
-    return $out;
-}
-
-# manifestFailure renders manifestProblems as one failure, or "" when clean.
+# manifestFailure renders manifestcheck.problems as one failure, or "" when
+# clean.
 func manifestFailure(m as manifest.Manifest) {
-    def problems as list of string init manifestProblems($m);
+    def problems as list of string init manifestcheck.problems($m);
     if (len($problems) == 0) {
         return "";
     }
@@ -2575,28 +2506,13 @@ export func runRegistry(dir as string, pattern as string, url as string) {
         manifest.save(manifest.removeRegistry($m, $key), $loc.path);
         return ok($key + " is no longer mapped");
     }
-    if (not isRegistryUrl($url)) {
+    if (not manifestcheck.isRegistryUrl($url)) {
         return fail("not a registry URL: " + $url +
             "\n  give the registry's base URL, starting http:// or https://");
     }
     def warning as string init shadowWarning($dir, $m.registries, $key, $url);
     manifest.save(manifest.addRegistry($m, $key, $url), $loc.path);
     return ok($key + " now resolves at " + $url + $warning);
-}
-
-# isRegistryUrl reports whether a mapping value is an absolute http(s) URL with
-# a host. Anything else is stored without complaint and then fails every
-# install with a connection error that names no table.
-func isRegistryUrl(url as string) {
-    def u as string init strings.lower(strings.trim($url));
-    for (def scheme in ["https://", "http://"]) {
-        if (strings.startsWith($u, $scheme)) {
-            def rest as string init strings.substring($u, len($scheme), len($u));
-            return not ($rest == "") and not strings.startsWith($rest, "/") and
-                strings.indexOf($rest, " ") < 0;
-        }
-    }
-    return false;
 }
 
 # normalisePattern accepts the shorthands a user will actually type: a bare
@@ -4214,6 +4130,9 @@ func convertCount(n as int) {
 # fetched from is the consuming project's decision and never a dependency's,
 # and a template that kept them would let an engine's publisher choose the
 # registry every scope of the new project resolves at, now and after.
+# The name and version are always the frame's own. Everything else a template
+# sets is checked by the caller (`manifestFailure`) before anything is written,
+# since `bin-dir` decides where the frame's commands are linked.
 func frameManifest(
     name as string,
     engine as catalog.Candidate,
@@ -4227,12 +4146,10 @@ func frameManifest(
             $m = manifest.empty($name, "0.1.0");
         }
     }
-    if ($m.pkg.name == "") {
-        $m.pkg.name = $name;
-    }
-    if ($m.pkg.version == "") {
-        $m.pkg.version = "0.1.0";
-    }
+    # The frame is a new project, not the engine: a template's own name (often
+    # the engine's) would send the frame's first publish to the engine's scope.
+    $m.pkg.name = $name;
+    $m.pkg.version = "0.1.0";
     def none as list of manifest.Dependency init [];
     $m.registries = $none;
     $m.sources = $none;
@@ -4271,13 +4188,14 @@ func templateBody(files as list of scaffold.File, path as string) {
 # writeFrame writes the stamped files under dir, creating directories as needed
 # and skipping any manifest (jvc composes deck.toml itself, and a second one in
 # another format would leave every later verb refusing "multiple deck
-# manifests"). Returns the count written.
+# manifests") and anything under `.git/`. Returns the count written.
 func writeFrame(dir as string, files as list of scaffold.File) {
     def count as int init 0;
     for (def f in $files) {
         # The paths come out of a downloaded archive, so each one is checked
         # here as well as where scaffold reads it.
-        if (isManifestName($f.path) or not safepath.isSafeRelative($f.path)) {
+        if (isManifestName($f.path) or not safepath.isSafeRelative($f.path) or
+            isGitPath($f.path)) {
             continue;
         }
         def dest as string init path.join($dir, $f.path);
@@ -4286,6 +4204,12 @@ func writeFrame(dir as string, files as list of scaffold.File) {
         $count = $count + 1;
     }
     return $count;
+}
+
+# isGitPath reports whether a template path is inside `.git/`. A hook written
+# there survives the user's `git init` and runs at their next commit.
+func isGitPath(p as string) {
+    return strings.lower(strings.split($p, "/")[0]) == ".git";
 }
 
 # isManifestName reports whether a path is one of the manifest file names.
@@ -4437,13 +4361,20 @@ export func runNew(
         $files = scaffold.builtin($bindings);
         $origin = "the built-in frame (" + $deck + " ships no template/)";
     }
-    fs.mkdirAll($dir);
-    def written as int init writeFrame($dir, $files);
     def m as manifest.Manifest init frameManifest(
         $name,
         $engine,
         $sourceUrl,
         templateBody($files, INIT_MANIFEST));
+    # The template is the engine publisher's text, held to the same rules as a
+    # project's own manifest: a `bin-dir` of `../../.local/bin` would otherwise
+    # put the engine's command on the user's PATH.
+    def broken as string init manifestFailure($m);
+    if (not ($broken == "")) {
+        return fail($engine.name + " " + $engine.version + "'s template: " + $broken);
+    }
+    fs.mkdirAll($dir);
+    def written as int init writeFrame($dir, $files);
     manifest.save($m, path.join($dir, INIT_MANIFEST));
     # Vendor the engine and everything it needs, then lock the whole set.
     def vendored as Outcome init settleFrame($dir, $m, $graph.decks, $engine, $got);

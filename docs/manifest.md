@@ -211,7 +211,8 @@ The normative rules are [deck-spec.md](deck-spec.md) §14.1 and §14.2.
 - **Deck names are case-insensitive.** Keys in `[decks]`, `[dev-decks]`,
   `[conflicts]`, `[sources]` and `[registries]` are folded to lowercase when
   the manifest is read, and two keys in one table that fold to the same name
-  are an error naming both.
+  are an error naming both. `[engines]` keys keep their spelling, but
+  `jennifer` and `Jennifer` side by side are the same error.
 - **A deck may come from git.** A `[sources]` entry points one deck at a git
   remote instead of the repository; its versions are that repository's SemVer
   tags, and the lockfile pins the commit rather than a checksum. See

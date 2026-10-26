@@ -2666,37 +2666,6 @@ func testARequirementNamingAnInvalidDeckIsNotFetched() {
     testing.assertContains($r.error, "@../src, which is not a valid deck name");
 }
 
-func testManifestProblemsNamesEachBadEntry() {
-    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
-    $m.decks = manifest.depListSet($m.decks, "@acme/ok", "^1.2");
-    $m.decks = manifest.depListSet($m.decks, "@acme/typo", "^ 1.2");
-    $m.conflicts = manifest.depListSet($m.conflicts, "@acme/old", "~>1");
-    $m.engines = manifest.depListSet($m.engines, "jennifer", ">= 0.24.0");
-    $m.registries = manifest.depListSet($m.registries, "@acme/tool", "https://r");
-    # depListSet folds, so the fold-duplicate pair a hand edit can produce is
-    # built directly
-    def regs as list of manifest.Dependency init $m.registries;
-    $regs[] = manifest.Dependency{name: "@Acme/*", constraint: "https://a"};
-    $regs[] = manifest.Dependency{name: "@acme/*", constraint: "https://b"};
-    $m.registries = $regs;
-    def got as list of string init manifestProblems($m);
-    testing.assertEqual(len($got), 5);
-    testing.assertContains($got[0], "[decks] @acme/typo");
-    testing.assertContains($got[1], "[conflicts] @acme/old");
-    testing.assertContains($got[2], "[engines] jennifer");
-    testing.assertContains($got[3], "[registries] @acme/tool");
-    testing.assertContains($got[4], "name the same scope");
-}
-
-func testACleanManifestHasNoProblems() {
-    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
-    $m.decks = manifest.depListSet($m.decks, "@jennifer-language/routeros", "");
-    $m.devDecks = manifest.depListSet($m.devDecks, "@acme/testkit", ">=0.2.0-dev");
-    $m.engines = manifest.depListSet($m.engines, "jennifer", ">=0.24.0");
-    $m.registries = manifest.depListSet($m.registries, "*", "https://r");
-    testing.assertEqual(len(manifestProblems($m)), 0);
-}
-
 func testInstallRefusesAManifestWithABadConstraint() {
     def dir as string init freshDir("badcons");
     def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
@@ -2838,16 +2807,6 @@ func testAPackageBinThatWalksIsNotACommand() {
         entry("deck.toml", 'bin = "src/../../../../usr/bin/env"' + "\n")
     ];
     testing.assertEqual(vendoredBin($data, "@x/y"), "");
-}
-
-func testBinDirMustStayInsideTheProject() {
-    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
-    $m.pkg.binDir = "../.local/bin";
-    testing.assertContains(manifestProblems($m)[0], "bin-dir");
-    $m.pkg.binDir = "/usr/local/bin";
-    testing.assertEqual(len(manifestProblems($m)), 1);
-    $m.pkg.binDir = "tools/bin";
-    testing.assertEqual(len(manifestProblems($m)), 0);
 }
 
 func testATarballWithoutAChecksumIsNotFetched() {
@@ -3055,4 +3014,81 @@ func testAddStoresTheFoldedName() {
     def m as manifest.Manifest init manifest.load($dir + "/" + INIT_MANIFEST);
     testing.assertEqual($m.decks[0].name, "@acme/tool");
     fs.removeAll($dir);
+}
+
+# --- jvc new against an engine's template -----------------------------------
+
+# engineRepo builds a git repository publishing @acme/engine 1.0.0 whose
+# template/ holds the given deck.toml text and one file under `.git/hooks/`.
+func engineRepo(label as string, templateToml as string) {
+    def dir as string init freshDir("engine_" + $label);
+    fs.writeString(
+        $dir + "/deck.toml",
+        "[package]\nname = \"@acme/engine\"\nversion = \"1.0.0\"\n");
+    fs.mkdirAll($dir + "/src");
+    fs.writeString($dir + "/src/engine.j", "export def const X as int init 1;\n");
+    fs.mkdirAll($dir + "/template/.git/hooks");
+    fs.writeString($dir + "/template/deck.toml", $templateToml);
+    fs.writeString($dir + "/template/main.j", "use io;\n");
+    fs.writeString($dir + "/template/.git/hooks/pre-commit", "#!/bin/sh\nexit 0\n");
+    git.run(["git", "-C", $dir, "init", "-q", "-b", "main"]);
+    git.run(["git", "-C", $dir, "add", "-A"]);
+    git.run(["git", "-C", $dir, "config", "user.email", "t@x"]);
+    git.run(["git", "-C", $dir, "config", "user.name", "t"]);
+    git.run(["git", "-C", $dir, "commit", "-q", "-m", "1.0.0"]);
+    git.run(["git", "-C", $dir, "tag", "v1.0.0"]);
+    return $dir;
+}
+
+# newFromEngine runs `jvc new` over a repository from engineRepo, with a private
+# mirror cache, and returns the outcome and the frame's directory.
+func newFromEngine(label as string, templateToml as string) {
+    def repo as string init engineRepo($label, $templateToml);
+    def cache as string init freshDir("enginecache_" + $label);
+    def dir as string init freshDir("frame_" + $label);
+    fs.removeAll($dir);
+    os.setEnv("JVC_CACHE", $cache);
+    def out as Outcome init runNew($dir, "mysite", "@acme/engine", "", $repo, "http://127.0.0.1:1");
+    os.setEnv("JVC_CACHE", "");
+    fs.removeAll($repo);
+    fs.removeAll($cache);
+    $out.message = $dir + "\n" + $out.message;
+    return $out;
+}
+
+# An engine's template must not choose where the frame's commands are linked:
+# `../../.local/bin` would put them on the user's PATH.
+func testATemplateBinDirOutsideTheFrameIsRefused() {
+    def out as Outcome init newFromEngine(
+        "bindir",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\nbin-dir = \"../../.local/bin\"\n");
+    def dir as string init strings.split($out.message, "\n")[0];
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "template");
+    testing.assertContains($out.message, "bin-dir");
+    testing.assertFalse(fs.exists($dir));
+}
+
+# The frame is the user's project: a template's name (here the engine's own)
+# would send its first publish to the engine's scope. And a hook under .git/
+# would survive the user's `git init`.
+func testAFrameKeepsItsOwnNameAndNoGitHooks() {
+    def out as Outcome init newFromEngine(
+        "name",
+        "[package]\nname = \"@acme/engine\"\nversion = \"9.9.9\"\n");
+    def dir as string init strings.split($out.message, "\n")[0];
+    testing.assertTrue($out.ok);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    testing.assertEqual($m.pkg.name, "mysite");
+    testing.assertEqual($m.pkg.version, "0.1.0");
+    testing.assertTrue(fs.exists($dir + "/main.j"));
+    testing.assertFalse(fs.exists($dir + "/.git/hooks/pre-commit"));
+    fs.removeAll($dir);
+}
+
+func testAGitPathIsAnyCaseOfDotGit() {
+    testing.assertTrue(isGitPath(".git/hooks/pre-commit"));
+    testing.assertTrue(isGitPath(".GIT/config"));
+    testing.assertFalse(isGitPath("src/.git/x"));
+    testing.assertFalse(isGitPath(".github/workflows/ci.yml"));
 }

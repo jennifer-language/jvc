@@ -618,8 +618,10 @@ either; otherwise it is stale like any other.
 
 Before any of that, `install` and `update` check the manifest itself: every
 deck name, every constraint (in `[decks]`, `[dev-decks]`, `[conflicts]` and
-`[engines]`), every `[registries]` key, and `[package] bin-dir`, which must be a
-relative path inside the project. A bad entry is reported by table and name.
+`[engines]`), every `[registries]` key and value (an `http://` or `https://`
+base URL), `[package] bin`, and `[package] bin-dir`, which must be a relative
+path inside the project. A bad entry is reported by table and name. `jvc new`
+and `jvc publish` run the same check.
 A lock whose recorded registries the `[registries]` mapping has since moved is
 refused outright (see [One project, several
 repositories](#one-project-several-repositories)), not treated as stale.
@@ -828,13 +830,18 @@ Four placeholders are substituted, in both file contents and file names:
 
 An unbound placeholder is left as written, not blanked, so a typo is
 visible in the stamped file. Non-text files (an icon, say) are copied byte for
-byte.
+byte. Anything under `.git/` in a template is skipped, since a hook there would
+survive the user's `git init` and run at their next commit.
 
 If the template ships its own `deck.toml`, jvc uses it as the base and adds the
 engine requirement on top, so an engine can prescribe its frames' `[engines]` or
 extra dependencies. Its `[registries]` and `[sources]` tables are dropped: where
 a project's decks come from is the project owner's decision, not something a
-deck it scaffolds from gets to choose. Otherwise a minimal manifest is
+deck it scaffolds from gets to choose. Its `name` and `version` are replaced by
+the frame's own (the name given to `jvc new`, and `0.1.0`), so the frame's first
+publish cannot land in the engine's scope. What remains gets the manifest check
+`install` runs before anything is written: a template whose `bin-dir` leaves the
+project, say, is refused, and nothing is created. Otherwise a minimal manifest is
 generated. Either way the engine is pinned to `^<resolved version>`, or to
 `=<resolved version>` when that version is a prerelease (a caret cannot name
 one).
@@ -1072,12 +1079,14 @@ Both start the same way, from the current directory's `deck.toml`:
 
 1. **Validation**, which `--no-verify` does not skip: a **scoped
    `@scope/deck`** name; scoped `[decks]` entries with valid constraints; a
-   SemVer `version` with no numeric part over 18 digits; a
-   `[package.urls] deck`; a `src/` directory with the `src/<deck>.j`
-   entrypoint; known capability names, and every
-   `# pragma-jennifer-capability` in `src/` listed in `capabilities`, so a deck
-   never claims less than its code needs; and no `jennifer-tiny` in `[engines]`
-   when `src/` uses a library that build lacks.
+   SemVer `version` with no numeric part over 18 digits; the manifest check
+   `install` runs (deck names, constraints, `[registries]`, `bin` and
+   `bin-dir`); a `[package.urls] deck`; a `src/` directory with the
+   `src/<deck>.j` entrypoint; the `[package] bin` file, when one is named;
+   known capability names, and every `# pragma-jennifer-capability` in `src/`
+   listed in `capabilities`, so a deck never claims less than its code needs;
+   and no `jennifer-tiny` in `[engines]` when `capabilities` is non-empty or
+   `src/` uses a library that build lacks.
 2. **The quality gate** (below) unless `--no-verify` is given. It runs after
    validation, so the cheap structural checks fail first.
 
@@ -1111,8 +1120,9 @@ as `0644`, so a `[package] bin` script stays runnable.
 ### Claiming `jennifer-tiny`
 
 Validation refuses a deck whose `[engines]` lists `jennifer-tiny` while its
-sources declare a library only the default build carries (`term`, `serial`,
-`spi`, `i2c`, `gpio`), even with `--no-verify`:
+`capabilities` lists any capability (the tiny build has none and refuses to load
+a file needing one), or while its sources declare a library only the default
+build carries (`term`, `serial`, `spi`, `i2c`, `gpio`), even with `--no-verify`:
 
 ```
 [engines] lists jennifer-tiny, but src/ declares `use gpio;`, which that build
@@ -1204,3 +1214,4 @@ to register it, host the tarball at your URL and run, on the repository's own ho
 | `src/ciauth.j`      | CI credentials: trusted publishing and `$JVC_TOKEN` |
 | `src/pragma.j`      | reading version and capability pragmas, as the interpreter does |
 | `src/safepath.j`    | path-segment checks and `safepath.unpack` for archives |
+| `src/manifestcheck.j` | the manifest check `install`, `new` and `publish` share |

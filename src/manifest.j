@@ -185,6 +185,18 @@ func expectType(actual as string, wanted as string, where as string) {
         typeName($actual) + $hint);
 }
 
+# expectDocument raises a manifest error unless a decoded document is a table.
+# A YAML scalar or a JSON array is valid syntax, and every lookup in it misses,
+# so unchecked it reads as an empty manifest and a git tag carrying one is
+# reported as declaring the name "". An empty document (null) stays an empty
+# manifest.
+func expectDocument(actual as string) {
+    if ($actual == "null") {
+        return;
+    }
+    expectType($actual, "map", "the manifest");
+}
+
 # DECK_TABLES are the tables keyed by deck name, whose keys are folded.
 def const DECK_TABLES as list of string init ["decks", "dev-decks", "conflicts", "sources"];
 
@@ -224,7 +236,8 @@ func isFoldedTable(table as string) {
 # Dependency list. Keys of a deck table, and of `[registries]` (scope patterns,
 # compared folded by `scopemap.registryFor`), are folded, because everything
 # downstream (the resolver, the lockfile, the registry's answers) compares
-# folded names. Two keys that fold to one are an error, not a silent pick.
+# folded names. Two keys that fold to one are an error, not a silent pick, in
+# every table, `[engines]` included, though its keys keep their spelling.
 func buildDeps(table as string, keys as list of string, values as list of string) {
     def out as list of Dependency init [];
     def fold as bool init isFoldedTable($table);
@@ -234,17 +247,24 @@ func buildDeps(table as string, keys as list of string, values as list of string
         $what = "scope pattern";
         $why = "scope patterns are case-insensitive";
     }
+    if ($table == "engines") {
+        $what = "engine";
+        $why = "engine names are compared case-insensitively";
+    }
     def firstKey as map of string to string init {};
     for (def i as int init 0; $i < len($keys); $i = $i + 1) {
         def name as string init $keys[$i];
+        # `[engines]` keeps the author's spelling but is looked up folded
+        # (`sameName`), so two spellings of one engine are as ambiguous there.
+        def key as string init deckname.fold($name);
         if ($fold) {
-            $name = deckname.fold($name);
-            if (maps.has($firstKey, $name)) {
-                raise("[" + $table + "] names one " + $what + " twice: \"" +
-                    $firstKey[$name] + "\" and \"" + $keys[$i] + "\" (" + $why + "); keep one");
-            }
-            $firstKey[$name] = $keys[$i];
+            $name = $key;
         }
+        if (maps.has($firstKey, $key)) {
+            raise("[" + $table + "] names one " + $what + " twice: \"" +
+                $firstKey[$key] + "\" and \"" + $keys[$i] + "\" (" + $why + "); keep one");
+        }
+        $firstKey[$key] = $keys[$i];
         $out[] = Dependency{name: $name, constraint: $values[$i]};
     }
     return $out;
@@ -358,6 +378,7 @@ func decodeToml(text as string) {
 # parseToml decodes a TOML manifest document into a Manifest.
 func parseToml(text as string) {
     def doc as toml.Value init decodeToml($text);
+    expectDocument(toml.typeOf($doc, ""));
     def pkg as Package init Package{
         name: tomlPkgStr($doc, "name"),
         version: tomlPkgStr($doc, "version"),
@@ -459,6 +480,7 @@ func decodeYaml(text as string) {
 # parseYaml decodes a YAML manifest document into a Manifest.
 func parseYaml(text as string) {
     def doc as yaml.Value init decodeYaml($text);
+    expectDocument(yaml.typeOf($doc, ""));
     def pkg as Package init Package{
         name: yamlPkgStr($doc, "name"),
         version: yamlPkgStr($doc, "version"),
@@ -561,6 +583,7 @@ func decodeJson(text as string) {
 # parseJson decodes a JSON manifest document into a Manifest.
 func parseJson(text as string) {
     def doc as json.Value init decodeJson($text);
+    expectDocument(json.typeOf($doc, ""));
     def pkg as Package init Package{
         name: jsonPkgStr($doc, "name"),
         version: jsonPkgStr($doc, "version"),
@@ -591,8 +614,8 @@ func parseJson(text as string) {
  * Every failure is a kind "manifest" error naming what is wrong and where: a
  * syntax error, a field of the wrong type (an unquoted `version = 1.0`, a
  * string where `authors` wants an array, an inline table where a constraint
- * belongs), or two keys in one deck table that name the same deck once folded
- * (or two `[registries]` keys naming the same scope pattern).
+ * belongs, a document that is not a table), or two keys in one table that
+ * name the same deck, engine or scope pattern once folded.
  * The keys of `[decks]`, `[dev-decks]`, `[conflicts]`, `[sources]` and
  * `[registries]` come back folded (`deckname.fold`), since a deck name, and so
  * a scope pattern, is case-insensitive. `[engines]` keys are kept as written.

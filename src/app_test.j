@@ -1126,3 +1126,17 @@ func testUnpackIntoCleansItsTempFileWhenArchiveFails() {
     fs.removeAll($repo);
     fs.removeAll($root);
 }
+
+# A vendored deck's `bin = "scripts/-n"` names its command after the last
+# segment, and a command called `-n` is an option to whatever runs it.
+func testLinkCommandRefusesAnOptionLikeName() {
+    def root as string init scratch("optname");
+    def loc as Locations init where($root);
+    fs.mkdirAll($loc.bin);
+    for (def name in ["-n", ".hidden", "a b"]) {
+        def r as Outcome init linkCommand($loc, $name, path.join($loc.store, "x"));
+        testing.assertFalse($r.ok);
+        testing.assertContains($r.message, "refusing to create a command");
+    }
+    fs.removeAll($root);
+}

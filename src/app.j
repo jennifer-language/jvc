@@ -387,9 +387,10 @@ func normalise(p as string) {
  * @return {Outcome} the command's path, or why it could not be created
  */
 export func linkCommand(loc as Locations, name as string, entry as string) {
-    if (not safepath.isSafeSegment($name)) {
+    if (not isAppName($name)) {
         return fail("refusing to create a command named \"" + $name +
-            "\": a command name is a single file name");
+            "\": a command name is one file name of letters, digits, `.`, `_` " +
+            "and `-`, not starting with `.` or `-`");
     }
     def target as string init path.join($loc.bin, $name);
     if (occupied($target)) {

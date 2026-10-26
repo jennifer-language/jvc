@@ -42,6 +42,7 @@ use hash;
 use encoding;
 use archive;
 import "./manifest.j" as manifest;
+import "./manifestcheck.j" as manifestcheck;
 import "./deckname.j" as deckname;
 import "./constraint.j" as constraint;
 import "./pragma.j" as pragma;
@@ -335,13 +336,20 @@ export func defaultOnlyUses(dir as string) {
     return $found;
 }
 
-# tinyProblem refuses a deck that claims `jennifer-tiny` while its code needs a
-# library only the default build has. The claim is the defect: nothing later
+# tinyProblem refuses a deck that claims `jennifer-tiny` while it declares a
+# capability (tiny has none of them) or its code needs a library only the
+# default build has. The claim is the defect: nothing later
 # enforces `[engines]`, so a consumer on tiny installs happily and finds out at
 # the first call into a stub.
 func tinyProblem(m as manifest.Manifest, dir as string) {
     if (not manifest.depListHas($m.engines, "jennifer-tiny")) {
         return "";
+    }
+    if (len($m.pkg.capabilities) > 0) {
+        return "[engines] lists jennifer-tiny, but [package] capabilities lists " +
+            strings.join($m.pkg.capabilities, ", ") + ", and that build refuses to " +
+            "load a file needing any capability. Drop jennifer-tiny from [engines], " +
+            "or the capabilities.";
     }
     def used as list of string init defaultOnlyUses($dir);
     if (len($used) == 0) {
@@ -385,32 +393,16 @@ func capabilityProblem(m as manifest.Manifest, dir as string) {
     return "";
 }
 
-# requirementProblem checks the dependency tables as install does
-# (`cli.manifestProblems`), so a release cannot carry a `requires` that no
-# consumer could resolve: deck names in [decks], [dev-decks] and [conflicts]
-# must be scoped and valid, and every constraint, [engines] included, must be
-# inside the grammar. Returns "" when all are.
+# requirementProblem runs the check install, update and `jvc new` run
+# (`manifestcheck.problems`), so a release cannot carry a `requires` that no
+# consumer could resolve, or a `bin` / `bin-dir` that install would refuse.
+# Returns "" when clean, else the first problem.
 func requirementProblem(m as manifest.Manifest) {
-    def tables as list of string init ["decks", "dev-decks", "conflicts"];
-    def tableDeps as list of list of manifest.Dependency init [$m.decks, $m.devDecks, $m.conflicts];
-    for (def i as int init 0; $i < len($tables); $i = $i + 1) {
-        for (def dep in $tableDeps[$i]) {
-            if (not deckname.isScoped($dep.name) or not deckname.isValid($dep.name)) {
-                return "[" + $tables[$i] + "] " + $dep.name + ": not a valid deck name";
-            }
-            if (not constraint.isValidConstraint($dep.constraint)) {
-                return "[" + $tables[$i] + "] " + $dep.name + " = \"" + $dep.constraint +
-                    "\": not a valid constraint";
-            }
-        }
+    def found as list of string init manifestcheck.problems($m);
+    if (len($found) == 0) {
+        return "";
     }
-    for (def dep in $m.engines) {
-        if (not constraint.isValidConstraint($dep.constraint)) {
-            return "[engines] " + $dep.name + " = \"" + $dep.constraint +
-                "\": not a valid constraint";
-        }
-    }
-    return "";
+    return $found[0];
 }
 
 # validate checks that a manifest describes a publishable deck rooted at dir,
@@ -446,6 +438,9 @@ func validate(m as manifest.Manifest, dir as string) {
     def entry as string init $dir + "/src/" + deckname.entryFile($m.pkg.name);
     if (not fs.exists($entry)) {
         return "missing entrypoint src/" + deckname.entryFile($m.pkg.name);
+    }
+    if (not ($m.pkg.bin == "") and not fs.isFile($dir + "/" + $m.pkg.bin)) {
+        return "[package] bin = \"" + $m.pkg.bin + "\": no such file in the deck";
     }
     def tiny as string init tinyProblem($m, $dir);
     if (not ($tiny == "")) {

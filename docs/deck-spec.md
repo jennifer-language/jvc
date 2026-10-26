@@ -290,7 +290,8 @@ per-engine range. So the guarantees divide:
 That third row is why `[engines]` still matters and **MUST** be kept accurate by
 the deck's author even though nothing enforces it later: for those surfaces,
 jvc refusing the install is the only automated warning before the program is
-running. A deck using them **MUST NOT** list `jennifer-tiny`.
+running. A deck using them **MUST NOT** list `jennifer-tiny`, and neither may a
+deck whose `capabilities` is non-empty: the tiny build has no capability.
 
 ## 6. Further tables
 
@@ -722,12 +723,15 @@ a single dependency can move without disturbing the rest of the graph.
   or section takes its default. A parse fails only on malformed TOML/YAML/JSON;
   on a field of the wrong type, whether a wrong scalar (a non-string dependency
   value, an unquoted `1.10` read as a number) or an array or table where a
-  string belongs (an array for `bin`, §14.1); or on two keys in one deck-name
-  table or in `[registries]` that fold to the same name (§5, §6.2).
+  string belongs (an array for `bin`, §14.1); on a document that is not a
+  table or mapping (a YAML scalar, a JSON array; an empty document is an empty
+  manifest); or on two keys in one deck-name table, in `[registries]`, or in
+  `[engines]` that fold to the same name (§5, §6.2). `[engines]` keys keep
+  their spelling, but are compared case-insensitively.
 - A tool that **publishes** a deck **SHOULD** additionally enforce: a non-empty
   `name` matching §7 and a valid SemVer `version`. jvc refuses an invalid or
   unscoped name, an unscoped dependency, an invalid version, a missing
-  `urls.deck` and a missing entrypoint; whether the publisher may use the scope
+  `urls.deck`, a missing entrypoint and a `bin` naming no file; whether the publisher may use the scope
   is the registry's check.
 - On publish, the deck's `[decks]` and `[engines]` are recorded with the version
   in the registry (as `requires` and `engines`, §10). `jvc publish` derives both
@@ -934,6 +938,11 @@ a minimal built-in frame so `jvc new` works against any deck.
 `=<resolved version>` when the engine is a prerelease. A
   template's `[registries]` and `[sources]` tables **MUST** be dropped: where
   the frame's decks come from is its owner's decision, not the engine deck's.
+  Its `name` and `version` **MUST** be replaced by the frame's own, and what
+  remains **MUST** pass the checks a project's own manifest gets before
+  install (in particular `bin-dir`, §14.1) before any file is written.
+- A tool **MUST NOT** write a template path whose first segment is `.git` (in
+  any case): a hook written there survives the user's `git init`.
 
 ### 14.4 The web-root rule
 
