@@ -442,7 +442,10 @@ section 2.4, because the registry resolves against them too, and two documents
 defining one grammar is how two
 implementations end up disagreeing about `^1`. In outline, a constraint is a
 **single** expression with no `||` or `,` compound ranges, and it is a wildcard,
-an exact version, a caret, a tilde, or a comparator.
+an exact version, a caret, a tilde, or a comparator. **The empty string is not
+a constraint** there: a manifest entry of `""` (or only whitespace) is refused,
+and `*` is how to say any version. A constraint that is left out entirely, as
+in `jvc add <deck>` with no version, still means `*`.
 
 **A constraint outside the grammar matches nothing**, and is never read as a
 looser spelling of one inside it: `^abc` is not `^0`, and `^ 1.2.0` (a space

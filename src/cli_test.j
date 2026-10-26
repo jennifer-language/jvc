@@ -3500,3 +3500,28 @@ func testADeckMissingAfterItsFetchIsNamed() {
     testing.assertEqual(fetchedBefore({"@acme/a": true}, ["@acme/b", "@acme/a"]), "@acme/a");
     testing.assertEqual(fetchedBefore({"@acme/a": true}, ["@acme/b"]), "");
 }
+
+# The empty constraint is refused only where it is written: `jvc add` with no
+# constraint writes `*`, and a dependency's own requirement of `""` (an old
+# registry record, an old tag) still resolves as any version.
+func testAddWithNoConstraintWritesAWildcard() {
+    def dir as string init freshDir("addstar");
+    runInit($dir, "demo");
+    testing.assertTrue(runAdd($dir, "@acme/net", "", false).ok);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    testing.assertEqual(manifest.depListGet($m.decks, "@acme/net"), "*");
+    testing.assertEqual(len(manifestcheck.problems($m)), 0);
+    testing.assertTrue(constraint.satisfies("1.0.0", ""));
+    fs.removeAll($dir);
+}
+
+func testInstallRefusesAnEmptyConstraint() {
+    def dir as string init freshDir("installempty");
+    fs.writeString(
+        $dir + "/deck.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[decks]\n\"@acme/net\" = \"\"\n");
+    def out as Outcome init runInstall($dir, "http://127.0.0.1:1", false, false);
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "empty version constraint for @acme/net");
+    fs.removeAll($dir);
+}

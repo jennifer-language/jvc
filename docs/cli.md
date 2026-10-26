@@ -646,7 +646,8 @@ either; otherwise it is stale like any other.
 
 Before any of that, `install` and `update` check the manifest itself: every
 deck name, every constraint (in `[decks]`, `[dev-decks]`, `[conflicts]` and
-`[engines]`), every `[registries]` key and value (an `http://` or `https://`
+`[engines]`; an empty one is refused, write `*` for any version), every
+`[registries]` key and value (an `http://` or `https://`
 base URL), `[package] bin`, and `[package] bin-dir`, which must be a relative
 path inside the project. A bad entry is reported by table and name. `jvc new`
 and `jvc publish` run the same check. Install and update also refuse a project

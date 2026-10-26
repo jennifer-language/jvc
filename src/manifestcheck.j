@@ -36,7 +36,8 @@ import "./safepath.j" as safepath;
  * List what is wrong with a manifest, one line each, or an empty list when
  * nothing is. Checked: deck names and constraints in `[decks]`, `[dev-decks]`
  * and `[conflicts]`, constraints in `[engines]`, names in `[sources]`, `bin`
- * and `bin-dir`, and `[registries]` keys and values.
+ * and `bin-dir`, and `[registries]` keys and values. An empty constraint is
+ * refused (write `*`), as the registry refuses it at publish.
  *
  * A constraint outside the grammar matches nothing, so unchecked it surfaces as
  * a misleading "no version satisfies" in `[decks]`, and in `[conflicts]` as no
@@ -54,7 +55,9 @@ export func problems(m as manifest.Manifest) {
     $out = constraintProblems($out, "dev-decks", $m.devDecks);
     $out = constraintProblems($out, "conflicts", $m.conflicts);
     for (def dep in $m.engines) {
-        if (not constraint.isValidConstraint($dep.constraint)) {
+        if (isBlank($dep.constraint)) {
+            $out[] = emptyProblem("engines", $dep.name);
+        } elseif (not constraint.isValidConstraint($dep.constraint)) {
             $out[] = "[engines] " + $dep.name + " = \"" + $dep.constraint +
                 "\": not a valid constraint";
         }
@@ -113,6 +116,21 @@ export func isRegistryUrl(url as string) {
     return false;
 }
 
+# isBlank reports whether a constraint is empty or only spaces and tabs.
+func isBlank(c as string) {
+    return strings.trim($c) == "";
+}
+
+# emptyProblem is the refusal of an empty constraint, worded as the registry
+# words it (server specification 2.4). `constraint.j` still reads `""` as `*`,
+# for a constraint that was left out (a registry record from before the rule, an
+# old tag's manifest); written in a manifest it is a placeholder or a slip, and
+# read as `*` it would admit every future major version.
+func emptyProblem(table as string, name as string) {
+    return "[" + $table + "] " + $name + ": empty version constraint for " + $name +
+        " in [" + $table + "]: write \"*\" for any version";
+}
+
 # isDeckName reports whether a name is a scoped, valid deck name.
 func isDeckName(name as string) {
     return deckname.isScoped($name) and deckname.isValid($name);
@@ -129,6 +147,8 @@ func constraintProblems(
     for (def dep in $deps) {
         if (not isDeckName($dep.name)) {
             $found[] = "[" + $table + "] " + $dep.name + ": not a valid deck name";
+        } elseif (isBlank($dep.constraint)) {
+            $found[] = emptyProblem($table, $dep.name);
         } elseif (not constraint.isValidConstraint($dep.constraint)) {
             $found[] = "[" + $table + "] " + $dep.name + " = \"" + $dep.constraint +
                 "\": not a valid constraint";

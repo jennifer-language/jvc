@@ -32,7 +32,7 @@ func testProblemsNamesEachBadEntry() {
 
 func testACleanManifestHasNoProblems() {
     def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
-    $m.decks = manifest.depListSet($m.decks, "@jennifer-language/routeros", "");
+    $m.decks = manifest.depListSet($m.decks, "@jennifer-language/routeros", "*");
     $m.devDecks = manifest.depListSet($m.devDecks, "@acme/testkit", ">=0.2.0-dev");
     $m.engines = manifest.depListSet($m.engines, "jennifer", ">=0.24.0");
     $m.registries = manifest.depListSet($m.registries, "*", "https://r");
@@ -77,4 +77,17 @@ func testRegistryUrlsNeedASchemeAndAHost() {
     testing.assertFalse(isRegistryUrl("file:///srv/registry"));
     testing.assertFalse(isRegistryUrl("registry.example"));
     testing.assertFalse(isRegistryUrl("https://reg istry"));
+}
+
+# An empty constraint is a placeholder or a slip, refused as the registry
+# refuses it at publish; `*` is how a manifest says "any version".
+func testAnEmptyConstraintIsRefused() {
+    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
+    $m.decks = manifest.depListSet($m.decks, "@acme/net", "");
+    $m.engines = manifest.depListSet($m.engines, "jennifer", "  ");
+    def got as list of string init problems($m);
+    testing.assertEqual(len($got), 2);
+    testing.assertContains($got[0], "empty version constraint for @acme/net in [decks]");
+    testing.assertContains($got[0], "write \"*\" for any version");
+    testing.assertContains($got[1], "empty version constraint for jennifer in [engines]");
 }
