@@ -644,12 +644,17 @@ export def struct Source {
 };
 
 /**
- * Work out the repository and tag a publish should name.
+ * Work out the repository and tag a publish should name, and check that the
+ * repository has the tag.
  *
  * Both are taken from git rather than from the manifest, because the registry
  * reads the code from the forge and it is the forge's view that has to be
  * right. An explicit flag wins, since a project may push to a remote that is
  * not the one it publishes from.
+ *
+ * This is `localSource` followed by `pushedTagProblem`. `runPublish` calls the
+ * two apart, with the registry checks between them, so a missing tag fails
+ * offline and the forge is asked nothing when the registry would refuse anyway.
  * @param dir {string} the project directory
  * @param version {string} the manifest version, for the fallback tag
  * @param repoFlag {string} `--repository`, or "" to read `origin`
@@ -663,10 +668,33 @@ export func publishSource(
     repoFlag as string,
     tagFlag as string,
     remote as string) {
+    def src as Source init localSource($dir, $version, $repoFlag, $tagFlag, $remote);
+    if (not ($src.error == "")) {
+        return $src;
+    }
+    $src.error = pushedTagProblem($dir, $src, $repoFlag, $remote);
+    return $src;
+}
+
+# remoteName is the remote a publish reads from: `--remote`, else `origin`.
+func remoteName(remote as string) {
     def which as string init strings.trim($remote);
     if ($which == "") {
-        $which = "origin";
+        return "origin";
     }
+    return $which;
+}
+
+# localSource resolves the repository and tag from this working tree alone: the
+# remote's URL (or --repository) and the version's tag on HEAD (or --tag). It
+# runs git but contacts no remote.
+func localSource(
+    dir as string,
+    version as string,
+    repoFlag as string,
+    tagFlag as string,
+    remote as string) {
+    def which as string init remoteName($remote);
     def repo as string init strings.trim($repoFlag);
     def from as string init "--repository";
     if ($repo == "") {
@@ -727,6 +755,12 @@ export func publishSource(
                 "\n  (or pass --tag)"
         };
     }
+    return Source{repository: $repo, tag: $tag, error: ""};
+}
+
+# pushedTagProblem says why the repository a publish names cannot read its tag,
+# or "". The one step of a publish's source check that contacts the forge.
+func pushedTagProblem(dir as string, src as Source, repoFlag as string, remote as string) {
     # A tag the remote does not have is the failure worth catching here rather
     # than at the registry: the registry reads the repository over the network,
     # so a tag that exists only in this working tree is invisible to it, and the
@@ -734,19 +768,15 @@ export func publishSource(
     # Ask the repository being published, which is the named remote only when
     # no --repository overrides it: checking `origin` for a tag the registry is
     # told to read from somewhere else refused a good publish and passed a bad one.
-    def asked as string init $which;
+    def asked as string init remoteName($remote);
     if (not (strings.trim($repoFlag) == "")) {
-        $asked = $repo;
+        $asked = $src.repository;
     }
-    if (not remoteHasTag($dir, $asked, $tag)) {
-        return Source{
-            repository: $repo,
-            tag: $tag,
-            error: $tag + " is not on `" + $asked + "`, so the repository " +
-                "cannot read it:\n  git push " + $asked + " " + $tag
-        };
+    if (not remoteHasTag($dir, $asked, $src.tag)) {
+        return $src.tag + " is not on `" + $asked + "`, so the repository " +
+            "cannot read it:\n  git push " + $asked + " " + $src.tag;
     }
-    return Source{repository: $repo, tag: $tag, error: ""};
+    return "";
 }
 
 # otherRemotes names the remotes that do exist, when the one asked for does not.
@@ -5478,6 +5508,12 @@ export func runPublish(
     def m as manifest.Manifest init manifest.load($loc.path);
     def head as string init "checked " + $m.pkg.name + "@" + $m.pkg.version +
         $gate.message + "\n\n";
+    # The working tree's answer first: a missing or misplaced tag is found
+    # offline, before the registry is contacted or a login is asked for.
+    def src as Source init localSource($dir, $m.pkg.version, $repoFlag, $tagFlag, $remote);
+    if (not ($src.error == "")) {
+        return fail($head + $src.error);
+    }
     # Unreachable is reported as unreachable, not folded into "no publish
     # endpoint" (which would suggest hand-packing a release).
     def api as registry.Negotiated init agreeApi(registry.newClient($base));
@@ -5495,7 +5531,9 @@ export func runPublish(
         }
         return fail($head + noAuthorityAdvice($base));
     }
-    def src as Source init publishSource($dir, $m.pkg.version, $repoFlag, $tagFlag, $remote);
+    # Only now ask the forge, since a registry that would refuse makes the
+    # answer moot.
+    $src.error = pushedTagProblem($dir, $src, $repoFlag, $remote);
     if (not ($src.error == "")) {
         return fail($head + $src.error);
     }

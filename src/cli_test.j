@@ -2401,6 +2401,9 @@ func testPublishWritesNothingEvenWhenItCannotPublish() {
     fs.writeString(
         $dir + "/src/thing.j",
         strings.join(['export func hi() {', '    return 1;', '}'], "\n"));
+    # Tagged, with a remote, so the local source check passes and the registry
+    # is what fails.
+    tagRelease($dir, "0.1.0");
     def out as Outcome init runPublish($dir, false, "http://127.0.0.1:1", "", "", "");
     testing.assertFalse($out.ok);
     # An unreachable registry is reported as unreachable, not as one that takes
@@ -2409,6 +2412,38 @@ func testPublishWritesNothingEvenWhenItCannotPublish() {
     testing.assertContains($out.message, "could not reach");
     testing.assertFalse(strings.contains($out.message, "jvc pack"));
     testing.assertFalse(fs.exists($dir + "/dist"));
+    fs.removeAll($dir);
+}
+
+# tagRelease commits everything in dir and tags HEAD, with an `origin` that is
+# never contacted by the tests using it.
+func tagRelease(dir as string, tag as string) {
+    git.run(["git", "-C", $dir, "init", "-q", "-b", "main"]);
+    git.run(["git", "-C", $dir, "config", "user.email", "t@x"]);
+    git.run(["git", "-C", $dir, "config", "user.name", "t"]);
+    git.run(["git", "-C", $dir, "remote", "add", "origin", "https://example.invalid/thing.git"]);
+    git.run(["git", "-C", $dir, "add", "-A"]);
+    git.run(["git", "-C", $dir, "commit", "-q", "-m", "release"]);
+    git.run(["git", "-C", $dir, "tag", $tag]);
+}
+
+# A missing tag is found in the working tree, so it is reported without
+# contacting the registry: the unreachable one here would otherwise be the
+# error, and fixing the network would only lead to the tag error next.
+func testAMissingTagFailsBeforeTheRegistryIsContacted() {
+    def dir as string init fs.makeTempDir("", "jvc-tagfirst");
+    def m as manifest.Manifest init manifest.empty("@acme/thing", "0.2.0");
+    $m.pkg.urls["deck"] = "https://example.com/thing";
+    manifest.save($m, $dir + "/deck.toml");
+    fs.mkdirAll($dir + "/src");
+    fs.writeString(
+        $dir + "/src/thing.j",
+        strings.join(['export func hi() {', '    return 1;', '}'], "\n"));
+    tagRelease($dir, "0.1.0");
+    def out as Outcome init runPublish($dir, false, "http://127.0.0.1:1", "", "", "");
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "no tag here matches 0.2.0");
+    testing.assertFalse(strings.contains($out.message, "could not reach"));
     fs.removeAll($dir);
 }
 

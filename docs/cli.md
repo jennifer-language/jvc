@@ -134,6 +134,17 @@ gate](#the-quality-gate) (lint, every module's test overlay, the docblocks)
 unless `--no-verify` is given. Both run locally, before the repository sees
 anything.
 
+The order after that is local first, network last:
+
+1. the repository URL (from `origin`, `--remote` or `--repository`) and the
+   version's tag on `HEAD` (or `--tag`), read from this working tree, so a
+   missing or misplaced tag is reported offline;
+2. the registry: reachable, offering `publish`, and something able to
+   authorise the write;
+3. the forge: whether the remote carries the tag (`git ls-remote`), asked only
+   once the registry would accept the publish;
+4. the publish itself.
+
 What happens next depends on the repository. If it advertises `publish` and you
 are logged in, jvc **names a repository and a tag** and the registry reads the
 manifest from that commit itself:
