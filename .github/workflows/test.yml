@@ -45,14 +45,19 @@ jobs:
     env:
       # Bump together with `[engines]` and the pragmas.
       JENNIFER_RELEASE: 0.25.0
-      # `verify.j` shells out to an interpreter to lint and test the deck it is
-      # checking, and takes `jennifer` from PATH unless told otherwise. Neither
-      # job puts its interpreter on PATH, so without this the verify overlays
-      # fail with "executable file not found".
-      JVC_JENNIFER: ${{ runner.temp }}/jennifer
     steps:
       - name: Checkout jvc
         uses: actions/checkout@v7
+
+      - name: Point jvc at the interpreter
+        # `verify.j` shells out to an interpreter to lint and test the deck it
+        # is checking, and takes `jennifer` from PATH unless told otherwise.
+        # Neither job puts its interpreter on PATH, so without this the verify
+        # overlays fail with "executable file not found". Set here rather than
+        # in the job's `env:`, where the `runner` context does not exist: an
+        # expression reading `runner.temp` there made GitHub reject the whole
+        # file, and every run failed in 0 s with no job started.
+        run: echo "JVC_JENNIFER=$RUNNER_TEMP/jennifer" >> "$GITHUB_ENV"
 
       - name: Install the release interpreter
         if: matrix.interpreter == 'release'

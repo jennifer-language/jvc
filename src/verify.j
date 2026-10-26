@@ -70,7 +70,10 @@ def const NO_TESTS as list of string init ["no test methods found", "no test fun
  * What remains is what running a test needs: `PATH` (to find the interpreter
  * and `git`), the locale and terminal, `TZ`, `TMPDIR`, and the interpreter's
  * own `JENNIFER_VENDOR` (which the install-time check sets to the project's
- * `vendor/`) and `JENNIFER_SYSMODDIR`. `HOME` and the XDG base directories
+ * `vendor/`) and `JENNIFER_SYSMODDIR`, and `JVC_JENNIFER`, which names an
+ * interpreter, not a credential. A test that runs the gate itself (jvc's own
+ * suite does) otherwise fell back to `jennifer` from `PATH`, and failed where
+ * none is on it, as on a CI runner. `HOME` and the XDG base directories
  * are not passed through but pointed at a fresh empty directory (`runIsolated`).
  */
 export def const PASSED_ENV as list of string init [
@@ -82,7 +85,8 @@ export def const PASSED_ENV as list of string init [
     "TZ",
     "TMPDIR",
     "JENNIFER_VENDOR",
-    "JENNIFER_SYSMODDIR"
+    "JENNIFER_SYSMODDIR",
+    "JVC_JENNIFER"
 ];
 
 # The prefix of the throwaway home directory each isolated run gets.

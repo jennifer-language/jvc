@@ -505,6 +505,16 @@ func testIsolatedArgvPassesOnlyTheAllowlist() {
     }
 }
 
+# A gate run inside an isolated run (jvc's own suite under its own gate) has to
+# find the same interpreter, not fall back to whatever is on PATH.
+func testIsolatedArgvPassesTheGatesInterpreter() {
+    def previous as string init os.getEnv("JVC_JENNIFER");
+    os.setEnv("JVC_JENNIFER", "/opt/j/jennifer");
+    def argv as list of string init isolatedArgv(["x"], "/tmp/h");
+    os.setEnv("JVC_JENNIFER", $previous);
+    testing.assertTrue(lists.contains($argv, "JVC_JENNIFER=/opt/j/jennifer"));
+}
+
 # A wrong $JVC_JENNIFER is a failed check that says so, not a crash and not a
 # test failure: `env` reports the missing command and the gate passes that on.
 func testAMissingInterpreterIsAFindingNotACrash() {
