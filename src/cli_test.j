@@ -2127,6 +2127,131 @@ func testTheOwnersBodyFoldsTheScope() {
     testing.assertContains(registry.ownersBody("@MPLX", "42", true), '"scope":"@mplx"');
 }
 
+# --- trust ---------------------------------------------------------------------
+
+# trustRequest is a registration of @acme/routeros from acme/deck-routeros, with
+# the lookup pointed at a closed port so nothing leaves the machine.
+func trustRequest() {
+    return TrustRequest{
+        target: "@acme/routeros",
+        repository: "acme/deck-routeros",
+        repositoryId: "",
+        provider: "",
+        workflow: "publish.yml",
+        refs: "",
+        add: true,
+        forgeApi: "http://127.0.0.1:1"
+    };
+}
+
+func testTrustNeedsATargetAndARepository() {
+    def r as TrustRequest init trustRequest();
+    $r.target = " ";
+    testing.assertContains(runTrust("http://127.0.0.1:1", $r).message, "usage:");
+    $r = trustRequest();
+    $r.repository = "";
+    testing.assertContains(runTrust("http://127.0.0.1:1", $r).message, "usage:");
+}
+
+func testTrustRefusesATargetThatIsNotADeckOrAScope() {
+    def r as TrustRequest init trustRequest();
+    for (def bad in ["acme", "@acme/", "@-acme", "@acme/Ro uter", "@\u212Acme"]) {
+        $r.target = $bad;
+        testing.assertContains(runTrust("http://127.0.0.1:1", $r).message, "not a deck name");
+    }
+}
+
+func testTrustPreparesTheBindingLocally() {
+    def p as Prepared init trustPrepared(trustRequest());
+    testing.assertEqual($p.error, "");
+    testing.assertEqual($p.binding.target, "@acme/routeros");
+    testing.assertEqual($p.binding.provider, "github-actions");
+    testing.assertEqual($p.binding.repositoryId, "");
+    testing.assertEqual($p.binding.workflow, "acme/deck-routeros/.github/workflows/publish.yml");
+}
+
+func testTrustAcceptsAGithubUrlAndAScope() {
+    def r as TrustRequest init trustRequest();
+    $r.target = "@Acme";
+    $r.repository = "https://github.com/acme/deck-routeros.git";
+    def p as Prepared init trustPrepared($r);
+    testing.assertEqual($p.error, "");
+    testing.assertEqual($p.binding.target, "@acme");
+    testing.assertEqual($p.binding.repository, "acme/deck-routeros");
+}
+
+func testTrustRefusesABadRepositoryOrId() {
+    def r as TrustRequest init trustRequest();
+    $r.repository = "acme";
+    testing.assertContains(trustPrepared($r).error, "not a GitHub repository");
+    $r = trustRequest();
+    $r.repositoryId = "acme/deck-routeros";
+    testing.assertContains(trustPrepared($r).error, "not a numeric repository id");
+}
+
+# Only GitHub ids are looked up, so another provider has to be given the id.
+func testTrustElsewhereNeedsTheRepositoryId() {
+    def r as TrustRequest init trustRequest();
+    $r.provider = "gitlab-ci";
+    testing.assertContains(trustPrepared($r).error, "pass it with --repository-id");
+    $r.repositoryId = "4242";
+    testing.assertEqual(trustPrepared($r).error, "");
+    testing.assertEqual(trustPrepared($r).binding.workflow, "publish.yml");
+}
+
+func testARemovalNeedsOnlyTheTarget() {
+    def r as TrustRequest init trustRequest();
+    $r.repository = "";
+    $r.workflow = "";
+    $r.add = false;
+    testing.assertEqual(trustPrepared($r).error, "");
+}
+
+func testTrustNeedsAReachableRegistryBeforeTheForge() {
+    def out as Outcome init runTrust("http://127.0.0.1:1", trustRequest());
+    testing.assertFalse($out.ok);
+    testing.assertFalse(strings.contains($out.message, "GitHub"));
+}
+
+# The flag values are not read as positionals: were --workflow not a valued
+# flag, `publish.yml` would be taken as the repository.
+func testTrustFlagsTakeValues() {
+    def out as Outcome init dispatch([
+        "jvc",
+        "trust",
+        "@acme/routeros",
+        "--workflow",
+        "publish.yml",
+        "--provider",
+        "gitlab-ci",
+        "--registry",
+        "http://127.0.0.1:1"
+    ]);
+    testing.assertContains($out.message, "usage:");
+}
+
+func testATrustSummaryWarnsAboutAnyWorkflow() {
+    def b as registry.Binding init registry.Binding{
+        target: "@acme/routeros",
+        provider: "github-actions",
+        repositoryId: "123456789",
+        repository: "acme/deck-routeros",
+        workflow: "",
+        refs: "refs/tags/*",
+        pending: true
+    };
+    def text as string init trustSummary($b);
+    testing.assertContains($text, "trusted acme/deck-routeros (123456789) to publish");
+    testing.assertContains($text, "publish @acme/routeros (pending");
+    testing.assertContains($text, "pending");
+    testing.assertContains($text, "warning: any workflow");
+    $b.workflow = "acme/deck-routeros/.github/workflows/publish.yml";
+    $b.target = "@acme";
+    $text = trustSummary($b);
+    testing.assertContains($text, "every deck in the scope");
+    testing.assertFalse(strings.contains($text, "warning"));
+}
+
 func testAnUnknownCommandStillReachesTheFallthrough() {
     # dispatchScope returns a sentinel for commands that are not its own, so a
     # verb it does not handle must fall through to the usual "unknown command"

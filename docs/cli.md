@@ -43,6 +43,7 @@ so no `-I` flag is needed.
 | `unyank <deck> <version>`            | restore a withdrawn version                     |
 | `claim <scope>`                      | claim a scope for your account                  |
 | `owners <scope> <subject> [--remove]` | add or drop a co-owner of a scope              |
+| `trust <deck or @scope> <owner/name>` | let a CI workflow publish with no stored secret |
 | `login` / `logout`                   | obtain or discard a repository token (device flow) |
 | `version` / `help`                   | version, provenance, and interpreter / usage    |
 
@@ -101,8 +102,8 @@ order:
 A project's `[registries]` table (see below) comes first for anything about a
 deck in a mapped scope. `query`, `install`, `update` and `app install` /
 `app update` resolve each name through it, and so do the **writes**:
-`publish`, `yank`, `unyank`, `claim` and `owners` go to the registry the deck's
-scope maps to. A `--registry` on a write that contradicts the mapping is
+`publish`, `yank`, `unyank`, `claim`, `owners` and `trust` go to the registry
+the deck's scope maps to. A `--registry` on a write that contradicts the mapping is
 refused, since one of the two is a mistake. `login`, `logout`, `whoami` and
 `scopes` concern one registry, not one deck, so they take the default order
 alone.
@@ -333,8 +334,8 @@ never from a hard-coded path: the provider, the flow and the endpoints. So:
   minutes whatever lifetime the repository gave the code.
 
 **Credentials never travel over plain `http://` to another machine.** `login`
-and every write (`publish`, `yank`, `claim`, `owners`) refuse a registry whose
-base URL is `http://` unless its host is this machine (`localhost`,
+and every write (`publish`, `yank`, `claim`, `owners`, `trust`) refuse a
+registry whose base URL is `http://` unless its host is this machine (`localhost`,
 `127.0.0.0/8`, `[::1]`), because the device code, the tokens and `$JVC_TOKEN`
 would all cross the network readable. Set `JVC_INSECURE_HTTP=1` to allow one on
 purpose, a registry on a network you trust, say. `jvc registry` warns as soon as
@@ -366,7 +367,8 @@ $ jvc whoami
 ```
 
 Nothing renews on a timer, so an expired token stays expired until you run a
-command that carries it (`publish`, `yank`, `unyank`, `claim`, `owners`): that
+command that carries it (`publish`, `yank`, `unyank`, `claim`, `owners`,
+`trust`): that
 request is refused, jvc spends the refresh token, retries once, and succeeds
 without asking you to log in. **An expiry is usually nothing to act on**, and
 the token line says so.
@@ -425,8 +427,8 @@ browser, and nobody is reading this.
 
 Two mechanisms authorise a write without a login. Trusted publishing covers
 `jvc publish` only, because the identity token goes only to the publish
-endpoint the repository advertises; `yank`, `unyank`, `claim` and `owners` from
-CI need `$JVC_TOKEN`.
+endpoint the repository advertises; `yank`, `unyank`, `claim`, `owners` and
+`trust` from CI need `$JVC_TOKEN`.
 
 **Trusted publishing** is the one to reach for. The CI system mints a
 short-lived identity token for one job, naming the repository, workflow and ref
@@ -446,6 +448,10 @@ The repository checks that the run built the tag it publishes: the identity
 token's commit must be the one the tag points at, and a token issued for a tag
 must be for that tag. Publish from a tag-triggered workflow, and pass it the
 tag it ran on.
+
+The repository accepts a job only once the scope's owner has registered its
+workflow, with [`jvc trust`](#registering-a-trusted-publisher), once, from a
+machine that is logged in.
 
 Nothing has to be configured in jvc. It reads the audience the repository
 advertises, asks the CI system for a token carrying exactly that value, and
@@ -494,6 +500,52 @@ Neither CI mechanism is refreshed on a `401`: `$JVC_TOKEN` belongs to whoever
 set it, and a fresh identity token has to come from the CI system. The failure
 says so.
 
+### Registering a trusted publisher
+
+`jvc trust` tells the repository which CI workflow may publish a deck, or every
+deck in a scope. It is a write like any other, sent with your login, and the
+one step of trusted publishing that needs a browser:
+
+```
+$ jvc trust @acme/routeros acme/deck-routeros --workflow publish.yml
+trusted acme/deck-routeros (123456789) to publish @acme/routeros (pending: the deck has no versions yet)
+  provider: github-actions
+  refs:     refs/tags/*
+  workflow: acme/deck-routeros/.github/workflows/publish.yml
+```
+
+| Flag | Default | Means |
+| ---- | ------- | ----- |
+| `--workflow <file>` | any workflow | the workflow file allowed to publish |
+| `--refs <pattern>` | `refs/tags/*` | the refs allowed to publish: one ref, or a prefix ending in `*` |
+| `--provider <name>` | `github-actions` | `github-actions`, `gitlab-ci` or `gitea-actions` |
+| `--repository-id <n>` | looked up | the forge's numeric repository id |
+| `--remove` | | remove the binding for the deck or scope instead |
+
+- **The binding keys on the repository's numeric id, not its path.** A
+  repository can be renamed and its old path registered by somebody else, so a
+  binding on the path would follow the name. On GitHub jvc looks the id up from
+  the path (`GET /repos/<owner>/<name>`, unauthenticated); a private repository
+  answers that as missing, so pass `--repository-id` (`gh api repos/acme/deck
+  --jq .id` prints it). Other forges need `--repository-id`, and the path
+  argument is then only a label.
+- **Name the workflow.** Without `--workflow`, any workflow in the repository
+  may publish, a pull-request build included, and jvc warns. On GitHub a file
+  name or a `.github/workflows/` path gets the repository put in front, because
+  that is how the token names it; a path already naming a repository (a
+  reusable workflow) is kept as given.
+- **A target of `@scope` covers every deck under it**, including decks not
+  published yet; a deck's own binding wins over its scope's. A binding on a
+  deck with no versions is **pending** until its first publish, and the
+  repository may expire it if unused.
+- **Who may register one:** the owner of a user scope, or any active member of
+  an organisation scope. A co-owner may not, because a binding is a standing
+  write grant that would outlive the co-owner's removal. Registering again
+  replaces the binding, which is how a repository move is done.
+
+A repository that does not offer the verb (no `publishers` feature) is refused
+by name before anything is looked up at the forge.
+
 ## Scopes
 
 A deck name is scoped, and a scope belongs to somebody. `jvc scopes` lists what
@@ -519,7 +571,8 @@ like `@acme does not match your github username (mplx); ask an operator to
 grant it`. A scope marked `reserved` is held by the repository itself and needs
 an operator.
 
-`claim` and `owners` send your token, as do `publish`, `yank` and `unyank`;
+`claim`, `owners` and `trust` send your token, as do `publish`, `yank` and
+`unyank`;
 no read does. An expired token is refreshed as described under
 [Logging in](#logging-in).
 

@@ -144,7 +144,7 @@ _jvc() {
     # line each.
     local commands="init add remove list check conflict engine source
         query install update new publish pack app registry yank unyank whoami scopes
-        claim owners login logout version help"
+        claim owners trust login logout version help"
 
     # A flag that takes a value: complete the value, not a verb.
     case $prev in
@@ -163,7 +163,24 @@ _jvc() {
             COMPREPLY=($(compgen -d -- "$cur"))
             return
             ;;
-        --from|--version|--source|--url|--repository|--tag|--remote|--name)
+        --provider)
+            _jvc_offer "github-actions gitlab-ci gitea-actions" "$cur"
+            return
+            ;;
+        --workflow)
+            local f names=""
+            for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+                [[ -e $f ]] && names="$names ${f##*/}"
+            done
+            _jvc_offer "$names" "$cur"
+            return
+            ;;
+        --refs)
+            _jvc_offer "refs/tags/*" "$cur"
+            return
+            ;;
+        --from|--version|--source|--url|--repository|--tag|--remote|--name\
+            |--repository-id)
             return
             ;;
     esac
@@ -175,7 +192,8 @@ _jvc() {
         if (( skip )); then skip=0; continue; fi
         case $w in
             --registry|--from|--version|--source|--url|--out|--scope\
-                |--repository|--tag|--remote|--name)
+                |--repository|--tag|--remote|--name|--workflow|--refs\
+                |--provider|--repository-id)
                 skip=1; continue ;;
             -*) continue ;;
         esac
@@ -200,7 +218,7 @@ _jvc() {
         local flags=""
         case $verb in
             query|search|install|sync|update|upgrade|new|publish|yank|unyank\
-                |whoami|scopes|claim|owners|login|logout|app)
+                |whoami|scopes|claim|owners|trust|login|logout|app)
                 flags="--registry" ;;
         esac
         case $verb in
@@ -213,6 +231,7 @@ _jvc() {
             new) flags="$flags --from --version --source" ;;
             app) flags="$flags --scope --system --version --name" ;;
             owners) flags="$flags --remove" ;;
+            trust) flags="$flags --workflow --refs --provider --repository-id --remove" ;;
         esac
         _jvc_offer "$flags" "$cur"
         return
@@ -239,6 +258,12 @@ _jvc() {
                 _jvc_offer "$(_jvc_scopes)" "$cur"
             elif (( argc == 1 )); then
                 _jvc_offer "https://registry.jennifer-lang.dev http://localhost:8080" "$cur"
+            fi
+            ;;
+        trust)
+            # This deck, or a whole scope.
+            if (( argc == 0 )); then
+                _jvc_offer "$(_jvc_self) $({ _jvc_self; _jvc_decks; } | sed -n 's|^\(@[^/]*\)/.*|\1|p' | sort -u)" "$cur"
             fi
             ;;
         claim|owners)

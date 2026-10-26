@@ -65,7 +65,8 @@ browser, so it refuses where nothing can read one. A pipeline publishes through
 **trusted publishing**, where the CI system mints a short-lived identity token
 for the job and the pipeline holds no credential, or through **`$JVC_TOKEN`**,
 which also covers `yank`, `claim` and `owners`. jvc tries them in that order
-and names the one it used in the publish report. See [publishing from a
+and names the one it used in the publish report. Trusted publishing needs the
+workflow registered once, with `jvc trust`. See [publishing from a
 pipeline](cli.md#publishing-from-a-pipeline).
 
 ## Starting a deck from scratch

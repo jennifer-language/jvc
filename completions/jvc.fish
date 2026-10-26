@@ -219,6 +219,7 @@ complete -c jvc -n __jvc_needs_verb -a whoami -d 'show who your stored token say
 complete -c jvc -n __jvc_needs_verb -a scopes -d 'list the scopes a repository knows'
 complete -c jvc -n __jvc_needs_verb -a claim -d 'claim a scope for your account'
 complete -c jvc -n __jvc_needs_verb -a owners -d 'add or drop a co-owner'
+complete -c jvc -n __jvc_needs_verb -a trust -d 'let a CI workflow publish with no secret'
 complete -c jvc -n __jvc_needs_verb -a login -d 'log in to the repository (device flow)'
 complete -c jvc -n __jvc_needs_verb -a logout -d 'discard the token held for it'
 complete -c jvc -n __jvc_needs_verb -a version -d 'print the jvc version'
@@ -227,7 +228,7 @@ complete -c jvc -n __jvc_needs_verb -a help -d 'show the usage summary'
 # --registry, only on the verbs that talk to a repository: the manifest verbs,
 # pack, check and version never read it.
 set -l __jvc_remote_verbs query search install sync update upgrade new publish \
-    yank unyank whoami scopes claim owners login logout app
+    yank unyank whoami scopes claim owners trust login logout app
 complete -c jvc -n "__jvc_verb_is $__jvc_remote_verbs" \
     -l registry -r -f -a '(__jvc_registries)' -d 'repository URL'
 complete -c jvc -n __jvc_needs_verb -l help -d 'show the usage summary'
@@ -260,6 +261,16 @@ complete -c jvc -n '__jvc_verb_is app' -l scope -x -a '(__fish_complete_director
 complete -c jvc -n '__jvc_verb_is app' -l system -d 'install under /usr/local'
 complete -c jvc -n '__jvc_verb_is app' -l name -x -d 'the command to install it as'
 complete -c jvc -n '__jvc_verb_is owners' -l remove -d 'drop the co-owner instead of adding'
+complete -c jvc -n '__jvc_verb_is trust' -l remove -d 'remove the binding instead of registering'
+complete -c jvc -n '__jvc_verb_is trust' -l workflow -x \
+    -a '(for f in .github/workflows/*.yml .github/workflows/*.yaml; path basename $f; end)' \
+    -d 'the workflow file allowed to publish'
+complete -c jvc -n '__jvc_verb_is trust' -l refs -x -a 'refs/tags/*' \
+    -d 'the refs allowed to publish'
+complete -c jvc -n '__jvc_verb_is trust' -l provider -x \
+    -a 'github-actions gitlab-ci gitea-actions' -d 'the CI provider'
+complete -c jvc -n '__jvc_verb_is trust' -l repository-id -x \
+    -d "the forge's numeric repository id"
 
 # Arguments per verb: what the manifest requires is all remove, conflict and
 # source can act on.
@@ -275,6 +286,10 @@ complete -c jvc -n '__jvc_verb_is engine; and __jvc_at_arg 2' \
     -a 'jennifer jennifer-tiny' -d engine
 complete -c jvc -n '__jvc_verb_is yank unyank; and __jvc_at_arg 2' \
     -a '(__jvc_self)' -d 'this deck'
+complete -c jvc -n '__jvc_verb_is trust; and __jvc_at_arg 2' -a '(__jvc_self)' -d 'this deck'
+complete -c jvc -n '__jvc_verb_is trust; and __jvc_at_arg 2' \
+    -a '(begin; __jvc_self; __jvc_decks; end | string replace -r -f "^(@[^/]+)/.*" \'$1\' | sort -u)' \
+    -d 'every deck in the scope'
 
 # The app verb has subcommands of its own.
 complete -c jvc -n '__jvc_verb_is app; and __jvc_at_arg 2' -a install -d 'fetch an app and put its command on PATH'

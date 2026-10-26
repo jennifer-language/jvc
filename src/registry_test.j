@@ -252,20 +252,19 @@ func testDiscoveryCarriesTheAuthEndpoints() {
     testing.assertEqual($d.auth.refreshUrl, "/v1/auth/refresh");
 }
 
-# Registries from before 2026-10-22 serve the trusted-publishing fields as flat
-# keys with a dot in the name.
-func testTrustedPublishingIsReadFromFlatKeys() {
+# The flat keys registries served before 2026-10-22 are no longer read: the
+# live registry serves the nested object since 2026-10-27, as agreed with it.
+func testFlatTrustedPublishingKeysAreNotRead() {
     def d as Discovery init parseDiscovery('{"spec":"0.1.0",' +
         '"apis":[{"version":1,"basePath":"/v1"}],"features":["publish"],' +
         '"auth":{"provider":"github","flow":"device",' +
         '"trustedPublishing.audience":"registry.example",' +
         '"trustedPublishing.providers":"github-actions",' +
         '"trustedPublishing.url":"/v1/publish"}}');
-    testing.assertEqual($d.auth.trustedAudience, "registry.example");
-    testing.assertEqual($d.auth.trustedUrl, "/v1/publish");
-    testing.assertEqual(len($d.auth.trustedProviders), 1);
-    testing.assertEqual($d.auth.trustedProviders[0], "github-actions");
-    testing.assertTrue(offersTrustedPublishing($d.auth));
+    testing.assertEqual($d.auth.trustedAudience, "");
+    testing.assertEqual($d.auth.trustedUrl, "");
+    testing.assertEqual(len($d.auth.trustedProviders), 0);
+    testing.assertFalse(offersTrustedPublishing($d.auth));
 }
 
 # The specification and the current reference registry nest the same fields.
@@ -281,17 +280,17 @@ func testTrustedPublishingIsReadFromANestedObject() {
     testing.assertEqual($d.auth.trustedProviders[1], "gitlab-ci");
 }
 
-func testSeveralProvidersInOneFlatString() {
+# `providers` as one string, the old flat shape, is no providers.
+func testProvidersAsAStringAreNotRead() {
     def d as Discovery init parseDiscovery('{"spec":"0.1.0",' +
         '"apis":[{"version":1,"basePath":"/v1"}],"features":["publish"],' +
-        '"auth":{"trustedPublishing.providers":"github-actions, gitea-actions",' +
-        '"trustedPublishing.audience":"r","trustedPublishing.url":"/v1/publish"}}');
-    testing.assertEqual(len($d.auth.trustedProviders), 2);
-    testing.assertEqual($d.auth.trustedProviders[1], "gitea-actions");
+        '"auth":{"trustedPublishing":{"audience":"r","url":"/v1/publish",' +
+        '"providers":"github-actions, gitea-actions"}}}');
+    testing.assertEqual(len($d.auth.trustedProviders), 0);
+    testing.assertEqual($d.auth.trustedAudience, "r");
 }
 
-# An empty providers array is no providers, not a crash: the flat-key fallback
-# must not read the array as a string.
+# An empty providers array is no providers, not a crash.
 func testAnEmptyProvidersArrayIsRead() {
     def d as Discovery init parseDiscovery('{"spec":"0.1.0",' +
         '"apis":[{"version":1,"basePath":"/v1"}],"features":["publish"],' +
@@ -332,7 +331,7 @@ func testAnAuthBlockHoldingOnlyTrustedPublishing() {
 func testAnEndpointWithoutAnAudienceIsNotAnOffer() {
     def d as Discovery init parseDiscovery('{"spec":"0.1.0",' +
         '"apis":[{"version":1,"basePath":"/v1"}],"features":["publish"],' +
-        '"auth":{"trustedPublishing.url":"/v1/publish"}}');
+        '"auth":{"trustedPublishing":{"url":"/v1/publish"}}}');
     testing.assertFalse(offersTrustedPublishing($d.auth));
 }
 
@@ -1052,4 +1051,77 @@ func testScopeReplyOwnersMayBeNumbers() {
 func testPercentEncodeStillEncodes() {
     testing.assertEqual(percentEncode("@acme/routeros"), "%40acme%2Frouteros");
     testing.assertEqual(percentEncode("a b~ü"), "a%20b~%C3%BC");
+}
+
+# --- trusted publishers --------------------------------------------------------
+
+# binding builds a registration with the fields the server spec's example uses.
+func binding(target as string) {
+    return Binding{
+        target: $target,
+        provider: "github-actions",
+        repositoryId: "123456789",
+        repository: "acme/deck-routeros",
+        workflow: "acme/deck-routeros/.github/workflows/publish.yml",
+        refs: "refs/tags/*",
+        pending: false
+    };
+}
+
+func testAPublishersBodyCarriesEveryBindingField() {
+    def doc as json.Value init json.decode(publishersBody(binding(" @Acme/RouterOS "), true));
+    testing.assertEqual(json.asString($doc, "/target"), "@acme/routeros");
+    testing.assertEqual(json.asString($doc, "/provider"), "github-actions");
+    testing.assertEqual(json.asString($doc, "/repositoryId"), "123456789");
+    testing.assertEqual(json.asString($doc, "/repository"), "acme/deck-routeros");
+    testing.assertEqual(
+        json.asString($doc, "/workflow"),
+        "acme/deck-routeros/.github/workflows/publish.yml");
+    testing.assertEqual(json.asString($doc, "/refs"), "refs/tags/*");
+    testing.assertFalse(json.has($doc, "/action"));
+}
+
+# The registry keys a binding on its target, so a removal sends nothing else.
+func testARemovalSendsOnlyTheTarget() {
+    def doc as json.Value init json.decode(publishersBody(binding("@acme"), false));
+    testing.assertEqual(json.asString($doc, "/target"), "@acme");
+    testing.assertEqual(json.asString($doc, "/action"), "remove");
+    testing.assertFalse(json.has($doc, "/repositoryId"));
+}
+
+func testAPublishersBodyEscapesItsFields() {
+    def b as Binding init binding("@acme/routeros");
+    $b.workflow = 'a"b';
+    def doc as json.Value init json.decode(publishersBody($b, true));
+    testing.assertEqual(json.asString($doc, "/workflow"), 'a"b');
+}
+
+func testAPublishersReplyCarriesTheRecordedBinding() {
+    def r as PublisherReply init parsePublisherReply(
+        200,
+        '{"target":"@acme/routeros","provider":"github-actions",' +
+            '"repositoryId":123456789,"repository":"acme/deck-routeros",' +
+            '"workflow":"","refs":"refs/tags/*","pending":true}');
+    testing.assertEqual($r.error, "");
+    testing.assertEqual($r.binding.target, "@acme/routeros");
+    testing.assertEqual($r.binding.repositoryId, "123456789");
+    testing.assertEqual($r.binding.refs, "refs/tags/*");
+    testing.assertTrue($r.binding.pending);
+    testing.assertFalse($r.removed);
+}
+
+func testARemovalReplySaysSo() {
+    def r as PublisherReply init parsePublisherReply(200, '{"target":"@acme","removed":true}');
+    testing.assertTrue($r.removed);
+    testing.assertEqual($r.binding.target, "@acme");
+}
+
+# A co-owner may not register a binding, and the registry says so by name.
+func testAPublishersRefusalKeepsTheRegistrysWords() {
+    def r as PublisherReply init parsePublisherReply(
+        403,
+        '{"error":"only the owner of @acme may change its trusted publishers"}');
+    testing.assertContains($r.error, "only the owner of @acme");
+    testing.assertEqual($r.binding.target, "");
+    testing.assertContains(parsePublisherReply(200, "<html>").error, "200");
 }

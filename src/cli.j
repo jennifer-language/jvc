@@ -6,7 +6,8 @@
  * The jvc command-line logic: the manifest verbs (`init`, `add`, `remove`,
  * `list`, `check`, `conflict`, `engine`, `source`, `registry`), the resolution
  * verbs (`query`, `install`, `update`, `new`), the registry verbs (`publish`,
- * `pack`, `yank`, `scopes`, `claim`, `owners`, `login`, `whoami`) and `app`.
+ * `pack`, `yank`, `scopes`, `claim`, `owners`, `trust`, `login`, `whoami`) and
+ * `app`.
  * Each verb is a `run*` function returning an `Outcome` (an ok flag plus a
  * message to print), so the verbs are testable against a temp directory and
  * `bin/jvc` stays a three-line adapter over `main`. The repository verbs use
@@ -52,6 +53,7 @@ import "./constraint.j" as constraint;
 import "./verify.j" as verify;
 import "./pragma.j" as pragma;
 import "./safepath.j" as safepath;
+import "./forge.j" as forge;
 import "http.j" as http;
 import "semver.j" as semver;
 
@@ -99,7 +101,9 @@ func valuedFlag(token as string) {
         $token == "--from" or $token == "--version" or $token == "--source" or
         $token == "--url" or $token == "--out" or
         $token == "--repository" or $token == "--tag" or
-        $token == "--remote" or $token == "--scope" or $token == "--name";
+        $token == "--remote" or $token == "--scope" or $token == "--name" or
+        $token == "--workflow" or $token == "--refs" or $token == "--provider" or
+        $token == "--repository-id";
 }
 
 # verbAt returns the index of the verb: the first argument after the program
@@ -1011,8 +1015,8 @@ func unhandled() {
     return Outcome{ok: false, message: UNHANDLED};
 }
 
-# dispatchScope routes whoami, scopes, yank/unyank, claim and owners, split
-# out of `dispatch` to keep it inside the linter's statement limit.
+# dispatchScope routes whoami, scopes, yank/unyank, claim, owners and trust,
+# split out of `dispatch` to keep it inside the linter's statement limit.
 func dispatchScope(command as string, args as list of string, pos as list of string) {
     if ($command == "whoami") {
         return runWhoami(registryBase($args));
@@ -1023,10 +1027,13 @@ func dispatchScope(command as string, args as list of string, pos as list of str
     # Only the verbs whose target the mapping decides read the manifest, so a
     # malformed one cannot break the others.
     if (not ($command == "yank" or $command == "unyank" or $command == "claim" or
-        $command == "owners")) {
+        $command == "owners" or $command == "trust")) {
         return unhandled();
     }
     def regs as list of manifest.Dependency init manifestOrEmpty(".").registries;
+    if ($command == "trust") {
+        return dispatchTrust($args, $regs, $pos);
+    }
     if ($command == "yank" or $command == "unyank") {
         def target as Target init writeTarget($args, $regs, posAt($pos, 0));
         if (not ($target.error == "")) {
@@ -1049,6 +1056,34 @@ func dispatchScope(command as string, args as list of string, pos as list of str
             not hasFlag($args, "--remove"));
     }
     return unhandled();
+}
+
+# dispatchTrust routes `jvc trust` to the registry the target's scope maps to.
+# A bare `@scope` is mapped through a stand-in deck under it, as `claim` is.
+func dispatchTrust(
+    args as list of string,
+    regs as list of manifest.Dependency,
+    pos as list of string) {
+    def name as string init posAt($pos, 0);
+    if (not deckname.isScoped($name)) {
+        $name = scopeName($name);
+    }
+    def target as Target init writeTarget($args, $regs, $name);
+    if (not ($target.error == "")) {
+        return fail($target.error);
+    }
+    return runTrust(
+        $target.url,
+        TrustRequest{
+            target: posAt($pos, 0),
+            repository: posAt($pos, 1),
+            repositoryId: flagValue($args, "--repository-id"),
+            provider: flagValue($args, "--provider"),
+            workflow: flagValue($args, "--workflow"),
+            refs: flagValue($args, "--refs"),
+            add: not hasFlag($args, "--remove"),
+            forgeApi: forge.GITHUB_API
+        });
 }
 
 # scopeConnection agrees a version with the registry and checks it offers the
@@ -1185,6 +1220,212 @@ func emptyScopeReply() {
 func withScopeAuth(base as string, api as registry.Negotiated, req as Request) {
     def raw as Reply init withAuth($base, $api.auth, postJson, $req);
     def out as registry.ScopeReply init registry.parseScopeReply(
+        $raw.status,
+        registry.withResponder($raw.status, $raw.body, $raw.via));
+    if (not ($raw.refreshNote == "")) {
+        $out.error = authOutcome($base, $raw.refreshNote, $raw.refreshFatal);
+    }
+    return $out;
+}
+
+# --- trusted publishers -------------------------------------------------------
+
+/**
+ * What `jvc trust` was asked to do, as typed: nothing here is checked or
+ * looked up yet.
+ * @field target {string} the deck (`@scope/deck`) or the scope (`@scope`)
+ * @field repository {string} the repository path (`owner/name`, or a GitHub
+ *     URL for it), "" when only the id is given
+ * @field repositoryId {string} the forge's numeric id, "" to look it up
+ * @field provider {string} the CI provider, "" for `github-actions`
+ * @field workflow {string} the workflow allowed to publish, "" for any
+ * @field refs {string} the ref pattern, "" for the registry's default
+ * @field add {bool} true to register, false to remove
+ * @field forgeApi {string} the GitHub API base URL the id is looked up at
+ */
+export def struct TrustRequest {
+    target as string,
+    repository as string,
+    repositoryId as string,
+    provider as string,
+    workflow as string,
+    refs as string,
+    add as bool,
+    forgeApi as string
+};
+
+# TRUST_USAGE is the refusal for a call missing its arguments.
+def const TRUST_USAGE as string init "usage: jvc trust <@scope/deck|@scope> <owner/name> " +
+    "[--workflow FILE] [--refs PATTERN] [--provider P] [--repository-id N] [--remove]";
+
+/**
+ * Register or remove a trusted publisher (`POST /publishers`, server
+ * specification 8.9): a CI workflow allowed to publish a deck, or every deck in
+ * a scope, with no stored secret.
+ *
+ * Everything that can be checked locally is checked before the registry or the
+ * forge is contacted. The registry is asked first whether it offers the verb at
+ * all, so a registry without it is refused by name before a GitHub lookup is
+ * spent. For GitHub the numeric repository id is looked up from the path; the
+ * id, not the path, is what the binding keys on.
+ * @param base {string} the registry base URL
+ * @param req {TrustRequest} the request as typed
+ * @return {Outcome} the binding as recorded, or the refusal
+ */
+export func runTrust(base as string, req as TrustRequest) {
+    def prepared as Prepared init trustPrepared($req);
+    if (not ($prepared.error == "")) {
+        return fail($prepared.error);
+    }
+    def api as registry.Negotiated init scopeConnection($base, "publishers");
+    if (not $api.ok) {
+        return fail($api.error);
+    }
+    def client as registry.Client init registry.newClient($base);
+    def url as string init registry.apiRoot($client, $api.basePath) + "/publishers";
+    if (not canAuthorise($base, $api.auth, $url)) {
+        return fail(noAuthorityAdvice($base));
+    }
+    def b as registry.Binding init $prepared.binding;
+    if ($req.add and $b.repositoryId == "") {
+        def found as forge.Repository init forge.githubRepository($req.forgeApi, $b.repository);
+        if (not ($found.error == "")) {
+            return fail($found.error);
+        }
+        $b.repositoryId = $found.id;
+        $b.repository = $found.path;
+        # Re-formed from the forge's own spelling of the path, since the
+        # registry compares the claim exactly.
+        $b.workflow = forge.workflowClaim($b.provider, $found.path, $req.workflow).workflow;
+    }
+    def reply as registry.PublisherReply init withPublisherAuth(
+        $base,
+        $api,
+        Request{url: $url, body: registry.publishersBody($b, $req.add)});
+    if ($reply.status == 401) {
+        return fail(authRefusal($base, $reply.error));
+    }
+    if (not ($reply.error == "")) {
+        return fail($reply.error);
+    }
+    if (not $req.add) {
+        return ok("removed the trusted publisher for " + $b.target);
+    }
+    return ok(trustSummary($reply.binding));
+}
+
+# Prepared is a trust request checked locally: the binding to send, with the
+# repository id still "" when it has to be looked up, or the refusal.
+def struct Prepared {
+    binding as registry.Binding,
+    error as string
+};
+
+# trustPrepared checks a trust request without contacting anything: the target,
+# the repository, and the workflow's form.
+func trustPrepared(req as TrustRequest) {
+    def b as registry.Binding init registry.Binding{
+        target: deckname.fold(strings.trim($req.target)),
+        provider: strings.trim($req.provider),
+        repositoryId: strings.trim($req.repositoryId),
+        repository: strings.trim($req.repository),
+        workflow: "",
+        refs: strings.trim($req.refs),
+        pending: false
+    };
+    if ($b.target == "") {
+        return Prepared{binding: $b, error: TRUST_USAGE};
+    }
+    if (not isTrustTarget(strings.trim($req.target))) {
+        return Prepared{
+            binding: $b,
+            error: $req.target + ": not a deck name (@scope/deck) or a scope (@scope)"
+        };
+    }
+    if (not $req.add) {
+        return Prepared{binding: $b, error: ""};
+    }
+    if ($b.provider == "") {
+        $b.provider = forge.GITHUB_ACTIONS;
+    }
+    if (not ($b.repositoryId == "") and not forge.isRepositoryId($b.repositoryId)) {
+        return Prepared{
+            binding: $b,
+            error: "--repository-id " + $b.repositoryId + ": not a numeric repository id"
+        };
+    }
+    def refusal as string init repositoryRefusal($b);
+    if (not ($refusal == "")) {
+        return Prepared{binding: $b, error: $refusal};
+    }
+    if ($b.provider == forge.GITHUB_ACTIONS and not ($b.repository == "")) {
+        $b.repository = forge.repositoryPath($b.repository);
+    }
+    def claim as forge.Workflow init forge.workflowClaim($b.provider, $b.repository, $req.workflow);
+    $b.workflow = $claim.workflow;
+    return Prepared{binding: $b, error: $claim.error};
+}
+
+# repositoryRefusal says what is wrong with a binding's repository, or "". The
+# id can be looked up only on GitHub, so elsewhere it has to be given.
+func repositoryRefusal(b as registry.Binding) {
+    if ($b.repository == "" and $b.repositoryId == "") {
+        return TRUST_USAGE;
+    }
+    if (not ($b.provider == forge.GITHUB_ACTIONS)) {
+        if ($b.repositoryId == "") {
+            return "a " + $b.provider + " repository's numeric id cannot be looked up: " +
+                "pass it with --repository-id";
+        }
+        return "";
+    }
+    if (not ($b.repository == "") and forge.repositoryPath($b.repository) == "") {
+        return $b.repository + ": not a GitHub repository (owner/name)";
+    }
+    return "";
+}
+
+# isTrustTarget reports whether a name as typed is a scoped deck name or a bare
+# `@scope`, the two things a binding can be registered on. It is checked before
+# folding, as `deckname.isValid` requires, so a lookalike outside ASCII is
+# refused rather than folded into an ASCII scope.
+func isTrustTarget(name as string) {
+    if (deckname.isScoped($name)) {
+        return deckname.isValid($name);
+    }
+    return strings.startsWith($name, "@") and deckname.isValid($name + "/x");
+}
+
+# trustSummary renders a recorded binding, warning when it lets any workflow in
+# the repository publish: a pull-request build runs with the same repository
+# identity as the release job.
+func trustSummary(b as registry.Binding) {
+    def label as string init $b.repository;
+    if ($label == "") {
+        $label = "repository " + $b.repositoryId;
+    } else {
+        $label = $label + " (" + $b.repositoryId + ")";
+    }
+    def out as string init "trusted " + $label + " to publish " + $b.target;
+    if (not strings.contains($b.target, "/")) {
+        $out = $out + " (every deck in the scope)";
+    } elseif ($b.pending) {
+        $out = $out + " (pending: the deck has no versions yet)";
+    }
+    $out = $out + "\n  provider: " + $b.provider + "\n  refs:     " + $b.refs;
+    if ($b.workflow == "") {
+        return $out + "\n  workflow: any\n" +
+            "warning: any workflow in the repository may publish, a pull-request build " +
+            "included; pass --workflow to name the release job";
+    }
+    return $out + "\n  workflow: " + $b.workflow;
+}
+
+# withPublisherAuth runs a `/publishers` write through the refresh-on-401 retry,
+# as withScopeAuth does for the scope endpoints.
+func withPublisherAuth(base as string, api as registry.Negotiated, req as Request) {
+    def raw as Reply init withAuth($base, $api.auth, postJson, $req);
+    def out as registry.PublisherReply init registry.parsePublisherReply(
         $raw.status,
         registry.withResponder($raw.status, $raw.body, $raw.via));
     if (not ($raw.refreshNote == "")) {
@@ -5623,6 +5864,9 @@ func helpText() {
         "  scopes                      list the scopes a repository knows\n" +
         "  claim <scope>               claim a scope for your account\n" +
         "  owners <scope> <subject>    add a co-owner (--remove to drop one)\n" +
+        "  trust <deck|@scope> <owner/name> --workflow FILE\n" +
+        "                              let a CI workflow publish with no secret\n" +
+        "      --refs P  --provider P  --repository-id N  --remove\n" +
         "  login                       log in to the repository (device flow)\n" +
         "  logout                      discard the token held for it\n" +
         "  version                     print the jvc version\n" +

@@ -22,8 +22,8 @@ pins the **commit**, so a deck need not be published to a registry.
 registry, with no fallback search, which is the defence against dependency
 confusion. Every transitive dependency goes through the consuming project's
 mapping, the lock records each deck's registry, and `install` refuses a lock
-the mapping has since moved. Writes (`publish`, `yank`, `claim`, `owners`)
-follow the same mapping.
+the mapping has since moved. Writes (`publish`, `yank`, `claim`, `owners`,
+`trust`) follow the same mapping.
 
 **Reproducibility.** `jvc install` installs exactly what `camcorder.lock` pins,
 with no resolution and no metadata lookup, so `git clone` plus `jvc install`
@@ -49,7 +49,8 @@ credential) or `$JVC_TOKEN`. `jvc login` refuses where no terminal can read a
 device code.
 
 **Scope ownership.** `jvc scopes` lists who owns what on a registry, `jvc claim`
-claims a scope, and `jvc owners` lets the owner add or remove co-owners.
+claims a scope, `jvc owners` lets the owner add or remove co-owners, and
+`jvc trust` registers the CI workflow allowed to publish a deck or a scope.
 
 **Capabilities.** A deck declares the host capabilities its code needs (`net` /
 `exec` / `sql`); `jvc publish` derives the true set from the

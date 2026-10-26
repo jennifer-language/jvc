@@ -628,20 +628,16 @@ func parseAuth(doc as json.Value) {
     };
 }
 
-# trustedField reads one trusted-publishing field, in either of the two shapes
-# a registry may serve it.
+# trustedField reads one field of the discovery document's nested
+# `auth.trustedPublishing` object, "" when it is absent or not a string.
 #
-# The specification and the reference registry use a nested
-# `auth.trustedPublishing` object. Registries from before 2026-10-22 served flat
-# keys with a dot in the name (`"trustedPublishing.url"`), and those are still
-# read: missing them would report "no trusted publishing" for a registry that
-# offers it. A node that is not a string (`providers` as an array) reads as "".
+# Registries from before 2026-10-22 served flat keys with a dot in the name
+# (`"trustedPublishing.url"`), and jvc read those too until the live registry
+# was redeployed with the nested object (2026-10-27), as agreed with the
+# registry. A registry still serving them now reads as offering no trusted
+# publishing, which is what the specification makes of it.
 func trustedField(doc as json.Value, name as string) {
-    def nested as string init stringAt($doc, "/auth/trustedPublishing/" + $name);
-    if (not ($nested == "")) {
-        return $nested;
-    }
-    return stringAt($doc, "/auth/trustedPublishing." + $name);
+    return stringAt($doc, "/auth/trustedPublishing/" + $name);
 }
 
 # stringAt reads a string field at pointer, or "" when it is absent or holds
@@ -653,29 +649,17 @@ func stringAt(doc as json.Value, pointer as string) {
     return json.asString($doc, $pointer);
 }
 
-# trustedProviders reads the accepted issuers: an array, or, from a registry
-# older than 2026-10-22, one comma-separated string.
+# trustedProviders reads the accepted issuers, an array of strings. Anything
+# else (a comma-separated string, as registries before 2026-10-22 served it, or
+# an array holding a non-string) reads as no providers rather than failing
+# discovery.
 func trustedProviders(doc as json.Value) {
-    def out as list of string init [];
     try {
-        $out = readStringList($doc, "/auth/trustedPublishing/providers");
+        return readStringList($doc, "/auth/trustedPublishing/providers");
     } catch (err) {
-        $out = [];
+        def none as list of string init [];
+        return $none;
     }
-    if (len($out) > 0) {
-        return $out;
-    }
-    def flat as string init trustedField($doc, "providers");
-    if ($flat == "") {
-        return $out;
-    }
-    for (def part in strings.split($flat, ",")) {
-        def trimmed as string init strings.trim($part);
-        if (not ($trimmed == "")) {
-            $out[] = $trimmed;
-        }
-    }
-    return $out;
 }
 
 /**
@@ -1623,6 +1607,128 @@ export func setOwner(
         $body,
         bearer($token));
     return parseScopeReply($resp.status, $resp.body);
+}
+
+# --- trusted publishers ------------------------------------------------------
+
+/**
+ * A trusted publisher (server specification 8.9): the CI workload allowed to
+ * publish a deck, or every deck in a scope, with no stored credential.
+ * @field target {string} the deck (`@scope/deck`) or the scope (`@scope`)
+ * @field provider {string} the CI issuer, e.g. `github-actions`
+ * @field repositoryId {string} the forge's immutable numeric repository id
+ * @field repository {string} the repository path, a display label
+ * @field workflow {string} the workflow claim allowed to publish ("" for any)
+ * @field refs {string} the ref pattern allowed to publish ("" for the
+ *     registry's default, every tag)
+ * @field pending {bool} true when the deck has no versions yet (reply only)
+ */
+export def struct Binding {
+    target as string,
+    provider as string,
+    repositoryId as string,
+    repository as string,
+    workflow as string,
+    refs as string,
+    pending as bool
+};
+
+/**
+ * The JSON body of a `POST /publishers` request. A removal carries only the
+ * target, since the registry keys a binding on it.
+ * @param b {Binding} the binding to register, or whose target to clear
+ * @param add {bool} true to register, false to remove
+ * @return {string} the request body
+ */
+export func publishersBody(b as Binding, add as bool) {
+    def target as string init deckname.fold(strings.trim($b.target));
+    if (not $add) {
+        return jsonObject(["target", $target, "action", "remove"]);
+    }
+    return jsonObject([
+        "target",
+        $target,
+        "provider",
+        $b.provider,
+        "repositoryId",
+        $b.repositoryId,
+        "repository",
+        $b.repository,
+        "workflow",
+        $b.workflow,
+        "refs",
+        $b.refs
+    ]);
+}
+
+/**
+ * The outcome of a `POST /publishers` request.
+ * @field status {int} the HTTP status
+ * @field binding {Binding} the binding as the registry recorded it (on a
+ *     registration)
+ * @field removed {bool} true when a removal succeeded
+ * @field error {string} the registry's own explanation ("" on success)
+ */
+export def struct PublisherReply {
+    status as int,
+    binding as Binding,
+    removed as bool,
+    error as string
+};
+
+/**
+ * Parse a reply from `/publishers`, branching on the status. The registry
+ * refuses a path in place of an id, an unknown provider and a malformed ref
+ * pattern by name, so a refusal is passed through rather than reduced to a
+ * code.
+ * @param status {int} the HTTP status
+ * @param body {string} the response body
+ * @return {PublisherReply} the parsed outcome
+ */
+export func parsePublisherReply(status as int, body as string) {
+    def none as Binding init Binding{
+        target: "",
+        provider: "",
+        repositoryId: "",
+        repository: "",
+        workflow: "",
+        refs: "",
+        pending: false
+    };
+    if ($status >= 400) {
+        return PublisherReply{
+            status: $status,
+            binding: $none,
+            removed: false,
+            error: failureLine($status, "request", errorDetail($body))
+        };
+    }
+    if (not isJson($body)) {
+        return PublisherReply{
+            status: $status,
+            binding: $none,
+            removed: false,
+            error: unreadableReply($status, $body)
+        };
+    }
+    def doc as json.Value init json.decode($body);
+    # The repository id is a number on some forges' own APIs, so every field is
+    # read as text whatever its type.
+    def b as Binding init Binding{
+        target: scalarText($doc, "/target"),
+        provider: scalarText($doc, "/provider"),
+        repositoryId: scalarText($doc, "/repositoryId"),
+        repository: scalarText($doc, "/repository"),
+        workflow: scalarText($doc, "/workflow"),
+        refs: scalarText($doc, "/refs"),
+        pending: scalarText($doc, "/pending") == "true"
+    };
+    return PublisherReply{
+        status: $status,
+        binding: $b,
+        removed: scalarText($doc, "/removed") == "true",
+        error: ""
+    };
 }
 
 # --- reading a token's own claims --------------------------------------------
