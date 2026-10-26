@@ -284,13 +284,17 @@ refuses, instead of substituting, when the mapping has since moved:
 
 ```
 $ jvc install
-the lockfile and this project's [registries] mapping disagree:
+the lockfile and the registry each deck now resolves at disagree:
   @public/tool 1.0.0 is locked to https://decks.jennifer-lang.org but this
-  project now maps it to https://registry.internal.example
+  project's [registries] now maps it to https://registry.internal.example
 
 Installing either way would change what the lockfile means.
-Run `jvc update` to re-resolve against the mapping, or put the mapping back.
+Run `jvc update` to re-resolve, or put the mapping (or --registry / $JVC_REGISTRY) back.
 ```
+
+A deck whose scope `[registries]` does not map follows `--registry`,
+`$JVC_REGISTRY` or the default, so changing those moves it too; the report then
+says so instead of blaming the mapping.
 
 `jvc registry` warns at the moment you make such a change, so the surprise lands
 where the edit was made rather than on the next install. A lockfile written
@@ -650,7 +654,10 @@ changes:
 `jvc update <deck> [<deck>...]` advances only the named decks: every other locked
 deck is pinned to the version it already has, so one dependency can be bumped
 without disturbing the graph around it. If those pins leave no solution, only
-the direct requirements stay pinned, and the decks between them may move.
+the direct requirements stay pinned, and the decks between them may move. A
+requirement whose locked version your manifest no longer allows (you narrowed
+`^1.0` to `^2.0`) is not pinned: it resolves against the manifest, so the new
+lock is not stale at the next `install`.
 Naming a deck that is neither a requirement nor locked is an error. `--dev`
 includes the dev-requirements in either verb.
 

@@ -1143,12 +1143,13 @@ export func mapFor(mapper as Mapper, name as string) {
  * @return {string} the report
  */
 export func registryConflictReport(conflicts as list of string) {
-    def out as string init "the lockfile and this project's [registries] mapping disagree:";
+    def out as string init "the lockfile and the registry each deck now resolves at disagree:";
     for (def c in $conflicts) {
         $out = $out + "\n  " + $c;
     }
     return $out + "\n\nInstalling either way would change what the lockfile means." +
-        "\nRun `jvc update` to re-resolve against the mapping, or put the mapping back.";
+        "\nRun `jvc update` to re-resolve, or put the mapping (or --registry / " +
+        "$JVC_REGISTRY) back.";
 }
 
 # noRegistries is the empty mapping, for a command running before there is a
@@ -1197,10 +1198,17 @@ export func lockRegistryConflicts(
         def now as string init scopemap.registryFor($registries, $c.name, $fallback);
         # Compared as registries, not strings, so a trailing slash or a host's
         # case is not a disagreement.
-        if (not scopemap.sameRegistry($now, $c.registry)) {
-            $out[] = $c.name + " " + $c.version + " is locked to " + $c.registry +
-                " but this project now maps it to " + $now;
+        if (scopemap.sameRegistry($now, $c.registry)) {
+            continue;
         }
+        def why as string init "this project's [registries] now maps it to " + $now;
+        # An unmapped scope resolves at the fallback, so the mapping did not
+        # move: `--registry`, `$JVC_REGISTRY` or the default did.
+        if (scopemap.registryFor($registries, $c.name, "") == "") {
+            $why = "it now resolves at " + $now + " (its scope is not in [registries], " +
+                "so --registry, $JVC_REGISTRY or the default decides)";
+        }
+        $out[] = $c.name + " " + $c.version + " is locked to " + $c.registry + " but " + $why;
     }
     return $out;
 }
@@ -2655,7 +2663,15 @@ export func writeLock(dir as string, resolved as list of catalog.Candidate) {
     if (not ($linked == "")) {
         throw Error{kind: "lock", message: $linked, file: "", line: 0, col: 0};
     }
-    fs.writeString($path, json.encodePretty($doc));
+    # Written beside the lock and renamed over it, which replaces a file in one
+    # step: writing in place left a truncated lock after an interrupted write,
+    # and every later command failed to read it. makeTempFile is owner-only;
+    # the lock is a committed project file, so it gets the usual 0o644.
+    def tmp as string init fs.makeTempFile($dir, ".camcorder.lock");
+    errdefer fs.remove($tmp);
+    fs.chmod($tmp, 0o644);
+    fs.writeString($tmp, json.encodePretty($doc));
+    fs.rename($tmp, $path);
     return $path;
 }
 
@@ -3436,7 +3452,8 @@ func dropEmptyScope(dir as string, sub as string) {
  * code that still used it kept working on this machine and failed on a fresh
  * clone, and its command stayed on the project's bin path. Nothing is removed
  * through a symbolic link (`projectLinkProblem`): such a deck is kept and
- * reported.
+ * reported. Never throws: a removal that fails is a report line too, since the
+ * new set is already vendored and locked by the time this runs.
  * @param dir {string} the project directory
  * @param binDir {string} the project's bin directory, relative to dir
  * @param before {list of catalog.Candidate} what the previous lock recorded
@@ -3464,17 +3481,21 @@ export func pruneVendor(
             $out[] = "kept " + $old.name + ": " + $linked;
             continue;
         }
-        if (fs.exists($gone)) {
-            fs.removeAll($gone);
-            dropEmptyScope($dir, $sub);
-            $out[] = "removed " + $old.name + " " + $old.version + " (no longer required)";
-        }
-        if (not (linkRefusal($dir, $binDir) == "")) {
-            continue;
-        }
-        for (def cmd in commandsInto($dir, $binDir, $sub)) {
-            fs.remove(path.join($dir, $binDir, $cmd));
-            $out[] = "removed command " + $binDir + "/" + $cmd;
+        try {
+            if (fs.exists($gone)) {
+                fs.removeAll($gone);
+                dropEmptyScope($dir, $sub);
+                $out[] = "removed " + $old.name + " " + $old.version + " (no longer required)";
+            }
+            if (not (linkRefusal($dir, $binDir) == "")) {
+                continue;
+            }
+            for (def cmd in commandsInto($dir, $binDir, $sub)) {
+                fs.remove(path.join($dir, $binDir, $cmd));
+                $out[] = "removed command " + $binDir + "/" + $cmd;
+            }
+        } catch (err) {
+            $out[] = "could not remove " + $old.name + " " + $old.version + ": " + $err.message;
         }
     }
     return $out;
@@ -3496,7 +3517,7 @@ func commandsInto(dir as string, binDir as string, sub as string) {
         try {
             $target = fs.readlink($p);
         } catch (err) {
-            if (app.isShim($p) and strings.contains(fs.readString($p), $marker)) {
+            if (isShimInto($p, $marker)) {
                 $out[] = $cmd;
             }
             continue;
@@ -3506,6 +3527,16 @@ func commandsInto(dir as string, binDir as string, sub as string) {
         }
     }
     return $out;
+}
+
+# isShimInto reports whether a bin entry is a shim jvc wrote that names the
+# marker path. An entry that cannot be read (a directory, no permission) is not.
+func isShimInto(p as string, marker as string) {
+    try {
+        return app.isShim($p) and strings.contains(fs.readString($p), $marker);
+    } catch (err) {
+        return false;
+    }
 }
 
 /**
@@ -3848,10 +3879,14 @@ func applySet(
     for (def line in writeProjectBins($dir, binDirOf($m), $resolved, $bins)) {
         $report = $report + "\n        " + $line;
     }
-    for (def line in pruneVendor($dir, binDirOf($m), readLock($dir).decks, $resolved)) {
+    # The lock is written before anything is pruned: `vendor/` now holds the
+    # new set, and a prune that failed half way used to leave it there under
+    # the old lock. Pruning is tidying, so it reports rather than throws.
+    def before as list of catalog.Candidate init readLock($dir).decks;
+    def lock as string init writeLock($dir, $resolved);
+    for (def line in pruneVendor($dir, binDirOf($m), $before, $resolved)) {
         $report = $report + "\n  " + $line;
     }
-    def lock as string init writeLock($dir, $resolved);
     def warned as string init "";
     for (def line in capabilityWarnings($resolved, meta.CAPABILITIES)) {
         $warned = $warned + "\n  warning: " + $line;
@@ -4125,6 +4160,11 @@ func resolveTargeted(
 
 # pinsFor returns the root set with locked decks pinned at their versions:
 # every deck not named, or, with `directOnly`, only the root requirements.
+#
+# A root whose locked version the manifest no longer allows keeps the
+# manifest's constraint instead. Pinning it would overwrite the requirement
+# with `=<locked>`, so the update would succeed, write that version into a
+# fresh lock, and the very next `install` would call the lock stale.
 func pinsFor(
     roots as map of string to string,
     current as list of catalog.Candidate,
@@ -4136,9 +4176,13 @@ func pinsFor(
     }
     for (def res in $current) {
         def name as string init deckname.fold($res.name);
-        if (not listHas($named, $name) and (not $directOnly or maps.has($roots, $name))) {
-            $out[$name] = "=" + $res.version;
+        if (listHas($named, $name) or ($directOnly and not maps.has($roots, $name))) {
+            continue;
         }
+        if (maps.has($roots, $name) and not constraint.satisfies($res.version, $roots[$name])) {
+            continue;
+        }
+        $out[$name] = "=" + $res.version;
     }
     return $out;
 }

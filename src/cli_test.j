@@ -3207,3 +3207,68 @@ func testAppWritesRefuseALinkedProjectStoreOrBin() {
     fs.removeAll($dir);
     fs.removeAll($dir + "_outside");
 }
+
+# --- the lockfile and targeted updates --------------------------------------
+
+# A root whose locked version the manifest no longer allows is not pinned: the
+# pin would replace the requirement, and the lock written from it would be
+# stale at the next install.
+func testATargetedUpdateKeepsANarrowedRootConstraint() {
+    def current as list of catalog.Candidate init [
+        catalog.candidate("@acme/alpha", "1.2.0"),
+        catalog.candidate("@acme/other", "1.0.0"),
+        catalog.candidate("@acme/beta", "1.4.0")
+    ];
+    def roots as map of string to string init {"@acme/alpha": "^1.0.0", "@acme/other": "^2.0.0"};
+    def all as map of string to string init pinsFor($roots, $current, ["@acme/alpha"], false);
+    testing.assertEqual($all["@acme/other"], "^2.0.0");
+    testing.assertEqual($all["@acme/beta"], "=1.4.0");
+    def direct as map of string to string init pinsFor($roots, $current, ["@acme/alpha"], true);
+    testing.assertEqual($direct["@acme/other"], "^2.0.0");
+}
+
+# The fallback moving is not the mapping moving, and the report says which.
+func testAConflictFromTheFallbackDoesNotBlameTheMapping() {
+    def locked as list of catalog.Candidate init [
+        lockedAt("@acme/tool", "1.0.0", "http://public.example"),
+        lockedAt("@corp/lib", "1.0.0", "http://public.example")
+    ];
+    def conflicts as list of string init lockRegistryConflicts(
+        $locked,
+        mapped({"@corp/*": "http://internal.example"}),
+        "http://other.example");
+    testing.assertEqual(len($conflicts), 2);
+    testing.assertContains($conflicts[0], "@acme/tool");
+    testing.assertContains($conflicts[0], "its scope is not in [registries]");
+    testing.assertContains($conflicts[0], "$JVC_REGISTRY");
+    testing.assertContains($conflicts[1], "@corp/lib");
+    testing.assertContains($conflicts[1], "[registries] now maps it to http://internal.example");
+}
+
+# The lock is replaced in one step: no temp file is left, an existing lock is
+# overwritten, and the mode is a committed file's, not makeTempFile's 0o600.
+func testWriteLockReplacesTheLockInOneStep() {
+    def dir as string init freshDir("lockswap");
+    fs.writeString($dir + "/camcorder.lock", "old and broken");
+    writeLock($dir, [catalog.candidate("@acme/alpha", "1.2.0")]);
+    testing.assertEqual(len(fs.list($dir)), 1);
+    testing.assertEqual(fs.stat($dir + "/camcorder.lock").mode & 0o777, 0o644);
+    def back as Locked init readLock($dir);
+    testing.assertTrue($back.present);
+    testing.assertEqual($back.decks[0].version, "1.2.0");
+    fs.removeAll($dir);
+}
+
+# A removal that fails is reported, not thrown: by the time pruning runs, the
+# new set is vendored and locked.
+func testAFailedPruneIsReportedNotThrown() {
+    def dir as string init freshDir("prunefail");
+    installArchive($dir, "@jennifer/routeros", deckArchive(), "", "tar.gz");
+    fs.chmod($dir + "/vendor/jennifer", 0o555);
+    def old as catalog.Candidate init catalog.candidate("@jennifer/routeros", "0.1.0");
+    def lines as list of string init pruneVendor($dir, "bin", [$old], []);
+    fs.chmod($dir + "/vendor/jennifer", 0o755);
+    testing.assertEqual(len($lines), 1);
+    testing.assertContains($lines[0], "could not remove @jennifer/routeros 0.1.0");
+    fs.removeAll($dir);
+}
