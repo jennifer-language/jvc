@@ -77,7 +77,9 @@ reference](cli.md#git-sources).
 
 **The publish quality gate.** `jvc publish` refuses a deck whose `jennifer
 lint` is not clean, whose modules lack a passing overlay each, or whose
-docblocks have drifted from the code. `--no-verify` bypasses it and says so.
+docblocks have drifted from the code. The overlays run from a copy of `src/`,
+as a consumer's `install --runtests` runs them. `--no-verify` bypasses it and
+says so.
 
 ## Not implemented, and known
 

@@ -813,6 +813,10 @@ installed 1 deck(s):
         tests: 1 overlay(s) passed
 ```
 
+Each overlay runs in the release's extracted `src/` tree, which is also its
+working directory, so a test that writes a relative path writes there and not
+into your project. The publish gate runs them the same way.
+
 The overlays run in a scrubbed environment: the child starts from an empty
 environment (`env -i`) plus a short allowlist of what a test needs to run, with
 `HOME` pointed at a fresh temporary directory, so registry and CI secrets
@@ -1317,6 +1321,16 @@ the same way.
 An overlay "defines no test" when the runner refuses it as an empty suite: its
 message begins a line of a failed run. A test that merely prints those words
 is a passing test.
+
+**The overlays run against what ships, not your checkout.** The gate copies
+`src/` into a temporary directory and runs each overlay there, with that
+directory as the working directory and the deck's own `vendor/` as
+`$JENNIFER_VENDOR`. That is the layout a consumer's `jvc install --runtests`
+has, so a test that reads a fixture from a top-level `testdata/` fails here
+rather than on every consumer's machine. Keep fixtures under `src/` (they ship
+with the release) and read them relative to the working directory, or build
+them inside the test. Lint and the docblock check read the working tree, since
+they run no code.
 
 Every check runs even when an earlier one fails, so one attempt shows everything
 to fix:

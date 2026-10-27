@@ -774,7 +774,10 @@ registry's contents can be relied on:
   exit zero. Advisory `info` findings do not block; a warning or error does.
 - **Test overlays.** Every module under `src/` (§13.1: not an included file)
   **MUST** have a co-located `MODULE_test.j`, and every overlay **MUST** pass. A
-  module with no overlay is a failure, not an omission.
+  module with no overlay is a failure, not an omission. A tool **SHOULD** run
+  the overlays from a copy of the release's `src/` tree, with that copy as the
+  working directory, since that is all an installed deck has: a test passing
+  only in the author's checkout passes nowhere else.
 - **Docblocks.** No `warning` or `error` diagnostic from the `docblock` module,
   in any `src/` file, included files too.
 - **Capabilities.** The manifest's `capabilities` **MUST** cover what `src/`

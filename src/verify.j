@@ -19,6 +19,14 @@
  *     Overlays run with a cut-down environment and an empty home directory
  *     (`runIsolated`), here and in the install-time `runOverlays`.
  *
+ *     **The overlays run against what ships, not the working tree.** The gate
+ *     copies `src/` into a temporary directory and runs each overlay there,
+ *     with that directory as the working directory and the deck's `vendor/`
+ *     as `$JENNIFER_VENDOR`: the layout `jvc install --runtests` gives a
+ *     consumer. A test reading a fixture outside `src/` (a top-level
+ *     `testdata/`) passed in the author's checkout and failed on every
+ *     consumer's machine; it now fails here first.
+ *
  *     A file another `src/` file `include`s, or one named `NAME.inc.j`, is
  *     part of its includer, not a module: in isolation its calls into the
  *     includer read as undefined. It is linted and tested through the
@@ -91,6 +99,20 @@ export def const PASSED_ENV as list of string init [
 
 # The prefix of the throwaway home directory each isolated run gets.
 def const HOME_PREFIX as string init "jvc-overlay-home";
+
+# The prefix of the directory the gate copies `src/` into.
+def const STAGE_PREFIX as string init "jvc-gate";
+
+# What `sh` runs to start a command in another directory: `$1` is the
+# directory, the rest the command. `env -C` would do it, but only GNU `env`
+# has it.
+def const CHDIR_SCRIPT as string init 'cd -- "$1" || exit 126; shift; exec "$@"';
+
+# Appended to a failed overlay's report at publish, since the failure may be
+# one the working tree hid.
+def const STAGED_NOTE as string init "\n      (the overlays ran from a copy of src/, " +
+    "which was also their working directory, as `jvc install --runtests` runs " +
+    "them: a file outside src/ is not there)";
 
 /**
  * One check's outcome.
@@ -286,6 +308,25 @@ export func docblockProblems(source as string) {
  * @return {list of string} the wrapped argv
  */
 export func isolatedArgv(argv as list of string, home as string) {
+    return isolatedArgvIn($argv, $home, "", "");
+}
+
+/**
+ * Build the argv `isolatedArgv` builds, starting the command in `cwd` and with
+ * `$JENNIFER_VENDOR` set to `vendor`. An empty `cwd` keeps the caller's
+ * directory and an empty `vendor` sets nothing. The directory is changed by
+ * `sh` after `env -i`, so it costs no extra environment. Pure.
+ * @param argv {list of string} the command and its arguments
+ * @param home {string} the directory to give the child as its home
+ * @param cwd {string} the directory to start the command in, or ""
+ * @param vendor {string} the vendor tree for `$JENNIFER_VENDOR`, or ""
+ * @return {list of string} the wrapped argv
+ */
+export func isolatedArgvIn(
+    argv as list of string,
+    home as string,
+    cwd as string,
+    vendor as string) {
     def out as list of string init ["env", "-i"];
     for (def name in PASSED_ENV) {
         def value as string init os.getEnv($name);
@@ -297,6 +338,17 @@ export func isolatedArgv(argv as list of string, home as string) {
     $out[] = "XDG_CONFIG_HOME=" + path.join($home, ".config");
     $out[] = "XDG_DATA_HOME=" + path.join($home, ".local", "share");
     $out[] = "XDG_CACHE_HOME=" + path.join($home, ".cache");
+    # After the PASSED_ENV assignments, so it wins over an inherited value.
+    if (not ($vendor == "")) {
+        $out[] = "JENNIFER_VENDOR=" + $vendor;
+    }
+    if (not ($cwd == "")) {
+        $out[] = "sh";
+        $out[] = "-c";
+        $out[] = CHDIR_SCRIPT;
+        $out[] = "sh";
+        $out[] = $cwd;
+    }
     for (def a in $argv) {
         $out[] = $a;
     }
@@ -321,17 +373,33 @@ export func isolatedArgv(argv as list of string, home as string) {
  * @throws {Error} when the temporary home cannot be made or `env` cannot be started
  */
 export func runIsolated(argv as list of string) {
-    def home as string init fs.makeTempDir("", HOME_PREFIX);
-    defer fs.removeAll($home);
-    return os.run(isolatedArgv($argv, $home));
+    return runIsolatedIn($argv, "", "");
 }
 
-# runFailure reports `env` failing to start the interpreter (exit 126 or 127
-# with an `env:` message), so a wrong `$JVC_JENNIFER` reads as that rather than
-# as a failed test; "" otherwise. A throw from `os.run` (no `env`, no temporary
-# directory) is caught by the callers.
+/**
+ * Run a command as `runIsolated` does, started in `cwd` and with
+ * `$JENNIFER_VENDOR` set to `vendor` (`isolatedArgvIn`), in the child only.
+ * @param argv {list of string} the command and its arguments
+ * @param cwd {string} the directory to start the command in, or ""
+ * @param vendor {string} the vendor tree for `$JENNIFER_VENDOR`, or ""
+ * @return {os.Result} the command's result
+ * @throws {Error} when the temporary home cannot be made or `env` cannot be started
+ */
+export func runIsolatedIn(argv as list of string, cwd as string, vendor as string) {
+    def home as string init fs.makeTempDir("", HOME_PREFIX);
+    defer fs.removeAll($home);
+    return os.run(isolatedArgvIn($argv, $home, $cwd, $vendor));
+}
+
+# runFailure reports `env` or the `sh` that changes directory failing to start
+# the interpreter (exit 126 or 127 with an `env:` or `sh:` message), so a wrong
+# `$JVC_JENNIFER` reads as that rather than as a failed test; "" otherwise. A
+# throw from `os.run` (no `env`, no temporary directory) is caught by the
+# callers.
 func runFailure(r as os.Result) {
-    if (($r.exitCode == 126 or $r.exitCode == 127) and strings.startsWith($r.stderr, "env:")) {
+    def starter as bool init strings.startsWith($r.stderr, "env:") or
+        strings.startsWith($r.stderr, "sh:");
+    if (($r.exitCode == 126 or $r.exitCode == 127) and $starter) {
         return cannotRun(strings.trim($r.stderr));
     }
     return "";
@@ -369,14 +437,18 @@ func saysNoTests(output as string, exitCode as int) {
     return false;
 }
 
-# runOverlay runs one overlay isolated (`runIsolated`), returning "" when it
-# passed or the failure text, a failure to start the interpreter included. An
-# overlay with no test function tests nothing, so it fails; it is recognised by
-# the runner's message, before the exit code is read.
-func runOverlay(dir as string, overlay as string) {
+# runOverlay runs one overlay's staged copy isolated (`runIsolatedIn`), in the
+# stage and with the deck's vendor tree, returning "" when it passed or the
+# failure text, a failure to start the interpreter included. Messages name the
+# overlay as it is in the deck, and the stage's paths in the runner's output
+# are rewritten to the deck's `src/`. An overlay with no test function tests
+# nothing, so it fails; it is recognised by the runner's message, before the
+# exit code is read.
+func runOverlay(dir as string, overlay as string, stage as string, vendor as string) {
+    def staged as string init path.join($stage, rel(path.join($dir, "src"), $overlay));
     def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
     try {
-        $r = runIsolated([interpreter(), "test", $overlay]);
+        $r = runIsolatedIn([interpreter(), "test", $staged], $stage, $vendor);
     } catch (err) {
         return cannotRun($err.message);
     }
@@ -384,34 +456,59 @@ func runOverlay(dir as string, overlay as string) {
     if (not ($broken == "")) {
         return $broken;
     }
-    def output as string init strings.trim($r.stdout + $r.stderr);
+    def output as string init strings.replace(
+        strings.trim($r.stdout + $r.stderr),
+        $stage,
+        path.join($dir, "src"));
     if (saysNoTests($output, $r.exitCode)) {
         return rel($dir, $overlay) + " defines no test function, so it tests " +
             "nothing (the runner discovers functions whose names start with `test`)";
     }
     if (not ($r.exitCode == 0)) {
-        return rel($dir, $overlay) + " failed:\n" + $output;
+        return rel($dir, $overlay) + " failed:\n" + $output + STAGED_NOTE;
     }
     return "";
 }
 
-# withVendor prefixes argv with a `JENNIFER_VENDOR=` assignment for `env`,
-# which `isolatedArgv` runs it through, or returns it as is for vendor "". It
-# comes after the PASSED_ENV assignments, so it wins over an inherited value.
-func withVendor(vendor as string, argv as list of string) {
-    if ($vendor == "") {
-        return $argv;
+# absolute makes a path absolute against the working directory, since a child
+# started elsewhere would read a relative one against its own.
+func absolute(p as string) {
+    if (path.isAbs($p)) {
+        return $p;
     }
-    def out as list of string init ["JENNIFER_VENDOR=" + $vendor];
-    for (def a in $argv) {
-        $out[] = $a;
+    return path.join(os.cwd(), $p);
+}
+
+# stageSources copies every file under the deck's `src/` into stage, keeping
+# its path below `src/`: what a release vendors, and what `install --runtests`
+# runs the overlays from.
+func stageSources(dir as string, stage as string) {
+    def src as string init path.join($dir, "src");
+    for (def st in fs.walk($src)) {
+        if ($st.isDir) {
+            continue;
+        }
+        def dest as string init path.join($stage, rel($src, $st.path));
+        fs.mkdirAll(path.dir($dest));
+        fs.writeBytes($dest, fs.readBytes($st.path));
     }
-    return $out;
+}
+
+# vendorOf is the deck's own `vendor/`, absolute, or "" when it has none (an
+# inherited `$JENNIFER_VENDOR` then still passes through PASSED_ENV). In place,
+# the interpreter found it by walking up from the overlay; the stage has
+# nothing above it to find.
+func vendorOf(dir as string) {
+    def v as string init path.join($dir, "vendor");
+    if (not fs.isDir($v)) {
+        return "";
+    }
+    return absolute($v);
 }
 
 # rel renders a path relative to the deck directory, for readable messages.
 func rel(dir as string, file as string) {
-    def prefix as string init $dir + "/";
+    def prefix as string init path.clean($dir) + "/";
     if (strings.startsWith($file, $prefix)) {
         return strings.substring($file, len($prefix), len($file));
     }
@@ -465,8 +562,10 @@ func lintCheck(dir as string) {
 # this module's own overlay. Each overlay runs isolated (`runIsolated`), the
 # same as at install time: a publish runs in exactly the CI job that holds the
 # credentials, and the overlays import vendored decks that are not the
-# author's code. A test that needs a variable outside PASSED_ENV, or something
-# in the user's home, does not pass the gate; that is deliberate.
+# author's code. A test that needs a variable outside PASSED_ENV, something in
+# the user's home, or a file outside `src/`, does not pass the gate; that is
+# deliberate. The overlays run from a copy of `src/` (`stageSources`), the
+# layout a consumer's `install --runtests` has.
 func overlayCheck(dir as string) {
     def absent as list of string init missingOverlays($dir);
     if (len($absent) > 0) {
@@ -485,8 +584,25 @@ func overlayCheck(dir as string) {
     if (len($modules) == 0) {
         return Finding{check: "tests", ok: true, detail: "no modules to test"};
     }
+    def stage as string init "";
+    try {
+        $stage = fs.makeTempDir("", STAGE_PREFIX);
+        stageSources($dir, $stage);
+    } catch (err) {
+        if (not ($stage == "")) {
+            fs.removeAll($stage);
+        }
+        return Finding{
+            check: "tests",
+            ok: false,
+            detail: "cannot copy src/ to run the overlays: " + $err.message
+        };
+    }
+    # Removed however this exits, a throwing overlay included.
+    defer fs.removeAll($stage);
+    def vendor as string init vendorOf($dir);
     for (def module in $modules) {
-        def problem as string init runOverlay($dir, overlayFor($module));
+        def problem as string init runOverlay($dir, overlayFor($module), $stage, $vendor);
         if (not ($problem == "")) {
             return Finding{check: "tests", ok: false, detail: $problem};
         }
@@ -547,14 +663,23 @@ export func runOverlays(dir as string) {
  * Run overlays as `runOverlays` does, with `$JENNIFER_VENDOR` set to vendor in
  * their environment only (none when vendor is ""), so the caller's own
  * environment is never changed and never has to be put back.
+ *
+ * Each overlay runs with `dir` as its working directory, so a test that writes
+ * a relative path writes into the extracted release, not into the consumer's
+ * project, and one that reads a relative path sees what the publish gate saw.
  * @param dir {string} the directory to search for overlays
  * @param vendor {string} the vendor tree the overlays import from, or ""
  * @return {Finding} the outcome, named "tests"
  */
 export func runOverlaysWith(dir as string, vendor as string) {
-    def included as map of string to bool init includedFiles($dir);
+    def root as string init absolute($dir);
+    def tree as string init $vendor;
+    if (not ($tree == "")) {
+        $tree = absolute($tree);
+    }
+    def included as map of string to bool init includedFiles($root);
     def overlays as list of string init [];
-    for (def st in fs.walk($dir)) {
+    for (def st in fs.walk($root)) {
         if (not $st.isDir and isOverlay($st.path) and not isPartial($st.path, $included)) {
             $overlays[] = $st.path;
         }
@@ -566,7 +691,7 @@ export func runOverlaysWith(dir as string, vendor as string) {
         def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
         try {
             def argv as list of string init [interpreter(), "test", "--allow-empty", $overlay];
-            $r = runIsolated(withVendor($vendor, $argv));
+            $r = runIsolatedIn($argv, $root, $tree);
         } catch (err) {
             return Finding{check: "tests", ok: false, detail: cannotRun($err.message)};
         }
@@ -578,7 +703,7 @@ export func runOverlaysWith(dir as string, vendor as string) {
             return Finding{
                 check: "tests",
                 ok: false,
-                detail: rel($dir, $overlay) + " failed:\n" +
+                detail: rel($root, $overlay) + " failed:\n" +
                     strings.trim($r.stdout + $r.stderr)
             };
         }

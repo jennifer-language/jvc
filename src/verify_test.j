@@ -593,9 +593,114 @@ func testRunOverlaysWithPassesTheVendorTree() {
     fs.removeAll($dir);
 }
 
-func testWithVendorPrefixesAnAssignment() {
-    testing.assertEqual(withVendor("", ["a"])[0], "a");
-    def argv as list of string init withVendor("/v", ["jennifer", "test"]);
-    testing.assertEqual($argv[0], "JENNIFER_VENDOR=/v");
-    testing.assertEqual($argv[1], "jennifer");
+# The vendor tree is assigned after the allowlist, so it wins over an inherited
+# value, and the directory is changed by `sh` just before the command.
+func testIsolatedArgvInSetsTheVendorAndTheDirectory() {
+    def argv as list of string init isolatedArgvIn(["jennifer", "test"], "/tmp/h", "/w", "/v");
+    def at as int init lists.indexOf($argv, "JENNIFER_VENDOR=/v");
+    testing.assertTrue($at > lists.indexOf($argv, "HOME=/tmp/h"));
+    testing.assertEqual($argv[$at + 1], "sh");
+    testing.assertEqual($argv[$at + 3], CHDIR_SCRIPT);
+    testing.assertEqual($argv[$at + 5], "/w");
+    testing.assertEqual($argv[$at + 6], "jennifer");
+    def plain as list of string init isolatedArgvIn(["x"], "/tmp/h", "", "");
+    testing.assertFalse(lists.contains($plain, "sh"));
+    testing.assertEqual($plain[len($plain) - 1], "x");
+}
+
+# --- the overlays run against what ships --------------------------------------
+
+# fixtureOverlay is an overlay that reads `testdata/fixture.txt` relative to its
+# working directory, as a deck's test commonly does.
+func fixtureOverlay() {
+    return strings.join(
+        [
+            'use testing;',
+            'use fs;',
+            '',
+            'func testFixture() {',
+            '    testing.assertEqual(fs.readString("testdata/fixture.txt"), "x");',
+            '}',
+            ''
+        ],
+        "\n");
+}
+
+# A fixture outside src/ is not in the release, so a consumer's --runtests
+# cannot read it; the gate, run from a copy of src/, fails the same way, says
+# why, and names the overlay as it is in the deck.
+func testTheGateRunsTheOverlaysFromACopyOfSrc() {
+    def dir as string init deckDir("staged");
+    writeModule($dir, "demo", goodModule(), fixtureOverlay());
+    fs.mkdirAll($dir + "/testdata");
+    fs.writeString($dir + "/testdata/fixture.txt", "x");
+    def r as Report init verify($dir);
+    testing.assertFalse($r.ok);
+    def detail as string init $r.findings[1].detail;
+    testing.assertContains($detail, "src/demo_test.j failed");
+    testing.assertContains($detail, "a file outside src/ is not there");
+    testing.assertContains($detail, $dir + "/src/demo_test.j");
+    testing.assertFalse(strings.contains($detail, STAGE_PREFIX));
+    fs.removeAll($dir);
+}
+
+# The same fixture under src/ ships, and is found from the copy.
+func testAFixtureUnderSrcPassesTheGate() {
+    def dir as string init deckDir("stagedok");
+    writeModule($dir, "demo", goodModule(), fixtureOverlay());
+    fs.mkdirAll($dir + "/src/testdata");
+    fs.writeString($dir + "/src/testdata/fixture.txt", "x");
+    def r as Report init verify($dir);
+    testing.assertEqual($r.findings[1].detail, "1 overlay(s) passed");
+    testing.assertTrue($r.ok);
+    fs.removeAll($dir);
+}
+
+# The copy has no vendor/ above it, so the deck's own is handed over: a module
+# importing a vendored dependency still passes.
+func testTheStagedOverlaysSeeTheDecksVendorTree() {
+    def dir as string init deckDir("stagedvendor");
+    fs.mkdirAll($dir + "/vendor/acme/dep");
+    fs.writeString(
+        $dir + "/vendor/acme/dep/dep.j",
+        strings.join(
+            [
+                '/**',
+                ' * A dependency.',
+                ' * @module dep',
+                ' */',
+                '',
+                '/**',
+                ' * Return two.',
+                ' * @return {int} two',
+                ' */',
+                'export func two() { return 2; }',
+                ''
+            ],
+            "\n"));
+    writeModule(
+        $dir,
+        "demo",
+        goodModule() + 'import "@acme/dep/" as dep;' + "\n",
+        "use testing;" + "\n" + 'func testDep() { testing.assertEqual(dep.two(), 2); }' + "\n");
+    def r as Report init verify($dir);
+    testing.assertEqual($r.findings[1].detail, "1 overlay(s) passed");
+    fs.removeAll($dir);
+}
+
+# At install the overlays start in the extracted release, so a test writing a
+# relative path leaves nothing in the consumer's project.
+func testRunOverlaysStartsInTheRelease() {
+    def dir as string init deckDir("runcwd");
+    writeModule(
+        $dir,
+        "demo",
+        goodModule(),
+        "use testing;" + "\n" + "use fs;" + "\n" +
+            'func testWrite() { fs.writeString("jvc-made.txt", "x"); }' + "\n");
+    def f as Finding init runOverlays($dir);
+    testing.assertTrue($f.ok);
+    testing.assertTrue(fs.exists($dir + "/jvc-made.txt"));
+    testing.assertFalse(fs.exists(path.join(os.cwd(), "jvc-made.txt")));
+    fs.removeAll($dir);
 }
