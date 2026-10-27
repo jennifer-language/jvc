@@ -484,12 +484,30 @@ func archiveWithAnAbsentCommit() {
     return archiveBytes($cache, $bad);
 }
 
+# moduleFile is gitsource.j beside this overlay, absolute, wherever it is run
+# from: in the checkout from the repository root, or from the publish gate's
+# copy of src/, which is then the working directory. The runner's argv names
+# the overlay relative to the working directory.
+func moduleFile() {
+    def overlay as string init "src/gitsource_test.j";
+    for (def arg in os.ARGS) {
+        if (strings.endsWith($arg, "_test.j")) {
+            $overlay = $arg;
+        }
+    }
+    def file as string init path.join(path.dir($overlay), "gitsource.j");
+    if (path.isAbs($file)) {
+        return $file;
+    }
+    return path.join(os.cwd(), $file);
+}
+
 func testTheModuleDeclaresItsOwnNamespaces() {
     # A white-box overlay is spliced *after* the module, so the overlay's own
     # `use` declarations satisfy the module's references too. A module that
     # forgot one therefore passes its tests and fails the moment anything else
     # loads it. This asserts the module stands on its own.
-    def src as string init fs.readString("src/gitsource.j");
+    def src as string init fs.readString(moduleFile());
     for (def ns in ["strings", "os", "fs", "path"]) {
         testing.assertContains($src, "use " + $ns + ";");
     }
@@ -526,7 +544,7 @@ func testGitDirInTheEnvironmentCannotRedirectTheMirror() {
             [
                 "use io;",
                 "use os;",
-                "import \"" + path.join(os.cwd(), "src", "gitsource.j") + "\" as gs;",
+                "import \"" + moduleFile() + "\" as gs;",
                 "def f as gs.Fetch init gs.candidates(os.getEnv(\"C\"), os.getEnv(\"R\"), " +
                     "\"@acme/beta\");",
                 "io.printf(\"%v %d\\n\", $f.ok, len($f.candidates));"
