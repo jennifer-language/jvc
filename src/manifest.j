@@ -32,6 +32,7 @@ use fs;
 use strings;
 use convert;
 use maps;
+use lists;
 import "./deckname.j" as deckname;
 
 # The supported manifest filenames. `.yaml` and `.yml` are the same YAML
@@ -271,7 +272,11 @@ func buildDeps(table as string, keys as list of string, values as list of string
 }
 
 # fieldWhere names a package field for an error, as the author would find it.
+# The urls table is named by its header, `[package.urls]`.
 func fieldWhere(pointer as string) {
+    if ($pointer == "/package/urls") {
+        return "[package.urls]";
+    }
     if (strings.startsWith($pointer, "/package/")) {
         return "[package] " + strings.substring($pointer, len("/package/"), len($pointer));
     }
@@ -342,7 +347,7 @@ func tomlUrls(doc as toml.Value) {
         expectType(toml.typeOf($doc, $ptr), "map", fieldWhere($ptr));
         for (def key in toml.keys($doc, $ptr)) {
             def at as string init $ptr + "/" + ptrEscape($key);
-            expectType(toml.typeOf($doc, $at), "string", fieldWhere($ptr) + " " + $key);
+            expectEntry(toml.typeOf($doc, $at), fieldWhere($ptr), $key);
             $out[$key] = toml.asString($doc, $at);
         }
     }
@@ -358,12 +363,40 @@ func tomlDeps(doc as toml.Value, table as string) {
         expectType(toml.typeOf($doc, $pointer), "map", "[" + $table + "]");
         for (def key in toml.keys($doc, $pointer)) {
             def at as string init $pointer + "/" + ptrEscape($key);
-            expectType(toml.typeOf($doc, $at), "string", "[" + $table + "] " + $key);
+            expectEntry(toml.typeOf($doc, $at), "[" + $table + "]", $key);
             $keys[] = $key;
             $values[] = toml.asString($doc, $at);
         }
     }
     return buildDeps($table, $keys, $values);
+}
+
+# The fields `[package]` reads. One met as a TOML table's entry was written
+# below that table's header, which is where TOML puts it.
+def const PACKAGE_FIELDS as list of string init [
+    "name",
+    "version",
+    "description",
+    "license",
+    "authors",
+    "keywords",
+    "capabilities",
+    "bin",
+    "bin-dir"
+];
+
+# expectEntry checks that a TOML table entry is a string, as expectType does.
+# An entry named like a `[package]` field that is not a string (`capabilities =
+# []` below `[package.urls]`) is that field in the wrong table, so the error
+# says to move it rather than to change its type.
+func expectEntry(actual as string, header as string, key as string) {
+    if ($actual == "string" or not lists.contains(PACKAGE_FIELDS, $key)) {
+        expectType($actual, "string", $header + " " + $key);
+        return;
+    }
+    raise($header + " " + $key + ": expected a string, found " + typeName($actual) +
+        "\n  `" + $key + "` is a [package] field: TOML puts a key in the table " +
+        "whose header is above it, so move it above the " + $header + " line");
 }
 
 # decodeToml decodes TOML text, reporting a syntax error as a manifest error.
@@ -823,7 +856,17 @@ export func encode(m as Manifest, format as string) {
  *     `fs` error when the file cannot be read
  */
 export func load(path as string) {
-    return parse(fs.readString($path), detectFormat($path));
+    def format as string init detectFormat($path);
+    def text as string init fs.readString($path);
+    try {
+        return parse($text, $format);
+    } catch (err) {
+        # Named, since a command may load a manifest the user did not think of.
+        if ($err.kind == "manifest") {
+            raise($path + ": " + $err.message);
+        }
+        throw $err;
+    }
 }
 
 /**

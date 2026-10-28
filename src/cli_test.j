@@ -2805,15 +2805,26 @@ func testATransientFailureKeepsTheCredential() {
     testing.assertFalse($r.done);
 }
 
-func testATransientRefreshFailureDoesNotAdviseALogin() {
-    # The token was never refused, so telling the user to replace it is wrong
-    # advice: the repository is the thing that failed.
+func testATransientRefreshFailureAdvisesALoginOnlyAfterRetrying() {
+    # The token was never refused, so the first advice is to retry: the
+    # repository is the thing that failed. A login is the fallback, since it
+    # does not go through the refresh path.
     def msg as string init authOutcome(
         "http://r.example",
         "http://r.example could not answer the refresh: it returned a server error",
         false);
     testing.assertContains($msg, "could not authenticate");
     testing.assertContains($msg, "untouched");
+    testing.assertContains($msg, "try again shortly.\n  If it keeps failing, `jvc login`");
+}
+
+# A registry that cannot be reached gets no login advice: a login would meet
+# the same network.
+func testAnUnreachableRefreshDoesNotAdviseALogin() {
+    def msg as string init authOutcome(
+        "http://r.example",
+        "could not reach http://r.example to refresh: connection refused",
+        false);
     testing.assertContains($msg, "try again");
     testing.assertFalse(strings.contains($msg, "jvc login"));
 }

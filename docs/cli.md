@@ -430,14 +430,17 @@ not logged in to https://registry.jennifer-lang.dev; run `jvc login`
 ```
 
 Only a *rejection* discards it. A `5xx`, or a repository that cannot be
-reached, says nothing about the token, so it is kept **and no login is
-suggested**:
+reached, says nothing about the token, so it is kept and the advice is to try
+again. After a `5xx`, a fresh login is offered as the fallback, since it skips
+the refresh; after a network failure it is not, since a login would fail the
+same way:
 
 ```
 $ jvc publish
 could not authenticate at https://registry.jennifer-lang.dev just now:
   … could not answer the refresh: error code: 502
   Your stored token is untouched, so this is the repository's end; try again shortly.
+  If it keeps failing, `jvc login` gets a fresh login without the refresh.
 ```
 
 Refreshing is lazy because a clock is not authority: a token can be revoked

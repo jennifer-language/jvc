@@ -1881,7 +1881,7 @@ export func refreshCredential(base as string, auth as registry.Auth) {
             if ($why == "") {
                 $why = "it returned a server error";
             }
-            return fail($base + " could not answer the refresh: " + $why);
+            return fail($base + REFRESH_FAULT + $why);
         }
         # A rejection is final, so the credential is discarded: kept, it would
         # make every later command repeat the round trip. Unless another jvc run
@@ -2171,7 +2171,11 @@ func authRefusal(base as string, detail as string) {
  *
  * Advising a login when the token was never refused asks the user to replace a
  * working credential to work around a repository that could not answer, so the
- * two cases get different messages.
+ * two cases get different messages. A registry that answered the refresh with
+ * a server error is the one exception, as a fallback after retrying: a fresh
+ * login skips the refresh path, which is where such a fault has been seen. A
+ * registry that cannot be reached gets no such advice, since a login would
+ * meet the same network.
  * @param base {string} the registry base URL
  * @param detail {string} what the attempt reported ("" when nothing)
  * @param fatal {bool} true when the credential itself was refused
@@ -2181,10 +2185,18 @@ export func authOutcome(base as string, detail as string, fatal as bool) {
     if ($fatal or strings.trim($detail) == "") {
         return authFailure($base, $detail);
     }
-    return "could not authenticate at " + $base + " just now:\n  " + $detail +
-        "\n  Your stored token is untouched, so this is the repository's end; " +
-        "try again shortly.";
+    def advice as string init "\n  Your stored token is untouched, so this is the " +
+        "repository's end; try again shortly.";
+    if (strings.startsWith($detail, $base + REFRESH_FAULT)) {
+        $advice = $advice + "\n  If it keeps failing, `jvc login` gets a fresh login without " +
+            "the refresh.";
+    }
+    return "could not authenticate at " + $base + " just now:\n  " + $detail + $advice;
 }
+
+# How `refreshCredential` words a registry's server error, after the base URL;
+# `authOutcome` reads it to offer a fresh login as the fallback.
+def const REFRESH_FAULT as string init " could not answer the refresh: ";
 
 /**
  * Explain why a registry cannot be logged into, or "" when it can.

@@ -577,3 +577,53 @@ func parseJsonArray() {
 func testAnEmptyYamlDocumentIsAnEmptyManifest() {
     testing.assertEqual(parse("", "yaml").pkg.name, "");
 }
+
+# --- where a manifest error points ------------------------------------------
+
+# loadError loads a manifest written with the given text and returns the
+# manifest error's message ("" when it loads).
+func loadError(name as string, text as string) {
+    def p as string init tmpPath($name);
+    fs.writeString($p, $text);
+    defer fs.remove($p);
+    try {
+        load($p);
+    } catch (err) {
+        return $err.message;
+    }
+    return "";
+}
+
+# A [package] field written below the [package.urls] header is in that table,
+# as TOML reads it; the error names the real table, the file, and the fix.
+func testAPackageFieldBelowTheUrlsHeaderSaysToMoveIt() {
+    def text as string init strings.join(
+        [
+            "[package]",
+            'name = "@acme/x"',
+            "[package.urls]",
+            'deck = "https://example.org/deck.toml"',
+            "capabilities = []",
+            ""
+        ],
+        "\n");
+    def msg as string init loadError("stray.toml", $text);
+    testing.assertTrue(strings.startsWith($msg, tmpPath("stray.toml") + ": "));
+    testing.assertContains($msg, "[package.urls] capabilities: expected a string, found an array");
+    testing.assertContains($msg, "move it above the [package.urls] line");
+}
+
+# The same trap under a dependency table.
+func testAPackageFieldBelowTheEnginesHeaderSaysToMoveIt() {
+    def text as string init "[engines]\njennifer = \">=0.25.0\"\nkeywords = [\"a\"]\n";
+    def msg as string init loadError("strayengines.toml", $text);
+    testing.assertContains($msg, "[engines] keywords: expected a string");
+    testing.assertContains($msg, "move it above the [engines] line");
+}
+
+# Any other non-string entry keeps the plain message.
+func testAnotherWrongEntryGetsNoMoveAdvice() {
+    def msg as string init loadError("badurl.toml", "[package.urls]\nhome = [1]\n");
+    testing.assertContains($msg, "[package.urls] home: expected a string, found an array");
+    testing.assertFalse(strings.contains($msg, "move it"));
+}
