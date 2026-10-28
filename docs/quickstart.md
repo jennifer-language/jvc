@@ -23,9 +23,13 @@ resolves and rewrites the lock. Never change a version by editing the lockfile.
 jvc login                    # device flow (or a browser) via the registry's provider
 jvc whoami                   # what your stored token says, without a call
 jvc scopes                   # who owns what on that registry
-jvc claim mplx               # claim a scope matching your username
+jvc claim mplx               # claim a scope matching your username, or an organisation's
 jvc query "@mplx/clispinner" # resolve a deck against the registry
 ```
+
+An organisation's scope needs the registry's GitHub application approved for
+that organisation, then a fresh `jvc login`; see [Claiming an organisation's
+scope](cli.md#claiming-an-organisations-scope).
 
 The registry defaults to `https://registry.jennifer-lang.dev`, overridable with
 `--registry` or `$JVC_REGISTRY`. A project spanning several registries maps

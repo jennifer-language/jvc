@@ -632,7 +632,9 @@ func manifestOrEmpty(dir as string) {
 # commands that need nothing else of the project: an app install, `query`, and
 # the scope writes. A fault elsewhere in the manifest does not stop them
 # (`manifest.loadRegistries`); none when there is no manifest. Two manifests
-# are refused rather than read as none, since either may hold the mapping.
+# are refused rather than read as none, since either may hold the mapping, and
+# so is a table `manifestcheck.registryProblems` faults: a key the lookup never
+# consults would send the scope to the catch-all or the default unannounced.
 func registriesHere(dir as string) {
     def loc as Located init locate($dir);
     if (not ($loc.error == "")) {
@@ -642,7 +644,18 @@ func registriesHere(dir as string) {
         def none as list of manifest.Dependency init [];
         return $none;
     }
-    return manifest.loadRegistries($loc.path);
+    def regs as list of manifest.Dependency init manifest.loadRegistries($loc.path);
+    def found as list of string init manifestcheck.registryProblems($regs);
+    if (len($found) > 0) {
+        throw Error{
+            kind: "manifest",
+            message: $loc.path + ": " + strings.join($found, "\n  "),
+            file: "",
+            line: 0,
+            col: 0
+        };
+    }
+    return $regs;
 }
 
 # --- publishing to a repository ---------------------------------------------
@@ -1211,7 +1224,17 @@ export func runClaim(base as string, scope as string) {
     if (not ($reply.error == "")) {
         return fail($reply.error);
     }
-    return ok("@" + $reply.scope + " is now yours (" + $reply.owner + ")");
+    return ok(claimedLine($reply));
+}
+
+# claimedLine is the success message of a claim. An organisation claim binds the
+# scope to the organisation, not to the caller, so it says so; a registry that
+# does not send `kind` gets the personal wording.
+func claimedLine(reply as registry.ScopeReply) {
+    if ($reply.kind == "org") {
+        return "@" + $reply.scope + " is now owned by the organisation " + $reply.owner;
+    }
+    return "@" + $reply.scope + " is now yours (" + $reply.owner + ")";
 }
 
 /**
@@ -1257,7 +1280,7 @@ export func runOwners(base as string, scope as string, subject as string, add as
 # emptyScopeReply is the zero value the try blocks above start from.
 func emptyScopeReply() {
     def none as list of string init [];
-    return registry.ScopeReply{status: 0, scope: "", owner: "", owners: $none, error: ""};
+    return registry.ScopeReply{status: 0, scope: "", owner: "", kind: "", owners: $none, error: ""};
 }
 
 # withScopeAuth runs a scope write through the refresh-on-401 retry, adapting

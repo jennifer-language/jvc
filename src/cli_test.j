@@ -2163,6 +2163,28 @@ func testClaimNeedsAScope() {
     testing.assertContains(runClaim("http://r.example", "  ").message, "usage:");
 }
 
+func testAClaimSaysWhoNowOwnsTheScope() {
+    # an organisation claim binds the scope to the organisation, not the caller
+    def none as list of string init [];
+    def mine as registry.ScopeReply init registry.ScopeReply{
+        status: 201,
+        scope: "mplx",
+        owner: "mplx",
+        kind: "user",
+        owners: $none,
+        error: ""
+    };
+    testing.assertEqual(claimedLine($mine), "@mplx is now yours (mplx)");
+    def org as registry.ScopeReply init $mine;
+    $org.scope = "deckyard";
+    $org.owner = "deckyard";
+    $org.kind = "org";
+    testing.assertEqual(claimedLine($org), "@deckyard is now owned by the organisation deckyard");
+    # an older registry sends no kind
+    $mine.kind = "";
+    testing.assertEqual(claimedLine($mine), "@mplx is now yours (mplx)");
+}
+
 func testOwnersNeedsBothArguments() {
     testing.assertContains(runOwners("http://r.example", "mplx", "", true).message, "usage:");
     testing.assertContains(runOwners("http://r.example", "", "42", true).message, "usage:");
@@ -3781,4 +3803,18 @@ func testNoManifestMeansNoMapping() {
     def dir as string init freshDir("regsnone");
     testing.assertEqual(len(registriesHere($dir)), 0);
     fs.removeAll($dir);
+}
+
+# A key the lookup never consults is refused by the commands that read only the
+# mapping too, rather than sending the scope to the default unannounced.
+func testTheMappingAloneStillRefusesABadKey() {
+    def dir as string init freshDir("regsbadkey");
+    fs.writeString($dir + "/deck.toml", "[registries]\n\"@acme\" = \"https://r.example\"\n");
+    testing.assertThrows("regsBadKey", "manifest");
+    fs.removeAll($dir);
+}
+
+# regsBadKey reads a mapping whose one key is a bare scope.
+func regsBadKey() {
+    registriesHere(os.tempDir() + "/jvc_cli_regsbadkey");
 }

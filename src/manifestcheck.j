@@ -78,11 +78,30 @@ export func problems(m as manifest.Manifest) {
         $out[] = "[package] bin = \"" + $m.pkg.bin +
             "\": must be a relative path inside the deck";
     }
+    for (def line in registryProblems($m.registries)) {
+        $out[] = $line;
+    }
+    return $out;
+}
+
+/**
+ * List what is wrong with a `[registries]` table, one line each: a key that is
+ * not a scope wildcard or the catch-all, two keys naming one scope, and a value
+ * that is not a registry URL. Run on its own by the verbs that read nothing
+ * else of the project (`claim`, `query`, an app install), since a key the
+ * lookup never consults sends that scope's name, and any credential, to the
+ * catch-all or the default without a word.
+ * @param registries {list of manifest.Dependency} the `[registries]` entries
+ * @return {list of string} the problems, empty when the table is usable
+ */
+export func registryProblems(registries as list of manifest.Dependency) {
+    def out as list of string init [];
     def seen as map of string to string init {};
-    for (def dep in $m.registries) {
+    for (def dep in $registries) {
         def key as string init deckname.fold($dep.name);
         if (not scopemap.isPattern($dep.name)) {
-            $out[] = "[registries] " + $dep.name + ": not a scope mapping key";
+            $out[] = "[registries] " + $dep.name + ": not a scope mapping key" +
+                keySuggestion($dep.name);
         } elseif (maps.has($seen, $key)) {
             $out[] = "[registries] " + $dep.name + " and " + $seen[$key] +
                 " name the same scope";
@@ -95,6 +114,25 @@ export func problems(m as manifest.Manifest) {
         }
     }
     return $out;
+}
+
+# keySuggestion names the scope wildcard a bad key most likely meant: a bare
+# scope (`@acme`, or `acme`) or one deck of it (`@acme/tool`) all mean
+# `@acme/*`, the last because a deck is never a key. "" when no scope can be
+# read from it.
+func keySuggestion(key as string) {
+    def scope as string init deckname.fold($key);
+    if (strings.startsWith($scope, "@")) {
+        $scope = strings.substring($scope, 1, len($scope));
+    }
+    def slash as int init strings.indexOf($scope, "/");
+    if ($slash >= 0) {
+        $scope = strings.substring($scope, 0, $slash);
+    }
+    if (not deckname.isScopeIdent($scope)) {
+        return "";
+    }
+    return " (a key maps a whole scope: write \"@" + $scope + "/" + scopemap.CATCH_ALL + "\")";
 }
 
 /**

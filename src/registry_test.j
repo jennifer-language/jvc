@@ -618,7 +618,16 @@ func testAClaimReplyCarriesTheScopeAndOwner() {
     testing.assertEqual($r.status, 201);
     testing.assertEqual($r.scope, "mplx");
     testing.assertEqual($r.owner, "mplx");
+    testing.assertEqual($r.kind, "");
     testing.assertEqual($r.error, "");
+}
+
+func testAnOrganisationClaimReplyCarriesTheKind() {
+    def r as ScopeReply init parseScopeReply(
+        201,
+        '{"scope":"deckyard","owner":"deckyard","kind":"org"}');
+    testing.assertEqual($r.owner, "deckyard");
+    testing.assertEqual($r.kind, "org");
 }
 
 func testAnOwnersReplyCarriesEveryOwner() {
@@ -775,12 +784,25 @@ func testAVeryLongForeignBodyIsTrimmed() {
     testing.assertTrue(len(parsePublishReply(500, $long).error) < 200);
 }
 
-# The registry's own `error` text is foreign too, and was shown in full.
+# The registry's own `error` text is foreign too, and was shown without bound;
+# a runaway one is cut at ERROR_MAX.
 func testAVeryLongJsonErrorIsTrimmed() {
-    def body as string init '{"error":"' + strings.repeat("y", 400) + '"}';
+    def body as string init '{"error":"' + strings.repeat("y", ERROR_MAX + 400) + '"}';
     def why as string init errorDetail($body);
-    testing.assertEqual(len($why), 123);
+    testing.assertEqual(len($why), ERROR_MAX + 3);
     testing.assertTrue(strings.endsWith($why, "..."));
+}
+
+# But it is written for the user and often ends in the remedy, so an ordinary
+# one is shown whole: a refused claim was cut off before saying to approve the
+# registry for the organisation.
+func testARegistryErrorKeepsItsRemedy() {
+    def text as string init "@deckyard is neither your github username (mplx) nor one of " +
+        "the organisations your login carries (jennifer-language). If you belong to it, " +
+        "your github may not be disclosing it to this registry: approve this application " +
+        "for the organisation and log in again, or ask an operator to grant the scope";
+    def why as string init errorDetail(json.encode(json.set(json.map(), "/error", $text)));
+    testing.assertEqual($why, $text);
 }
 
 # Server text reaches the terminal, so an escape sequence in it must not.

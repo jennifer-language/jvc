@@ -951,10 +951,17 @@ export def struct TokenReply {
 # The longest foreign text shown in a message, in characters.
 def const SNIPPET_MAX as int init 120;
 
+# The longest registry `error` field shown, in characters. Written for the
+# user, it often carries the remedy at its end (a refused claim names the
+# organisation approval to ask for), so it is bounded only against a runaway
+# reply, not cut to a snippet.
+def const ERROR_MAX as int init 2000;
+
 # errorDetail extracts the explanation from a failure body: the `error` field of
-# the registry's JSON, or else the raw body, since a non-JSON body (an HTML error
-# page) shows that something in front of the registry answered. Cleaned by
-# `snippet`, because it reaches the terminal.
+# the registry's JSON, shown whole (`ERROR_MAX`), or else the raw body cut to a
+# snippet, since a non-JSON body (an HTML error page) only shows that something
+# in front of the registry answered. Cleaned either way, because it reaches the
+# terminal.
 func errorDetail(body as string) {
     if (strings.trim($body) == "") {
         return "";
@@ -962,7 +969,7 @@ func errorDetail(body as string) {
     try {
         def found as string init strOr(json.decode($body), "/error");
         if (not ($found == "")) {
-            return snippet($found);
+            return inert($found, ERROR_MAX);
         }
     } catch (e) {
         return snippet($body);
@@ -997,15 +1004,21 @@ func unreadableReply(status as int, body as string) {
 # screen, rewrite earlier lines, or set the window title. Line breaks and tabs
 # become spaces; every other control character, and `DEL`, is dropped.
 func snippet(body as string) {
+    return inert($body, SNIPPET_MAX);
+}
+
+# inert is foreign text as one inert line (see `snippet`) of at most limit
+# characters, marked with "..." when cut.
+func inert(text as string, limit as int) {
     # Bounded before the per-character pass, so a megabyte of HTML is not walked
     # only to keep its first line.
-    def raw as string init $body;
-    if (len($raw) > SNIPPET_MAX * 8) {
-        $raw = strings.substring($raw, 0, SNIPPET_MAX * 8);
+    def raw as string init $text;
+    if (len($raw) > $limit * 8) {
+        $raw = strings.substring($raw, 0, $limit * 8);
     }
     def flat as string init strings.trim(cleanText($raw));
-    if (len($flat) > SNIPPET_MAX) {
-        return strings.substring($flat, 0, SNIPPET_MAX) + "...";
+    if (len($flat) > $limit) {
+        return strings.substring($flat, 0, $limit) + "...";
     }
     return $flat;
 }
@@ -1578,6 +1591,8 @@ export func failureLine(status as int, what as string, why as string) {
  * @field status {int} the HTTP status
  * @field scope {string} the scope the registry acted on ("" on failure)
  * @field owner {string} the owner it recorded ("" unless a claim succeeded)
+ * @field kind {string} `user` or `org` after a claim; "" from a registry that
+ *   does not say
  * @field owners {list of string} the owning subjects, after an `owners` change
  * @field error {string} the registry's own explanation ("" on success)
  */
@@ -1585,6 +1600,7 @@ export def struct ScopeReply {
     status as int,
     scope as string,
     owner as string,
+    kind as string,
     owners as list of string,
     error as string
 };
@@ -1608,6 +1624,7 @@ export func parseScopeReply(status as int, body as string) {
             status: $status,
             scope: "",
             owner: "",
+            kind: "",
             owners: $none,
             error: failureLine($status, "request", $why)
         };
@@ -1617,6 +1634,7 @@ export func parseScopeReply(status as int, body as string) {
             status: $status,
             scope: "",
             owner: "",
+            kind: "",
             owners: $none,
             error: unreadableReply($status, $body)
         };
@@ -1634,6 +1652,7 @@ export func parseScopeReply(status as int, body as string) {
         status: $status,
         scope: scalarText($doc, "/scope"),
         owner: scalarText($doc, "/owner"),
+        kind: scalarText($doc, "/kind"),
         owners: $ids,
         error: ""
     };

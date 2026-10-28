@@ -111,9 +111,10 @@ alone.
 `query`, `app install` / `app update`, `yank`, `unyank`, `claim`, `owners` and
 `trust` need nothing else of the project, so they read only `[registries]`: a
 mistake elsewhere in the manifest does not stop them. A `[registries]` table
-that is malformed, a file that does not decode, or a directory holding two
-manifests still does, because the mapping decides where a name and a
-credential are sent and is never guessed.
+that is malformed or holds a key that is not a scope wildcard (`"@acme"` is
+refused with a pointer to `"@acme/*"`), a file that does not decode, or a
+directory holding two manifests still does, because the mapping decides where
+a name and a credential are sent and is never guessed.
 
 **`jvc new` uses no mapping.** It runs before the frame it creates has a
 manifest, so it resolves the engine deck at the default repository only: an
@@ -617,10 +618,48 @@ provider, an opaque string (on GitHub, the numeric account id).
 
 **Which scopes you may claim is the repository's policy, not jvc's**, so its
 refusal is passed through word for word. A repository deriving scopes from
-usernames will allow the one matching yours and refuse the rest with something
-like `@acme does not match your github username (mplx); ask an operator to
-grant it`. A scope marked `reserved` is held by the repository itself and needs
-an operator.
+GitHub, as `registry.jennifer-lang.dev` does, allows the scope matching your
+username and one for each organisation you belong to, and refuses the rest:
+
+```
+$ jvc claim acme
+@acme is neither your github username (mplx) nor one of the organisations your
+login carries (jennifer-language). If you belong to it, your github may not be
+disclosing it to this registry: approve this application for the organisation
+and log in again, or ask an operator to grant the scope
+```
+
+A scope marked `reserved` is held by the repository itself and needs an
+operator.
+
+### Claiming an organisation's scope
+
+The organisations a login carries are read from GitHub **when you log in**,
+and GitHub leaves out any organisation that restricts third-party access and
+has not approved the registry's OAuth application. Being a member is not
+enough: a member of `acme` whose login carries only their other organisations
+is refused as above. To claim `@acme`:
+
+1. **Authorize the registry for the organisation.** On GitHub, open Settings,
+   then Applications, then Authorized OAuth Apps, choose the registry's
+   application, and press **Grant** next to `acme` (**Request** if you are not
+   one of its owners, which asks them to approve it). An owner can also approve
+   it from the organisation's own settings, under Third-party access.
+2. **Log in again** with `jvc login`. A refreshed token keeps the
+   organisations of the original login on purpose (a refresh proves you hold
+   the token, not that you are still a member), so only a new login reads the
+   approval.
+3. **Claim it**: `jvc claim acme`. `jvc whoami` shows the organisations the
+   new token carries, if you want to check first.
+
+The scope belongs to the organisation, not to you, and the claim says so:
+
+```
+$ jvc claim acme
+@acme is now owned by the organisation acme
+```
+
+A member who leaves it keeps nothing.
 
 `claim`, `owners` and `trust` send your token, as do `publish`, `yank` and
 `unyank`;

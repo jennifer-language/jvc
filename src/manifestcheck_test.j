@@ -91,3 +91,29 @@ func testAnEmptyConstraintIsRefused() {
     testing.assertContains($got[0], "write \"*\" for any version");
     testing.assertContains($got[1], "empty version constraint for jennifer in [engines]");
 }
+
+# A key that is not a scope wildcard is never consulted, so it is refused with
+# the wildcard it most likely meant: a bare scope, with or without its `@`, and
+# a deck of it all mean the whole scope.
+func testABadMappingKeySuggestsTheScopeWildcard() {
+    def regs as list of manifest.Dependency init [];
+    for (def key in ["@jennifer-lang", "acme", "@Acme/tool"]) {
+        $regs[] = manifest.Dependency{name: $key, constraint: "https://r.example"};
+    }
+    def got as list of string init registryProblems($regs);
+    testing.assertEqual(len($got), 3);
+    testing.assertContains($got[0], "write \"@jennifer-lang/*\"");
+    testing.assertContains($got[1], "write \"@acme/*\"");
+    testing.assertContains($got[2], "[registries] @Acme/tool: not a scope mapping key");
+    testing.assertContains($got[2], "write \"@acme/*\"");
+}
+
+# Nothing is suggested where no scope can be read from the key.
+func testAnUnreadableKeyGetsNoSuggestion() {
+    def regs as list of manifest.Dependency init [
+        manifest.Dependency{name: "@/*x", constraint: "https://r.example"}
+    ];
+    def got as list of string init registryProblems($regs);
+    testing.assertEqual(len($got), 1);
+    testing.assertFalse(strings.contains($got[0], "write"));
+}
