@@ -627,3 +627,47 @@ func testAnotherWrongEntryGetsNoMoveAdvice() {
     testing.assertContains($msg, "[package.urls] home: expected a string, found an array");
     testing.assertFalse(strings.contains($msg, "move it"));
 }
+
+# --- the mapping alone --------------------------------------------------------
+
+# A command that needs only the scope mapping reads it past a fault elsewhere.
+func testTheRegistriesAreReadPastAFaultElsewhere() {
+    def p as string init tmpPath("regs.toml");
+    fs.writeString(
+        $p,
+        strings.join(
+            [
+                "[package.urls]",
+                "capabilities = []",
+                "[registries]",
+                '"@acme/*" = "https://r.example"',
+                ""
+            ],
+            "\n"));
+    def regs as list of Dependency init loadRegistries($p);
+    fs.remove($p);
+    testing.assertEqual(len($regs), 1);
+    testing.assertEqual($regs[0].name, "@acme/*");
+    testing.assertEqual($regs[0].constraint, "https://r.example");
+}
+
+# A bad mapping, or a document that does not decode, is never guessed past.
+func testABadMappingOrDocumentStillFails() {
+    def msg as string init regsError("regsbad.toml", "[registries]\n\"@acme/*\" = 5\n");
+    testing.assertContains($msg, "regsbad.toml: [registries] @acme/*: expected a string");
+    testing.assertContains(regsError("regsjunk.toml", "[registries\n"), "not valid TOML");
+    testing.assertContains(regsError("regs.json", "[1]"), "regs.json: ");
+}
+
+# regsError is loadRegistries' manifest error for a file with the given text.
+func regsError(name as string, text as string) {
+    def p as string init tmpPath($name);
+    fs.writeString($p, $text);
+    defer fs.remove($p);
+    try {
+        loadRegistries($p);
+    } catch (err) {
+        return $err.message;
+    }
+    return "";
+}

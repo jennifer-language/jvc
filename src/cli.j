@@ -537,8 +537,7 @@ export func resolveApp(base as string, given as string, spec as string) {
     # Folded on the way in, as everywhere a name enters: the registry files its
     # records under the folded name.
     def name as string init deckname.fold($given);
-    def m as manifest.Manifest init manifestOrEmpty(".");
-    def mapper as Mapper init newMapper($m.registries, $base);
+    def mapper as Mapper init newMapper(registriesHere("."), $base);
     def where as Mapped init mapFor($mapper, $name);
     if (not ($where.error == "")) {
         return AppSource{url: "", version: "", error: $where.error};
@@ -619,15 +618,31 @@ func pickApp(found as list of catalog.Candidate, name as string, spec as string,
     return AppSource{url: "", version: "", error: "no such version: " + $best};
 }
 
-# manifestOrEmpty loads the project manifest when there is one, so an app
-# install run inside a project honours its [registries] mapping and one run
-# anywhere else still works.
+# manifestOrEmpty loads the project manifest when there is one, for `publish`,
+# which needs the deck's own name as well as its [registries] mapping.
 func manifestOrEmpty(dir as string) {
     def loc as Located init locate($dir);
     if (not ($loc.error == "") or $loc.path == "") {
         return manifest.empty("", "");
     }
     return manifest.load($loc.path);
+}
+
+# registriesHere is the [registries] mapping of the manifest in dir, for the
+# commands that need nothing else of the project: an app install, `query`, and
+# the scope writes. A fault elsewhere in the manifest does not stop them
+# (`manifest.loadRegistries`); none when there is no manifest. Two manifests
+# are refused rather than read as none, since either may hold the mapping.
+func registriesHere(dir as string) {
+    def loc as Located init locate($dir);
+    if (not ($loc.error == "")) {
+        throw Error{kind: "manifest", message: $loc.error, file: "", line: 0, col: 0};
+    }
+    if ($loc.path == "") {
+        def none as list of manifest.Dependency init [];
+        return $none;
+    }
+    return manifest.loadRegistries($loc.path);
 }
 
 # --- publishing to a repository ---------------------------------------------
@@ -1061,7 +1076,7 @@ func dispatchScope(command as string, args as list of string, pos as list of str
         $command == "owners" or $command == "trust")) {
         return unhandled();
     }
-    def regs as list of manifest.Dependency init manifestOrEmpty(".").registries;
+    def regs as list of manifest.Dependency init registriesHere(".");
     if ($command == "trust") {
         return dispatchTrust($args, $regs, $pos);
     }
@@ -4206,7 +4221,7 @@ export func runQuery(baseUrl as string, given as string, constraint as string) {
     def name as string init deckname.fold($given);
     def target as string init $baseUrl;
     if (deckname.isScoped($name)) {
-        def mapper as Mapper init newMapper(manifestOrEmpty(".").registries, $baseUrl);
+        def mapper as Mapper init newMapper(registriesHere("."), $baseUrl);
         def where as Mapped init mapFor($mapper, $name);
         if (not ($where.error == "")) {
             return fail($where.error);

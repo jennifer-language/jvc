@@ -3747,3 +3747,38 @@ func testInstallRefusesAnEmptyConstraint() {
     testing.assertContains($out.message, "empty version constraint for @acme/net");
     fs.removeAll($dir);
 }
+
+# --- the mapping for commands that need nothing else --------------------------
+
+# `jvc claim` in a project whose [package.urls] is broken still finds the
+# mapping, so the claim goes where the project says rather than failing.
+func testTheScopeWritesReadTheMappingPastAFaultElsewhere() {
+    def dir as string init freshDir("regshere");
+    fs.writeString(
+        $dir + "/deck.toml",
+        "[package.urls]\ncapabilities = []\n[registries]\n\"@acme/*\" = \"https://r.example\"\n");
+    def regs as list of manifest.Dependency init registriesHere($dir);
+    def target as Target init writeTarget(["jvc", "claim", "acme"], $regs, "@acme/x");
+    testing.assertEqual($target.url, "https://r.example");
+    fs.removeAll($dir);
+}
+
+# Two manifests are refused, not read as none: either may hold the mapping.
+func testTwoManifestsAreNotReadAsNoMapping() {
+    def dir as string init freshDir("regsboth");
+    fs.writeString($dir + "/deck.toml", "[registries]\n");
+    fs.writeString($dir + "/deck.json", '{}');
+    testing.assertThrows("regsBoth", "manifest");
+    fs.removeAll($dir);
+}
+
+# regsBoth reads the mapping where two manifests stand.
+func regsBoth() {
+    registriesHere(os.tempDir() + "/jvc_cli_regsboth");
+}
+
+func testNoManifestMeansNoMapping() {
+    def dir as string init freshDir("regsnone");
+    testing.assertEqual(len(registriesHere($dir)), 0);
+    fs.removeAll($dir);
+}

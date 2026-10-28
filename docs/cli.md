@@ -108,6 +108,13 @@ refused, since one of the two is a mistake. `login`, `logout`, `whoami` and
 `scopes` concern one registry, not one deck, so they take the default order
 alone.
 
+`query`, `app install` / `app update`, `yank`, `unyank`, `claim`, `owners` and
+`trust` need nothing else of the project, so they read only `[registries]`: a
+mistake elsewhere in the manifest does not stop them. A `[registries]` table
+that is malformed, a file that does not decode, or a directory holding two
+manifests still does, because the mapping decides where a name and a
+credential are sent and is never guessed.
+
 **`jvc new` uses no mapping.** It runs before the frame it creates has a
 manifest, so it resolves the engine deck at the default repository only: an
 engine in a scope that lives on another registry needs `--registry <url>` (or

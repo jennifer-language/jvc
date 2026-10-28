@@ -861,12 +861,61 @@ export func load(path as string) {
     try {
         return parse($text, $format);
     } catch (err) {
-        # Named, since a command may load a manifest the user did not think of.
-        if ($err.kind == "manifest") {
-            raise($path + ": " + $err.message);
-        }
-        throw $err;
+        named($path, $err);
     }
+}
+
+/**
+ * Read only a manifest's `[registries]` table, for a command that needs the
+ * scope mapping and nothing else of the project (`claim`, `query`, an app
+ * install). A fault elsewhere in the file, such as a stray key below
+ * `[package.urls]`, is not that command's business. A document that does not
+ * decode, or a `[registries]` table that is malformed, still fails: the
+ * mapping decides where a name and a credential are sent, so it is never
+ * guessed.
+ * @param path {string} the manifest path (ending in .toml, .yaml, .yml, or .json)
+ * @return {list of Dependency} the `[registries]` entries, scope pattern to URL
+ * @throws {Error} kind "manifest", naming the file, for an undecodable document
+ *     or a bad `[registries]`; the `fs` error when the file cannot be read
+ */
+export func loadRegistries(path as string) {
+    def format as string init detectFormat($path);
+    def text as string init fs.readString($path);
+    try {
+        return registriesOf($text, $format);
+    } catch (err) {
+        named($path, $err);
+    }
+}
+
+# registriesOf decodes a document and reads its `[registries]` table alone.
+func registriesOf(text as string, format as string) {
+    if ($format == "toml") {
+        def t as toml.Value init decodeToml($text);
+        expectDocument(toml.typeOf($t, ""));
+        return tomlDeps($t, "registries");
+    }
+    if ($format == "yaml") {
+        def y as yaml.Value init decodeYaml($text);
+        expectDocument(yaml.typeOf($y, ""));
+        return yamlDeps($y, "registries");
+    }
+    if ($format == "json") {
+        def j as json.Value init decodeJson($text);
+        expectDocument(json.typeOf($j, ""));
+        return jsonDeps($j, "registries");
+    }
+    raise("unknown manifest format: " + $format);
+}
+
+# named rethrows a manifest error with the file's path in front, since a
+# command may read a manifest the user did not think of; any other error
+# passes through as it is.
+func named(path as string, err as Error) {
+    if ($err.kind == "manifest") {
+        raise($path + ": " + $err.message);
+    }
+    throw $err;
 }
 
 /**
