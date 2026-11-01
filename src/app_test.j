@@ -1317,3 +1317,30 @@ func testNoHomeMeansNoUserScope() {
     testing.assertEqual(homeProblem($overridden), "");
     testing.assertEqual(homeProblem($prefixed), "");
 }
+
+# The note after an install read a PATH entry spelled differently from the bin
+# directory (a trailing slash, a `~`, a link) as missing, while the shell found
+# the command there.
+func testABinDirectorySpelledDifferentlyIsOnThePath() {
+    def root as string init scratch("pathspell");
+    def bin as string init path.join($root, ".local/bin");
+    fs.mkdirAll($bin);
+    fs.symlink($bin, path.join($root, "link"));
+    testing.assertTrue(onSearchPath($bin, "/usr/bin:" + $bin, ""));
+    testing.assertTrue(onSearchPath($bin, $bin + "/", ""));
+    testing.assertTrue(onSearchPath($bin, $root + "//.local/./bin", ""));
+    testing.assertTrue(onSearchPath($bin, "~/.local/bin", $root));
+    testing.assertTrue(onSearchPath($bin, path.join($root, "link"), ""));
+    testing.assertTrue(onSearchPath(path.join($root, "link"), $bin, ""));
+}
+
+func testOtherOrRelativeEntriesAreNotTheBinDirectory() {
+    def root as string init scratch("pathother");
+    def bin as string init path.join($root, ".local/bin");
+    fs.mkdirAll($bin);
+    testing.assertFalse(onSearchPath($bin, "", ""));
+    testing.assertFalse(onSearchPath($bin, "/usr/bin::/bin", ""));
+    testing.assertFalse(onSearchPath($bin, ".local/bin", ""));
+    testing.assertFalse(onSearchPath($bin, "~/.local/bin", ""));
+    testing.assertFalse(onSearchPath($bin, "~other/.local/bin", $root));
+}

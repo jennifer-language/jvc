@@ -1325,6 +1325,48 @@ export func commandOnPath(name as string, skip as string) {
 }
 
 /**
+ * Report whether a directory is on a `$PATH`-style list, comparing places
+ * rather than spellings. An entry matches when it names the same directory
+ * after a leading `~` is expanded (bash and `which` both expand one), `.`,
+ * `..`, doubled and trailing slashes are dropped, and symbolic links are
+ * resolved. A relative entry never matches, since it depends on the directory
+ * a command is typed in.
+ * @param dir {string} the directory to look for, absolute
+ * @param paths {string} the list, `:`-separated
+ * @param home {string} the home directory a `~` stands for ("" expands none)
+ * @return {bool} true when some entry is that directory
+ */
+export func onSearchPath(dir as string, paths as string, home as string) {
+    def want as string init placeOf($dir, $home);
+    if ($want == "") {
+        return false;
+    }
+    for (def entry in strings.split($paths, ":")) {
+        if (placeOf($entry, $home) == $want) {
+            return true;
+        }
+    }
+    return false;
+}
+
+# placeOf is the directory a PATH entry names, symbolic links resolved when it
+# exists; "" for an empty or relative entry.
+func placeOf(entry as string, home as string) {
+    def p as string init $entry;
+    if (not ($home == "") and ($p == "~" or strings.startsWith($p, "~/"))) {
+        $p = $home + strings.substring($p, 1, len($p));
+    }
+    if (not strings.startsWith($p, "/")) {
+        return "";
+    }
+    try {
+        return fs.realpath($p);
+    } catch (err) {
+        return normalise($p);
+    }
+}
+
+/**
  * A step run on an app's staged tree before it replaces the working install.
  *
  * `run` is called as `run(dir, hasManifest, context)` and returns "" to go on,

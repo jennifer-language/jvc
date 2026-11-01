@@ -3818,3 +3818,31 @@ func testTheMappingAloneStillRefusesABadKey() {
 func regsBadKey() {
     registriesHere(os.tempDir() + "/jvc_cli_regsbadkey");
 }
+
+# onPathNote is silent for a bin directory on PATH, gentle for one reached only
+# through a literal `~` (bash finds it, `env` and `execvp` do not), and warns
+# when it is missing.
+func testThePathNoteTellsALiteralTildeFromAMissingDirectory() {
+    def oldPath as string init os.getEnv("PATH");
+    def oldHome as string init os.getEnv("HOME");
+    def root as string init fs.makeTempDir("", "jvc-pathnote");
+    defer fs.removeAll($root);
+    def bin as string init path.join($root, ".local/bin");
+    fs.mkdirAll($bin);
+    def loc as app.Locations init app.Locations{store: $root, bin: $bin, relocatable: false};
+    os.setEnv("HOME", $root);
+    os.setEnv("PATH", "/usr/bin:" + $bin + "/");
+    def onPath as string init onPathNote($loc);
+    os.setEnv("PATH", "~/.local/bin:/usr/bin");
+    def tilde as string init onPathNote($loc);
+    os.setEnv("PATH", "~/.local/bin:" + $bin);
+    def both as string init onPathNote($loc);
+    os.setEnv("PATH", "/usr/bin");
+    def missing as string init onPathNote($loc);
+    os.setEnv("PATH", $oldPath);
+    os.setEnv("HOME", $oldHome);
+    testing.assertEqual($onPath, "");
+    testing.assertContains($tilde, "only as a literal ~ entry");
+    testing.assertEqual($both, "");
+    testing.assertContains($missing, "is not on your PATH");
+}

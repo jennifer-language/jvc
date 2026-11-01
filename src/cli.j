@@ -756,6 +756,18 @@ func localSource(
         };
     }
     def tag as string init strings.trim($tagFlag);
+    if (not ($tag == "") and not tagOnHead($dir, $tag)) {
+        # The gate checked HEAD; a tag elsewhere is other code, which the
+        # registry would read and publish unchecked.
+        return Source{
+            repository: $repo,
+            tag: "",
+            error: "--tag " + $tag + " is not on HEAD, which holds " + $version +
+                " and is what the checks above ran on. Check out the tag and " +
+                "publish from there, so what is checked is what is published:\n  git checkout " +
+                $tag
+        };
+    }
     if ($tag == "") {
         $tag = tagForVersion($dir, $version);
     }
@@ -806,6 +818,34 @@ func pushedTagProblem(dir as string, src as Source, repoFlag as string, remote a
             "cannot read it:\n  git push " + $asked + " " + $src.tag;
     }
     return "";
+}
+
+# otherForges points at the remotes on other hosts, when a registry's refusal
+# names the host of the one published from: a registry reading only some forges
+# refuses `origin` on a self-hosted one, while a second remote is on a forge it
+# reads. "" when the refusal is about something else or no other host is set.
+func otherForges(dir as string, remote as string, repository as string, refusal as string) {
+    def host as string init git.hostOfRemote($repository);
+    if ($host == "" or not strings.contains(strings.lower($refusal), $host)) {
+        return "";
+    }
+    def got as git.Result init git.run(git.remotesArgv($dir));
+    if (not $got.ok) {
+        return "";
+    }
+    def lines as list of string init [];
+    for (def line in strings.split($got.output, "\n")) {
+        def name as string init strings.trim($line);
+        if ($name == "" or $name == remoteName($remote)) {
+            continue;
+        }
+        def url as git.Result init git.run(git.remoteUrlArgv($dir, $name));
+        def other as string init git.hostOfRemote($url.output);
+        if ($url.ok and not ($other == "") and not ($other == $host)) {
+            $lines[] = "\n  `" + $name + "` is on " + $other + ": jvc publish --remote " + $name;
+        }
+    }
+    return strings.join($lines, "");
 }
 
 # otherRemotes names the remotes that do exist, when the one asked for does not.
@@ -861,6 +901,13 @@ func tagElsewhere(dir as string, version as string) {
         }
     }
     return "";
+}
+
+# tagOnHead reports whether a tag points at HEAD. A git that cannot list the
+# tags answers no, so an unchecked tag is never let through.
+func tagOnHead(dir as string, tag as string) {
+    def got as git.Result init git.run(git.tagsAtArgv($dir, "HEAD"));
+    return $got.ok and lists.contains(git.parseTags($got.output), $tag);
 }
 
 # tagForVersion finds the tag naming this version, accepting both the bare and
@@ -5415,13 +5462,19 @@ export func runAppInstall(
 }
 
 # onPathNote warns when the bin directory is not on PATH, since an installed
-# command the shell cannot find is the likeliest thing to go wrong.
+# command the shell cannot find is the likeliest thing to go wrong. An entry
+# reaching it only through a literal `~` gets a gentler note: bash and `which`
+# expand one, so the shell finds the command, but `env`, `sh` and anything
+# calling `execvp` do not.
 func onPathNote(loc as app.Locations) {
     def paths as string init os.getEnv("PATH");
-    for (def part in strings.split($paths, ":")) {
-        if ($part == $loc.bin) {
-            return "";
-        }
+    if (app.onSearchPath($loc.bin, $paths, "")) {
+        return "";
+    }
+    if (app.onSearchPath($loc.bin, $paths, os.getEnv("HOME"))) {
+        return "\n\nnote: " + $loc.bin + " is on your PATH only as a literal ~ entry, which " +
+            "bash and `which` expand but most other programs do not; write it as " +
+            "$HOME/... (unquoted ~ in a profile works too)";
     }
     return "\n\nnote: " + $loc.bin + " is not on your PATH; add it to run the command by name";
 }
@@ -5703,6 +5756,9 @@ export func runPublish(
         return fail($head + $src.error);
     }
     def sent as Outcome init publishToRegistry($base, $src);
+    if (not $sent.ok and strings.trim($repoFlag) == "") {
+        $sent.message = $sent.message + otherForges($dir, $remote, $src.repository, $sent.message);
+    }
     return Outcome{ok: $sent.ok, message: $head + $sent.message};
 }
 
