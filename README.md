@@ -17,6 +17,17 @@ result, and pins it so a fresh checkout rebuilds the same tree.
 
 ## Install
 
+The quickest way needs only `jennifer` and `git`: jvc installs itself from a
+clone.
+
+```sh
+git clone https://github.com/jennifer-language/jvc.git /tmp/jvc
+/tmp/jvc/bin/jvc app install https://github.com/jennifer-language/jvc
+rm -rf /tmp/jvc
+```
+
+Or from a release:
+
 ```sh
 sudo apt install ./jvc_0.1.0_all.deb          # Debian / Ubuntu
 sudo pacman -U jvc-0.1.0-1-any.pkg.tar.zst    # Arch
@@ -47,7 +58,7 @@ Published at **<https://jvc.jennifer-lang.dev/>**. The pages in `docs/` are a
 | | |
 | --- | --- |
 | [Introduction](https://jvc.jennifer-lang.dev/) | the vocabulary, the three shapes, the layout |
-| [Installing jvc](https://jvc.jennifer-lang.dev/install.html) | packages, completions, building the artifacts |
+| [Installing jvc](https://jvc.jennifer-lang.dev/install.html) | from a clone, packages, completions, building the artifacts |
 | [Quick start](https://jvc.jennifer-lang.dev/quickstart.html) | the path through the verbs |
 | [The jvc CLI](https://jvc.jennifer-lang.dev/cli.html) | every verb and flag, in full |
 | [The deck manifest](https://jvc.jennifer-lang.dev/manifest.html) | the format, as a guide |

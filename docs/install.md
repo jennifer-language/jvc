@@ -1,5 +1,31 @@
 # Installing jvc
 
+## From a clone
+
+The quickest way needs only `jennifer` (0.25.0 or later) and `git`: run jvc
+straight out of a clone once, and have it install itself.
+
+```sh
+git clone https://github.com/jennifer-language/jvc.git /tmp/jvc
+/tmp/jvc/bin/jvc app install https://github.com/jennifer-language/jvc
+rm -rf /tmp/jvc
+jvc version
+```
+
+The installed copy is self-contained, so the clone can go once the install has
+finished. It lives under `~/.local/share/jvc/apps/jvc` with its command
+linked into `~/.local/bin`; if that directory is not on your `PATH`, jvc says
+so. It also says so when `PATH` holds it only as a literal `~/.local/bin`
+(usually from `export PATH="~/.local/bin:$PATH"`, where the quotes keep the
+`~`): bash and `which` expand that, so your shell finds `jvc`, but `env`, `sh`,
+cron and most programs do not. Write `$HOME/.local/bin` instead. It installs the newest release tag, or the default branch head while the
+repository has none, and `jvc app update jvc` moves it on later. This copy is
+yours rather than the system's: see
+[Installing jvc with jvc](#installing-jvc-with-jvc) before mixing it with a
+package.
+
+## Release packages
+
 Each release publishes three artifacts, each with a sidecar `.sha256`. All
 need `jennifer` at jvc's `[engines]` floor (0.25.0). The `.deb` declares that
 floor. The Arch packages cannot: the interpreter packages provide an
