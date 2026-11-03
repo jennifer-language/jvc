@@ -77,8 +77,14 @@ the floor means bumping `JENNIFER_RELEASE` there too.
 `.github/workflows/release.yml` runs that suite, checks the tag against
 `VERSION` and `deck.toml`, then builds and publishes the artifacts.
 
-`.github/workflows/docs.yml` builds this book and deploys it to
-<https://jvc.jennifer-lang.dev/> on every push to main. The custom domain is
-bound by `docs/CNAME`, which Grimoire copies through as an asset. Pages
-publishes exactly what the artifact holds, so losing that file unbinds the
-domain silently; the workflow asserts it is there.
+`.github/workflows/docs.yml` builds this book with Grimoire's shared [GitHub
+Pages workflow](https://grimoire.jennifer-lang.dev/github-pages.html) and
+deploys it to <https://jvc.jennifer-lang.dev/>. The root is the book as it
+stood at the highest release tag, so it describes the release a reader
+installs. Until the first release tag, main is published at the root instead.
+Unreleased documentation is not published (no `/dev/`). A pull request builds
+the book without publishing it. The workflow and the Grimoire image are pinned
+to the same Grimoire release; move both together. The custom domain is bound by
+`docs/CNAME`, which Grimoire copies through as an asset. Pages publishes
+exactly what the artifact holds, so losing that file unbinds the domain
+silently; the workflow's `check` asserts it is there.

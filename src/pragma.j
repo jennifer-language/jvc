@@ -438,13 +438,13 @@ export func versionFloor(source as string) {
  * @return {list of string} the merged set
  */
 export func merge(into as list of string, more as list of string) {
-    def out as list of string init $into;
+    def added as list of string init [];
     for (def name in $more) {
-        if (not lists.contains($out, $name)) {
-            $out[] = $name;
+        if (not lists.contains($into, $name) and not lists.contains($added, $name)) {
+            $added[] = $name;
         }
     }
-    return $out;
+    return lists.concat($into, $added);
 }
 
 /**

@@ -53,7 +53,8 @@ jvc publish                               # gate, then publish a tag
 
 Published at **<https://jvc.jennifer-lang.dev/>**. The pages in `docs/` are a
 [Grimoire](https://grimoire.jennifer-lang.dev/) book, built by
-`grimoire build --config grimoire.toml` and deployed on every push to main.
+`grimoire build --config grimoire.toml`. The site shows main until the first
+release; from then on it shows the latest release.
 
 | | |
 | --- | --- |

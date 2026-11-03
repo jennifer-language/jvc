@@ -25,6 +25,7 @@
  */
 
 use strings;
+use lists;
 use maps;
 import "./manifest.j" as manifest;
 import "./deckname.j" as deckname;
@@ -51,9 +52,9 @@ import "./safepath.j" as safepath;
  */
 export func problems(m as manifest.Manifest) {
     def out as list of string init [];
-    $out = constraintProblems($out, "decks", $m.decks);
-    $out = constraintProblems($out, "dev-decks", $m.devDecks);
-    $out = constraintProblems($out, "conflicts", $m.conflicts);
+    $out = lists.concat($out, constraintProblems("decks", $m.decks));
+    $out = lists.concat($out, constraintProblems("dev-decks", $m.devDecks));
+    $out = lists.concat($out, constraintProblems("conflicts", $m.conflicts));
     for (def dep in $m.engines) {
         if (isBlank($dep.constraint)) {
             $out[] = emptyProblem("engines", $dep.name);
@@ -174,23 +175,20 @@ func isDeckName(name as string) {
     return deckname.isScoped($name) and deckname.isValid($name);
 }
 
-# constraintProblems appends one line per dependency in deps whose name is not a
-# deck name or whose constraint is outside the grammar. `table` names the
-# manifest table, so the user can find the line.
-func constraintProblems(
-    out as list of string,
-    table as string,
-    deps as list of manifest.Dependency) {
-    def found as list of string init $out;
+# constraintProblems is one line per dependency in deps whose name is not a deck
+# name or whose constraint is outside the grammar. `table` names the manifest
+# table, so the user can find the line.
+func constraintProblems(table as string, deps as list of manifest.Dependency) {
+    def out as list of string init [];
     for (def dep in $deps) {
         if (not isDeckName($dep.name)) {
-            $found[] = "[" + $table + "] " + $dep.name + ": not a valid deck name";
+            $out[] = "[" + $table + "] " + $dep.name + ": not a valid deck name";
         } elseif (isBlank($dep.constraint)) {
-            $found[] = emptyProblem($table, $dep.name);
+            $out[] = emptyProblem($table, $dep.name);
         } elseif (not constraint.isValidConstraint($dep.constraint)) {
-            $found[] = "[" + $table + "] " + $dep.name + " = \"" + $dep.constraint +
+            $out[] = "[" + $table + "] " + $dep.name + " = \"" + $dep.constraint +
                 "\": not a valid constraint";
         }
     }
-    return $found;
+    return $out;
 }

@@ -46,6 +46,7 @@
 use os;
 use io;
 use strings;
+use lists;
 use hash;
 use encoding;
 use convert;
@@ -120,11 +121,7 @@ func mirrorGit(dir as string) {
 
 # withArgs appends args to an argv prefix.
 func withArgs(prefix as list of string, args as list of string) {
-    def out as list of string init $prefix;
-    for (def a in $args) {
-        $out[] = $a;
-    }
-    return $out;
+    return lists.concat($prefix, $args);
 }
 
 /**
