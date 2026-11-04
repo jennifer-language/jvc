@@ -11,6 +11,8 @@
 
 use testing;
 use lists;
+use strings;
+import "semver.j" as semver;
 
 # deckDir makes an empty deck skeleton and returns its path.
 func deckDir(label as string) {
@@ -703,4 +705,88 @@ func testRunOverlaysStartsInTheRelease() {
     testing.assertTrue(fs.exists($dir + "/jvc-made.txt"));
     testing.assertFalse(fs.exists(path.join(os.cwd(), "jvc-made.txt")));
     fs.removeAll($dir);
+}
+
+func testTheTimeLimitIsReadFromTheEnvironment() {
+    def previous as string init os.getEnv("JVC_GATE_TIMEOUT");
+    os.setEnv("JVC_GATE_TIMEOUT", "");
+    testing.assertEqual(timeoutSeconds(), DEFAULT_TIMEOUT_SECONDS);
+    os.setEnv("JVC_GATE_TIMEOUT", " 30 ");
+    testing.assertEqual(timeoutSeconds(), 30);
+    os.setEnv("JVC_GATE_TIMEOUT", "0");
+    testing.assertEqual(timeoutSeconds(), 0);
+    # Not a whole number of seconds: the default, not no limit.
+    for (def bad in ["10m", "-5", "1.5", "9999999999"]) {
+        os.setEnv("JVC_GATE_TIMEOUT", $bad);
+        testing.assertEqual(timeoutSeconds(), DEFAULT_TIMEOUT_SECONDS);
+    }
+    os.setEnv("JVC_GATE_TIMEOUT", $previous);
+}
+
+func testABoundedRunGoesThroughTimeout() {
+    def argv as list of string init ["env", "-i", "jennifer", "test", "x_test.j"];
+    testing.assertEqual(
+        strings.join(boundedArgv($argv, 600, "/usr/bin/timeout"), " "),
+        "/usr/bin/timeout -k 10 600 env -i jennifer test x_test.j");
+    # No limit, or nothing to enforce one with: the command as it was.
+    testing.assertEqual(boundedArgv($argv, 0, "/usr/bin/timeout"), $argv);
+    testing.assertEqual(boundedArgv($argv, 600, ""), $argv);
+}
+
+# 124 is always the limit; 137 only when the run lasted the whole limit, since a
+# KILL before then came from somewhere else.
+func testOnlyTheLimitCountsAsStopped() {
+    testing.assertTrue(stoppedByLimit(124, 3, 600));
+    testing.assertTrue(stoppedByLimit(137, 610, 600));
+    testing.assertFalse(stoppedByLimit(137, 5, 600));
+    testing.assertFalse(stoppedByLimit(1, 600, 600));
+    testing.assertFalse(stoppedByLimit(124, 3, 0));
+}
+
+# hangingOverlay waits for a request nobody sends, the way a stand-in server
+# does when the code under test fails before it makes its call.
+func hangingOverlay() {
+    def lines as list of string init [
+        'use testing;',
+        'use httpd;',
+        '',
+        'func testWaitsForever() {',
+        '    def srv as httpd.Server init httpd.listen("127.0.0.1:0");',
+        '    httpd.accept($srv);',
+        '    testing.assertTrue(true);',
+        '}',
+        ''
+    ];
+    return strings.join($lines, "\n");
+}
+
+# A hung overlay ends the run with a failure that says why, at publish and at
+# install, instead of hanging jvc with it.
+func testAHungOverlayIsStoppedAndSaysSo() {
+    if (timeoutCommand() == "") {
+        # No coreutils `timeout` here, so there is no limit to test.
+        return;
+    }
+    def dir as string init deckDir("hung");
+    writeModule($dir, "demo", goodModule(), hangingOverlay());
+    def previous as string init os.getEnv("JVC_GATE_TIMEOUT");
+    os.setEnv("JVC_GATE_TIMEOUT", "2");
+    def installed as Finding init runOverlays($dir);
+    def gate as Report init verify($dir);
+    os.setEnv("JVC_GATE_TIMEOUT", $previous);
+    testing.assertFalse($installed.ok);
+    testing.assertContains($installed.detail, "src/demo_test.j did not finish within 2s");
+    testing.assertFalse($gate.ok);
+    testing.assertContains($gate.findings[1].detail, "src/demo_test.j did not finish within 2s");
+    testing.assertContains($gate.findings[1].detail, "JVC_GATE_TIMEOUT");
+    fs.removeAll($dir);
+}
+
+func testTheGatesInterpreterNamesItsVersion() {
+    testing.assertTrue(semver.isValid(interpreterVersion()));
+    def previous as string init os.getEnv("JVC_JENNIFER");
+    os.setEnv("JVC_JENNIFER", "/nonexistent/jvc-no-jennifer");
+    def missing as string init interpreterVersion();
+    os.setEnv("JVC_JENNIFER", $previous);
+    testing.assertEqual($missing, "");
 }

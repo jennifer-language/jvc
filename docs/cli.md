@@ -1409,6 +1409,31 @@ finding.
 `$JVC_JENNIFER` overrides the interpreter the gate shells out to; otherwise
 `jennifer` is taken from `PATH`.
 
+**Every lint and overlay run has a time limit.** A test waiting on something
+that never comes, such as a stand-in server's `httpd.accept` for a request the
+code under test failed before sending, would otherwise hang `jvc publish` with
+no output. Each run goes through coreutils `timeout` and is stopped after 600
+seconds, reported as a failed check that says so. `$JVC_GATE_TIMEOUT` sets
+another limit in seconds, and `0` removes it. `jvc install --runtests` uses the
+same limit. Where no `timeout` is on `PATH` (a stock macOS), the runs are not
+bounded.
+
+**An interpreter older than the deck's floor is named before the gate runs.**
+When the gate's interpreter is below the `jennifer` floor in `[engines]`, jvc
+warns first and repeats the warning under a failure. That matters for a
+development build: it skips version floors, so it loads the deck, and the
+tests then fail, or hang until the time limit, wherever they call what it does
+not have yet. A development build is judged by the release it leads to, so
+`0.26.0-dev+3` meets `>=0.26.0`.
+
+```
+$ jvc publish
+warning: the gate runs jennifer 0.25.0-dev+30.966c976, a development build of 0.25.0, below this deck's [engines] jennifer ">=0.26.0".
+  A development build skips version floors, so the gate runs anyway, but the tests may fail,
+  or hang until the gate's time limit, wherever they call what this build lacks.
+  Set $JVC_JENNIFER to a newer interpreter if they do.
+```
+
 ```
 $ jvc pack --operator-command
 packaged @jennifer/routeros@0.1.0

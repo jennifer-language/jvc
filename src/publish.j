@@ -34,7 +34,9 @@
  */
 
 use fs;
+use io;
 use json;
+use convert;
 use strings;
 use lists;
 use path;
@@ -511,10 +513,20 @@ export func check(dir as string, runChecks as bool) {
             operatorCommand: ""
         };
     }
+    # Said before the gate runs, since an old interpreter is what makes a run
+    # slow to fail, and again under a failure, which it may explain.
+    def warning as string init engineWarning($m.engines, verify.interpreterVersion());
+    if (not ($warning == "")) {
+        io.eprintf("warning: %s\n\n", $warning);
+    }
     def report as verify.Report init verify.verify($dir);
     if (not $report.ok) {
+        def why as string init "";
+        if (not ($warning == "")) {
+            $why = "\n\nnote: " + $warning;
+        }
         return fail("publish blocked by the quality gate:" +
-            verify.reportText($report) +
+            verify.reportText($report) + $why +
             "\n\nfix these, or pass --no-verify to publish anyway");
     }
     return Result{
@@ -523,6 +535,48 @@ export func check(dir as string, runChecks as bool) {
             prereleaseNote($m.pkg.version),
         operatorCommand: ""
     };
+}
+
+/**
+ * Warn when the interpreter the gate runs is older than the deck's `jennifer`
+ * floor in `[engines]`.
+ *
+ * A release build that old refuses the deck's files at load (their version
+ * pragma), so the gate fails plainly. A `-dev` build skips every version floor
+ * and loads them, so the gate runs, and the tests then fail, or hang until the
+ * gate's time limit, wherever they call something the build does not have
+ * yet. A development build is judged by its release core (`0.25.0` for
+ * `0.25.0-dev+30`): it is a build towards that release, so one at or past the
+ * floor's core gets no warning, though an early one may still lack a feature.
+ * This is advice; the gate still runs.
+ * @param engines {list of manifest.Dependency} the deck's `[engines]`
+ * @param version {string} the gate interpreter's version, "" when unknown
+ * @return {string} the warning, or "" when there is nothing to say
+ */
+export func engineWarning(engines as list of manifest.Dependency, version as string) {
+    if ($version == "" or not semver.isValid($version) or
+        not manifest.depListHas($engines, "jennifer")) {
+        return "";
+    }
+    def spec as string init manifest.depListGet($engines, "jennifer");
+    def v as semver.Version init semver.parse($version);
+    def core as string init convert.toString($v.major) + "." + convert.toString($v.minor) +
+        "." + convert.toString($v.patch);
+    # A floor outside the grammar is validate's to report, not this.
+    if (not constraint.isValidConstraint($spec) or constraint.satisfies($core, $spec)) {
+        return "";
+    }
+    if ($v.prerelease == "") {
+        return "the gate runs jennifer " + $version + ", below this deck's " +
+            "[engines] jennifer \"" + $spec + "\"; set $JVC_JENNIFER to a newer " +
+            "interpreter";
+    }
+    return "the gate runs jennifer " + $version + ", a development build of " +
+        $core + ", below this deck's [engines] jennifer \"" + $spec + "\".\n" +
+        "  A development build skips version floors, so the gate runs anyway, " +
+        "but the tests may fail,\n  or hang until the gate's time limit, " +
+        "wherever they call what this build lacks.\n" +
+        "  Set $JVC_JENNIFER to a newer interpreter if they do.";
 }
 
 /**

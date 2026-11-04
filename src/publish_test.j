@@ -10,6 +10,7 @@
 
 use testing;
 use os;
+use strings;
 
 # rm deletes a file if it exists (fs.remove errors on a missing path).
 func rm(p as string) {
@@ -517,4 +518,45 @@ func testPublishRefusesABinThatIsNotThere() {
 func testAUseInABlockCommentIsNotADeclaration() {
     testing.assertEqual(len(usesOf("/*\nuse term;\n*/\nuse io;\n")), 1);
     testing.assertEqual(len(usesOf("def t as string init '\nuse gpio;\n';\n")), 0);
+}
+
+# floor is an [engines] table asking for jennifer at `spec`.
+func floor(spec as string) {
+    return [manifest.Dependency{name: "jennifer", constraint: $spec}];
+}
+
+# A development build below the floor loads the deck anyway, so the warning says
+# what to expect from the tests.
+func testAnOldDevelopmentBuildIsWarnedAbout() {
+    def w as string init engineWarning(floor(">=0.26.0"), "0.25.0-dev+30.966c976");
+    testing.assertContains($w, "jennifer 0.25.0-dev+30.966c976, a development build of 0.25.0");
+    testing.assertContains($w, "[engines] jennifer \">=0.26.0\"");
+    testing.assertContains($w, "hang until the gate's time limit");
+    testing.assertContains($w, "$JVC_JENNIFER");
+}
+
+# A build towards the floor's own release is judged by that release.
+func testADevelopmentBuildOfTheFloorIsNotWarnedAbout() {
+    testing.assertEqual(engineWarning(floor(">=0.26.0"), "0.26.0-dev+3.abc1234"), "");
+    testing.assertEqual(engineWarning(floor(">=0.26.0"), "0.27.0-dev+1"), "");
+}
+
+func testAReleaseBelowTheFloorIsWarnedAbout() {
+    def w as string init engineWarning(floor(">=0.26.0"), "0.25.0");
+    testing.assertContains($w, "jennifer 0.25.0, below this deck's [engines]");
+    testing.assertContains($w, "jennifer \">=0.26.0\"");
+    testing.assertFalse(strings.contains($w, "development build"));
+    testing.assertEqual(engineWarning(floor(">=0.26.0"), "0.26.1"), "");
+}
+
+# Nothing to compare: no jennifer floor, an unknown version, or a floor outside
+# the grammar (which validation reports on its own).
+func testNoFloorOrNoVersionIsNoWarning() {
+    def other as list of manifest.Dependency init [
+        manifest.Dependency{name: "jennifer-tiny", constraint: ">=9.0.0"}
+    ];
+    testing.assertEqual(engineWarning($other, "0.25.0-dev+30"), "");
+    testing.assertEqual(engineWarning(floor(">=0.26.0"), ""), "");
+    testing.assertEqual(engineWarning(floor(">=0.26.0"), "not a version"), "");
+    testing.assertEqual(engineWarning(floor("whenever"), "0.25.0"), "");
 }

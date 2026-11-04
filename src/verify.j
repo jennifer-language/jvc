@@ -36,6 +36,15 @@
  *     any `warning` or `error` diagnostic blocks the release. This catches doc
  *     drift, such as an `@param` for a parameter that no longer exists.
  *
+ * **Every run is bounded.** `os.run` has no timeout, and a test waiting on
+ * something that never comes (an `httpd.accept` for a request the code under
+ * test never sent, say, because the interpreter lacks a function it calls)
+ * would otherwise hang `jvc publish` with it, silently. So each lint and
+ * overlay run goes through coreutils `timeout` when one is on PATH, stopped
+ * after `$JVC_GATE_TIMEOUT` seconds (`DEFAULT_TIMEOUT_SECONDS` when unset, no
+ * limit at `0`) and reported as a failure that says so. Without `timeout` on
+ * PATH (a stock macOS) the runs are unbounded, as before.
+ *
  * **`jennifer fmt` is not in the gate.** The gate asks whether a deck is
  * correct; formatting is not. Line width is a lint `info` finding, advisory
  * like the rest.
@@ -52,6 +61,8 @@ use path;
 use strings;
 use convert;
 use maps;
+use lists;
+use time;
 import "docblock.j" as docblock;
 import "./pragma.j" as pragma;
 
@@ -96,6 +107,21 @@ export def const PASSED_ENV as list of string init [
     "JENNIFER_SYSMODDIR",
     "JVC_JENNIFER"
 ];
+
+/**
+ * How long one lint or overlay run may take, in seconds, when
+ * `$JVC_GATE_TIMEOUT` does not say: long enough for a slow suite on a slow
+ * runner, short enough that a hung one ends a CI job before its own limit does.
+ */
+export def const DEFAULT_TIMEOUT_SECONDS as int init 600;
+
+# How long `timeout` waits after its TERM before it sends KILL.
+def const KILL_AFTER_SECONDS as int init 10;
+
+# What `timeout` exits with when it stopped the command: 124 after TERM, 137
+# (128 + KILL) when the command ignored that.
+def const STOPPED_BY_TERM as int init 124;
+def const STOPPED_BY_KILL as int init 137;
 
 # The prefix of the throwaway home directory each isolated run gets.
 def const HOME_PREFIX as string init "jvc-overlay-home";
@@ -147,6 +173,143 @@ export func interpreter() {
         return $override;
     }
     return DEFAULT_JENNIFER;
+}
+
+/**
+ * The time limit for one lint or overlay run, in seconds: `$JVC_GATE_TIMEOUT`
+ * when it is a whole number, else `DEFAULT_TIMEOUT_SECONDS`. `0` means no
+ * limit.
+ * @return {int} the limit in seconds, 0 for none
+ */
+export func timeoutSeconds() {
+    def raw as string init strings.trim(os.getEnv("JVC_GATE_TIMEOUT"));
+    if ($raw == "" or len($raw) > 9) {
+        return DEFAULT_TIMEOUT_SECONDS;
+    }
+    for (def ch in strings.chars($raw)) {
+        if ($ch < "0" or $ch > "9") {
+            return DEFAULT_TIMEOUT_SECONDS;
+        }
+    }
+    return convert.toInt($raw);
+}
+
+/**
+ * Find coreutils `timeout` on `$PATH`.
+ * @return {string} its path, or "" when PATH has none
+ */
+export func timeoutCommand() {
+    for (def dir in strings.split(os.getEnv("PATH"), ":")) {
+        if ($dir == "") {
+            continue;
+        }
+        def candidate as string init path.join($dir, "timeout");
+        if (fs.exists($candidate) and not fs.isDir($candidate)) {
+            return $candidate;
+        }
+    }
+    return "";
+}
+
+/**
+ * Wrap a command so `timeout` stops it after `seconds`: TERM first, KILL
+ * `KILL_AFTER_SECONDS` later if it is still running. Unchanged when `seconds`
+ * is 0 or there is no `command`. Pure.
+ * @param argv {list of string} the command and its arguments
+ * @param seconds {int} the limit, 0 for none
+ * @param command {string} the `timeout` executable, "" when there is none
+ * @return {list of string} the bounded argv
+ */
+export func boundedArgv(argv as list of string, seconds as int, command as string) {
+    if ($seconds <= 0 or $command == "") {
+        return $argv;
+    }
+    def out as list of string init [
+        $command,
+        "-k",
+        convert.toString(KILL_AFTER_SECONDS),
+        convert.toString($seconds)
+    ];
+    return lists.concat($out, $argv);
+}
+
+/**
+ * Report whether a bounded run ended because `timeout` stopped it. 124 is
+ * `timeout`'s own answer; 137 is a KILL, which is only `timeout`'s doing when
+ * the run lasted the whole limit (otherwise something else killed it, the
+ * kernel's out-of-memory killer, say). Pure.
+ * @param exitCode {int} the run's exit code
+ * @param elapsed {int} how long the run took, in seconds
+ * @param seconds {int} the limit it ran under, 0 for none
+ * @return {bool} true when the limit ended the run
+ */
+export func stoppedByLimit(exitCode as int, elapsed as int, seconds as int) {
+    if ($seconds <= 0) {
+        return false;
+    }
+    if ($exitCode == STOPPED_BY_TERM) {
+        return true;
+    }
+    return $exitCode == STOPPED_BY_KILL and $elapsed >= $seconds;
+}
+
+# Bounded is one run under the gate's time limit: its result, and whether the
+# limit is what ended it.
+def struct Bounded {
+    result as os.Result,
+    stopped as bool
+};
+
+# runBounded runs a command under the time limit (`boundedArgv`). Throws as
+# `os.run` does.
+func runBounded(argv as list of string) {
+    def seconds as int init timeoutSeconds();
+    def command as string init timeoutCommand();
+    if ($command == "") {
+        $seconds = 0;
+    }
+    def started as int init time.unix(time.now());
+    def r as os.Result init os.run(boundedArgv($argv, $seconds, $command));
+    def elapsed as int init time.unix(time.now()) - $started;
+    return Bounded{result: $r, stopped: stoppedByLimit($r.exitCode, $elapsed, $seconds)};
+}
+
+# stoppedText is the failure for a run the limit ended, naming what ran.
+func stoppedText(what as string) {
+    return $what + " did not finish within " + convert.toString(timeoutSeconds()) +
+        "s and was stopped. A test waiting on something that never comes " +
+        "hangs here (an `httpd.accept` for a request the code under test never " +
+        "sent, say, because this interpreter lacks a function it calls); set " +
+        "$JVC_GATE_TIMEOUT to allow longer, or to 0 for no limit";
+}
+
+/**
+ * Ask the interpreter the gate runs (`interpreter()`) for its version, which
+ * need not be the one running jvc: `$JVC_JENNIFER` can name another.
+ * @return {string} the version as it prints it, e.g. "0.25.0-dev+30.966c976",
+ *     or "" when it cannot be started or answers with something else
+ */
+export func interpreterVersion() {
+    def run as Bounded init Bounded{
+        result: os.Result{exitCode: 0, stdout: "", stderr: ""},
+        stopped: false
+    };
+    try {
+        $run = runBounded([interpreter(), "version"]);
+    } catch (err) {
+        return "";
+    }
+    if ($run.stopped or not ($run.result.exitCode == 0)) {
+        return "";
+    }
+    def line as string init strings.trim(strings.split($run.result.stdout, "\n")[0]);
+    if (strings.startsWith($line, "jennifer ")) {
+        $line = strings.trim(strings.substring($line, len("jennifer "), len($line)));
+    }
+    if (strings.startsWith($line, "v")) {
+        $line = strings.substring($line, 1, len($line));
+    }
+    return $line;
 }
 
 /**
@@ -391,14 +554,24 @@ export func runIsolatedIn(argv as list of string, cwd as string, vendor as strin
     return os.run(isolatedArgvIn($argv, $home, $cwd, $vendor));
 }
 
-# runFailure reports `env` or the `sh` that changes directory failing to start
-# the interpreter (exit 126 or 127 with an `env:` or `sh:` message), so a wrong
+# runIsolatedBounded is `runIsolatedIn` under the gate's time limit: `timeout`
+# goes outside `env -i`, so it keeps the PATH it was found on, and the command
+# it stops is the interpreter itself (`env` and `sh` both exec it).
+func runIsolatedBounded(argv as list of string, cwd as string, vendor as string) {
+    def home as string init fs.makeTempDir("", HOME_PREFIX);
+    defer fs.removeAll($home);
+    return runBounded(isolatedArgvIn($argv, $home, $cwd, $vendor));
+}
+
+# runFailure reports `env`, the `sh` that changes directory, or the `timeout`
+# that bounds the run failing to start the interpreter (exit 126 or 127 with an
+# `env:`, `sh:` or `timeout:` message), so a wrong
 # `$JVC_JENNIFER` reads as that rather than as a failed test; "" otherwise. A
 # throw from `os.run` (no `env`, no temporary directory) is caught by the
 # callers.
 func runFailure(r as os.Result) {
     def starter as bool init strings.startsWith($r.stderr, "env:") or
-        strings.startsWith($r.stderr, "sh:");
+        strings.startsWith($r.stderr, "sh:") or strings.startsWith($r.stderr, "timeout:");
     if (($r.exitCode == 126 or $r.exitCode == 127) and $starter) {
         return cannotRun(strings.trim($r.stderr));
     }
@@ -446,12 +619,19 @@ func saysNoTests(output as string, exitCode as int) {
 # exit code is read.
 func runOverlay(dir as string, overlay as string, stage as string, vendor as string) {
     def staged as string init path.join($stage, rel(path.join($dir, "src"), $overlay));
-    def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
+    def run as Bounded init Bounded{
+        result: os.Result{exitCode: 0, stdout: "", stderr: ""},
+        stopped: false
+    };
     try {
-        $r = runIsolatedIn([interpreter(), "test", $staged], $stage, $vendor);
+        $run = runIsolatedBounded([interpreter(), "test", $staged], $stage, $vendor);
     } catch (err) {
         return cannotRun($err.message);
     }
+    if ($run.stopped) {
+        return stoppedText(rel($dir, $overlay)) + STAGED_NOTE;
+    }
+    def r as os.Result init $run.result;
     def broken as string init runFailure($r);
     if (not ($broken == "")) {
         return $broken;
@@ -540,11 +720,22 @@ func lintCheck(dir as string) {
     if (len($modules) == 0) {
         return Finding{check: "lint", ok: true, detail: "no modules to lint"};
     }
-    def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
+    def run as Bounded init Bounded{
+        result: os.Result{exitCode: 0, stdout: "", stderr: ""},
+        stopped: false
+    };
     try {
-        $r = os.run($argv);
+        $run = runBounded($argv);
     } catch (err) {
         return Finding{check: "lint", ok: false, detail: cannotRun($err.message)};
+    }
+    if ($run.stopped) {
+        return Finding{check: "lint", ok: false, detail: stoppedText("jennifer lint")};
+    }
+    def r as os.Result init $run.result;
+    def broken as string init runFailure($r);
+    if (not ($broken == "")) {
+        return Finding{check: "lint", ok: false, detail: $broken};
     }
     if ($r.exitCode == 0) {
         return Finding{
@@ -688,13 +879,20 @@ export func runOverlaysWith(dir as string, vendor as string) {
         return Finding{check: "tests", ok: true, detail: "the deck ships no tests"};
     }
     for (def overlay in $overlays) {
-        def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
+        def run as Bounded init Bounded{
+            result: os.Result{exitCode: 0, stdout: "", stderr: ""},
+            stopped: false
+        };
         try {
             def argv as list of string init [interpreter(), "test", "--allow-empty", $overlay];
-            $r = runIsolatedIn($argv, $root, $tree);
+            $run = runIsolatedBounded($argv, $root, $tree);
         } catch (err) {
             return Finding{check: "tests", ok: false, detail: cannotRun($err.message)};
         }
+        if ($run.stopped) {
+            return Finding{check: "tests", ok: false, detail: stoppedText(rel($root, $overlay))};
+        }
+        def r as os.Result init $run.result;
         def broken as string init runFailure($r);
         if (not ($broken == "")) {
             return Finding{check: "tests", ok: false, detail: $broken};
