@@ -42,6 +42,7 @@ use json;
 use strings;
 use convert;
 import "http.j" as http;
+import "./about.j" as about;
 import "./registry.j" as registry;
 import "./scopemap.j" as scopemap;
 
@@ -297,7 +298,7 @@ export func trustedGrant(audience as string) {
             "advertises no audience, and a client must not choose one of its own");
     }
     def url as string init mintUrl(os.getEnv(GH_URL_VAR), $audience);
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     $headers["Authorization"] = "Bearer " + strings.trim(os.getEnv(GH_TOKEN_VAR));
     $headers["Accept"] = "application/json";
     def resp as http.Response init emptyResponse();

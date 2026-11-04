@@ -9,7 +9,7 @@
 # MAJOR.MINOR.PATCH, the same tags release.yml builds), so a reader of the
 # latest release reads that release's documentation. Until the first release,
 # main is published at the root. Unreleased documentation is not published
-# (`dev: false`), so there is no /dev/.
+# (`dev` defaults to false), so there is no /dev/.
 #
 # `uses` and `image` are pinned to the same Grimoire release; move both
 # together.
@@ -41,7 +41,6 @@ jobs:
     uses: jennifer-language/grimoire/.github/workflows/docs-pages.yml@0.4.0
     with:
       image: ghcr.io/jennifer-language/grimoire:0.4.0
-      dev: false
       # A Pages deployment publishes exactly what the artifact holds, so a
       # build that dropped docs/CNAME would quietly unbind jvc.jennifer-lang.dev
       # and leave the site on github.io with no error anywhere.

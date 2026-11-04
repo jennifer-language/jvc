@@ -27,7 +27,7 @@ on:
       # .deb spells it `0.2.0~rc.1` and the Arch package `0.2.0rc.1`, so
       # each package manager sorts it before `0.2.0`, and the GitHub
       # Release is flagged as a pre-release. The tag must equal both
-      # `VERSION` in src/cli.j (what `jvc version` prints) and `version`
+      # `VERSION` in src/about.j (what `jvc version` prints) and `version`
       # in deck.toml; the linux job checks this before building.
       - '[0-9]*.[0-9]*.[0-9]*'
 
@@ -56,11 +56,11 @@ jobs:
         run: |
           set -eu
           tag="${GITHUB_REF_NAME}"
-          code="$(sed -n 's/^def const VERSION as string init "\(.*\)";$/\1/p' src/cli.j)"
+          code="$(sed -n 's/^export def const VERSION as string init "\(.*\)";$/\1/p' src/about.j)"
           manifest="$(sed -n 's/^version = "\(.*\)"$/\1/p' deck.toml | head -n 1)"
-          echo "tag $tag, src/cli.j VERSION $code, deck.toml version $manifest"
+          echo "tag $tag, src/about.j VERSION $code, deck.toml version $manifest"
           if [ "$tag" != "$code" ] || [ "$tag" != "$manifest" ]; then
-              echo "the tag, src/cli.j VERSION and deck.toml version must agree" >&2
+              echo "the tag, src/about.j VERSION and deck.toml version must agree" >&2
               exit 1
           fi
 

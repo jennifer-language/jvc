@@ -28,6 +28,7 @@ use strings;
 use json;
 use convert;
 import "http.j" as http;
+import "./about.j" as about;
 
 /** The GitHub REST API base URL. */
 export def const GITHUB_API as string init "https://api.github.com";
@@ -130,9 +131,8 @@ export func isRepositoryId(id as string) {
  * @return {Repository} the repository, or why it could not be read
  */
 export func githubRepository(api as string, path as string) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     $headers["Accept"] = "application/vnd.github+json";
-    $headers["User-Agent"] = "jvc";
     def resp as http.Response;
     try {
         $resp = http.get($api + "/repos/" + $path, $headers);

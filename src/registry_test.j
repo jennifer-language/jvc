@@ -585,8 +585,9 @@ func testAServerFaultIsNotCalledARefusal() {
 }
 
 func testBearerHeaderIsOmittedWithoutAToken() {
-    testing.assertEqual(len(bearer("")), 0);
+    testing.assertFalse(maps.has(bearer(""), "Authorization"));
     testing.assertEqual(bearer("abc")["Authorization"], "Bearer abc");
+    testing.assertEqual(bearer("abc")["User-Agent"], about.USER_AGENT);
 }
 
 func testAScopedNameIsFoldedBeforeItIsSent() {
@@ -1224,4 +1225,26 @@ func testTheCodeIsExchangedOnceWithItsVerifier() {
     testing.assertEqual(json.asString($sent, "/codeVerifier"), "the-verifier");
     testing.assertEqual(json.asString($sent, "/redirectUri"), "http://127.0.0.1:5000/callback");
     testing.assertFalse(json.has($sent, "/deviceCode"));
+}
+
+# standInAgent answers one request and hands back the User-Agent it carried.
+func standInAgent(srv as httpd.Server) {
+    def req as httpd.Request init httpd.accept($srv);
+    def agent as string init httpd.header($req, "User-Agent");
+    httpd.respond($req, 200, "ok");
+    return $agent;
+}
+
+# A request goes out as jvc, not as the bundled client's `jennifer-http`, so a
+# registry or CDN can tell the two apart.
+func testARequestNamesJvcAsItsAgent() {
+    def srv as httpd.Server init httpd.listen("127.0.0.1:0");
+    def t as task of string init spawn {
+        return standInAgent($srv);
+    };
+    def resp as http.Response init fetch("http://" + httpd.address($srv) + "/deck.tar.gz");
+    def agent as string init task.wait($t);
+    httpd.shutdown($srv);
+    testing.assertEqual($resp.status, 200);
+    testing.assertEqual($agent, about.USER_AGENT);
 }

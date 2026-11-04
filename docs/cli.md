@@ -135,6 +135,13 @@ means an old repository, read as API v1 at `/`. So:
   `jvc query` against one without `resolve` says so, and points at `install`,
   which resolves locally.
 
+**Every request names jvc.** jvc sends
+`User-Agent: jvc/0.1.0 (Jennifer Vendor Console; +https://jvc.jennifer-lang.dev)`
+(with its own version) to repositories, to GitHub's API and to download hosts,
+so an operator, a CDN or firewall rule, or a log can tell jvc
+from other HTTP traffic, and one release from another. Match on the `jvc/`
+prefix, not the whole string.
+
 ## Publishing
 
 `jvc publish` validates the manifest, then runs the [quality

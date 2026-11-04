@@ -55,11 +55,12 @@ import "./pragma.j" as pragma;
 import "./safepath.j" as safepath;
 import "./forge.j" as forge;
 import "./authcode.j" as authcode;
+import "./about.j" as about;
 import "http.j" as http;
 import "semver.j" as semver;
 
-# jvc's own version, reported by `jvc version`.
-def const VERSION as string init "0.1.0";
+# jvc's own version, reported by `jvc version`; set in about.j.
+def const VERSION as string init about.VERSION;
 
 # The registry used when neither --registry nor $JVC_REGISTRY is set.
 def const DEFAULT_REGISTRY as string init "https://registry.jennifer-lang.dev";
@@ -3915,7 +3916,7 @@ func isHttpUrl(url as string) {
 # http.getBytes, so the binary content arrives intact. A non-2xx response
 # raises. fetchArchive has refused any other URL by now.
 func archiveBytesFrom(url as string) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     def resp as http.BytesResponse init http.getBytes($url, $headers);
     if ($resp.status < 200 or $resp.status >= 300) {
         throw Error{

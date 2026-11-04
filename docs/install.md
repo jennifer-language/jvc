@@ -98,5 +98,5 @@ tarball; `PKGBUILD-git` builds from the tip of main. There is no `-bin`
 variant, because nothing is compiled.
 
 `.github/workflows/release.yml` runs the test suite, checks that the tag
-matches `VERSION` in `src/cli.j` and `version` in `deck.toml`, builds all
+matches `VERSION` in `src/about.j` and `version` in `deck.toml`, builds all
 three, and publishes them.

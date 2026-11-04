@@ -29,6 +29,7 @@ use maps;
 import "./deckname.j" as deckname;
 import "./catalog.j" as catalog;
 import "http.j" as http;
+import "./about.j" as about;
 
 # The fixed, unversioned path a registry serves its discovery document at. This
 # is the one path a client may hard-code; everything else hangs off the base path
@@ -442,7 +443,7 @@ export func parseDeckDoc(body as string) {
  * @throws {Error} on a transport failure or an unparseable body
  */
 export func fetchDeck(client as Client, name as string, basePath as string) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     def resp as http.Response init http.get(deckUrl(apiRoot($client, $basePath), $name), $headers);
     # Only a 404 means "no such deck"; any other non-2xx is an error, so an
     # outage is not reported as a typo in the name.
@@ -482,7 +483,7 @@ func requireSuccess(resp as http.Response, what as string) {
  *     not-found `404`; otherwise on a transport failure or an unparseable body
  */
 export func resolve(client as Client, name as string, constraint as string, basePath as string) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     def url as string init resolveUrl(apiRoot($client, $basePath), $name, $constraint);
     return resolutionOf(http.get($url, $headers), $name);
 }
@@ -506,7 +507,7 @@ func resolutionOf(resp as http.Response, name as string) {
  * @throws {Error} on a transport failure
  */
 export func fetch(url as string) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     return http.get($url, $headers);
 }
 
@@ -864,7 +865,7 @@ export func lacksFeature(baseUrl as string, feature as string) {
  * @throws {Error} on a transport failure or an unparseable body
  */
 export func discover(client as Client) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     def resp as http.Response init http.get(discoveryUrl($client.baseUrl), $headers);
     if ($resp.status == 404) {
         return legacyDiscovery();
@@ -1305,7 +1306,7 @@ func originOf(url as string) {
  *     the registry cannot be reached or replies with nonsense
  */
 export func startDevice(client as Client, auth as Auth) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     def resp as http.Response init http.post(
         authUrl($client, $auth.deviceUrl),
         "application/json",
@@ -1343,7 +1344,7 @@ func deviceStartOf(resp as http.Response) {
  * @throws {Error} when the registry cannot be reached
  */
 export func pollToken(client as Client, auth as Auth, deviceCode as string) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     def body as string init jsonObject(["deviceCode", $deviceCode]);
     def resp as http.Response init http.post(
         authUrl($client, $auth.tokenUrl),
@@ -1416,7 +1417,7 @@ export func exchangeCode(
     code as string,
     verifier as string,
     redirectUri as string) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     def body as string init jsonObject([
         "code",
         $code,
@@ -1443,7 +1444,7 @@ export func exchangeCode(
  * @throws {Error} when the registry cannot be reached
  */
 export func refreshToken(client as Client, auth as Auth, refreshToken as string) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     def body as string init jsonObject(["refreshToken", $refreshToken]);
     def resp as http.Response init http.post(
         authUrl($client, $auth.refreshUrl),
@@ -1461,7 +1462,7 @@ export func refreshToken(client as Client, auth as Auth, refreshToken as string)
  * @return {map of string to string} the headers to send
  */
 export func bearer(token as string) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     if ($token == "") {
         return $headers;
     }
@@ -1518,7 +1519,7 @@ export func parseScopes(body as string) {
  *     when the registry cannot be reached or the body is not JSON
  */
 export func scopes(client as Client, basePath as string) {
-    def headers as map of string to string init {};
+    def headers as map of string to string init about.headers();
     return scopesOf(http.get(apiRoot($client, $basePath) + "/scopes", $headers));
 }
 
