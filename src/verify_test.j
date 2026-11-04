@@ -12,7 +12,6 @@
 use testing;
 use lists;
 use strings;
-import "semver.j" as semver;
 
 # deckDir makes an empty deck skeleton and returns its path.
 func deckDir(label as string) {
@@ -782,8 +781,13 @@ func testAHungOverlayIsStoppedAndSaysSo() {
     fs.removeAll($dir);
 }
 
+# Not necessarily SemVer: an interpreter built with a plain `go build`, as CI's
+# tip job builds one, calls itself just `dev`.
 func testTheGatesInterpreterNamesItsVersion() {
-    testing.assertTrue(semver.isValid(interpreterVersion()));
+    def v as string init interpreterVersion();
+    testing.assertFalse($v == "");
+    testing.assertFalse(strings.contains($v, "\n"));
+    testing.assertFalse(strings.startsWith($v, "jennifer "));
     def previous as string init os.getEnv("JVC_JENNIFER");
     os.setEnv("JVC_JENNIFER", "/nonexistent/jvc-no-jennifer");
     def missing as string init interpreterVersion();

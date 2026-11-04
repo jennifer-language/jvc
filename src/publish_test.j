@@ -558,5 +558,7 @@ func testNoFloorOrNoVersionIsNoWarning() {
     testing.assertEqual(engineWarning($other, "0.25.0-dev+30"), "");
     testing.assertEqual(engineWarning(floor(">=0.26.0"), ""), "");
     testing.assertEqual(engineWarning(floor(">=0.26.0"), "not a version"), "");
+    # What an interpreter built with a plain `go build` calls itself.
+    testing.assertEqual(engineWarning(floor(">=0.26.0"), "dev"), "");
     testing.assertEqual(engineWarning(floor("whenever"), "0.25.0"), "");
 }
