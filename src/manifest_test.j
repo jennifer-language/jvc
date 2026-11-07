@@ -10,7 +10,7 @@ use testing;
 use os;
 
 func tmpPath(name as string) {
-    return os.tempDir() + "/jvc_manifest_" + $name;
+    return scratchRoot() + "/jvc_manifest_" + $name;
 }
 
 func testDetectFormat() {
@@ -223,7 +223,7 @@ func testSaveLoadRoundTrip() {
 }
 
 func testFindManifestPrefersToml() {
-    def dir as string init os.tempDir() + "/jvc_find_test";
+    def dir as string init scratchRoot() + "/jvc_find_test";
     fs.mkdirAll($dir);
     def tomlPath as string init $dir + "/deck.toml";
     fs.writeString($tomlPath, "name = \"x\"\nversion = \"0.1.0\"\n");
@@ -234,11 +234,11 @@ func testFindManifestPrefersToml() {
 }
 
 func findBoth() {
-    findManifest(os.tempDir() + "/jvc_find_both");
+    findManifest(scratchRoot() + "/jvc_find_both");
 }
 
 func testFindManifestRejectsBoth() {
-    def dir as string init os.tempDir() + "/jvc_find_both";
+    def dir as string init scratchRoot() + "/jvc_find_both";
     fs.mkdirAll($dir);
     fs.writeString($dir + "/deck.toml", "name = \"x\"\n");
     fs.writeString($dir + "/deck.json", '{"name":"x"}');
@@ -298,7 +298,7 @@ func testYamlRoundTrip() {
 }
 
 func testFindManifestYaml() {
-    def dir as string init os.tempDir() + "/jvc_find_yaml";
+    def dir as string init scratchRoot() + "/jvc_find_yaml";
     fs.removeAll($dir);
     fs.mkdirAll($dir);
     def p as string init $dir + "/deck.yaml";
@@ -309,7 +309,7 @@ func testFindManifestYaml() {
 }
 
 func testFindManifestYml() {
-    def dir as string init os.tempDir() + "/jvc_find_yml";
+    def dir as string init scratchRoot() + "/jvc_find_yml";
     fs.removeAll($dir);
     fs.mkdirAll($dir);
     fs.writeString($dir + "/deck.yml", "package:\n  name: y\n");
@@ -318,11 +318,11 @@ func testFindManifestYml() {
 }
 
 func findTomlYaml() {
-    findManifest(os.tempDir() + "/jvc_find_ty");
+    findManifest(scratchRoot() + "/jvc_find_ty");
 }
 
 func testFindManifestRejectsTomlPlusYaml() {
-    def dir as string init os.tempDir() + "/jvc_find_ty";
+    def dir as string init scratchRoot() + "/jvc_find_ty";
     fs.removeAll($dir);
     fs.mkdirAll($dir);
     fs.writeString($dir + "/deck.toml", "name = \"x\"\n");
@@ -670,4 +670,17 @@ func regsError(name as string, text as string) {
         return $err.message;
     }
     return "";
+}
+
+# scratchRoot is this suite's temp directory, created on demand. tearDown
+# removes it after every test, passed or failed, so no run leaves a fixture
+# behind in the shared temp directory.
+func scratchRoot() {
+    def dir as string init os.tempDir() + "/jvc_test_manifest";
+    fs.mkdirAll($dir);
+    return $dir;
+}
+
+func tearDown() {
+    fs.removeAll(os.tempDir() + "/jvc_test_manifest");
 }

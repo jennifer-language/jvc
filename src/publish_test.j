@@ -22,7 +22,7 @@ func rm(p as string) {
 # makeDeck writes a minimal deck at a scratch dir: deck.toml, src/<deck>.j, plus
 # a README and a vendor/ file that must NOT be packaged. Returns the dir.
 func makeDeck(tag as string, name as string, withDep as bool) {
-    def dir as string init os.tempDir() + "/jvc_pub_" + $tag;
+    def dir as string init scratchRoot() + "/jvc_pub_" + $tag;
     fs.removeAll($dir);
     fs.mkdirAll($dir + "/src");
     fs.mkdirAll($dir + "/vendor");
@@ -119,7 +119,7 @@ func testRequiresSpecOf() {
 
 # capDeck writes a deck whose src declares capabilities via pragma headers.
 func capDeck(label as string, manifestCaps as string, pragmaLine as string) {
-    def dir as string init os.tempDir() + "/jvc_pub_" + $label;
+    def dir as string init scratchRoot() + "/jvc_pub_" + $label;
     fs.removeAll($dir);
     fs.mkdirAll($dir + "/src");
     fs.writeString(
@@ -238,7 +238,7 @@ func argvOf(cmd as string) {
 # pasted by an operator. Pasted inside double quotes, `$(touch X)` ran on the
 # operator's machine; every argument must reach deckadmin literally instead.
 func testPublishCommandSurvivesAHostileDescription() {
-    def marker as string init os.tempDir() + "/jvc_pub_injected";
+    def marker as string init scratchRoot() + "/jvc_pub_injected";
     rm($marker);
     def hostile as string init "a $(touch " + $marker + ") `touch " + $marker +
         "` \"quoted\" it's \\ $HOME";
@@ -421,7 +421,7 @@ func testUsesOfIgnoresWhatIsNotADeclaration() {
 # tinyDeck writes a deck whose code declares `use <lib>;` and whose [engines]
 # optionally claims the tiny build can run it.
 func tinyDeck(tag as string, lib as string, claimsTiny as bool) {
-    def dir as string init os.tempDir() + "/jvc_tiny_" + $tag;
+    def dir as string init scratchRoot() + "/jvc_tiny_" + $tag;
     fs.removeAll($dir);
     fs.mkdirAll($dir + "/src");
     def m as manifest.Manifest init manifest.empty("@acme/blinker", "1.0.0");
@@ -561,4 +561,17 @@ func testNoFloorOrNoVersionIsNoWarning() {
     # What an interpreter built with a plain `go build` calls itself.
     testing.assertEqual(engineWarning(floor(">=0.26.0"), "dev"), "");
     testing.assertEqual(engineWarning(floor("whenever"), "0.25.0"), "");
+}
+
+# scratchRoot is this suite's temp directory, created on demand. tearDown
+# removes it after every test, passed or failed, so no run leaves a fixture
+# behind in the shared temp directory.
+func scratchRoot() {
+    def dir as string init os.tempDir() + "/jvc_test_publish";
+    fs.mkdirAll($dir);
+    return $dir;
+}
+
+func tearDown() {
+    fs.removeAll(os.tempDir() + "/jvc_test_publish");
 }

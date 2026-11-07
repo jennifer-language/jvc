@@ -13,7 +13,7 @@ use convert;
 
 # freshDir makes and returns a unique empty scratch directory.
 func freshDir(name as string) {
-    def dir as string init os.tempDir() + "/jvc_cli_" + $name;
+    def dir as string init scratchRoot() + "/jvc_cli_" + $name;
     fs.removeAll($dir);
     fs.mkdirAll($dir);
     return $dir;
@@ -436,7 +436,7 @@ func testRunNewRefusesANonEmptyDirectory() {
 
 # an unresolvable engine leaves no half-made directory behind
 func testRunNewLeavesNothingBehindWhenResolutionFails() {
-    def dir as string init os.tempDir() + "/jvc_cli_newfail";
+    def dir as string init scratchRoot() + "/jvc_cli_newfail";
     fs.removeAll($dir);
     def out as Outcome init runNew(
         $dir,
@@ -3399,7 +3399,7 @@ func testWriteLockRefusesALinkedLock() {
 }
 
 func writeLinkedLock() {
-    writeLock(os.tempDir() + "/jvc_cli_link_lock", []);
+    writeLock(scratchRoot() + "/jvc_cli_link_lock", []);
 }
 
 # A dropped deck behind a link is kept and reported, not removed through it.
@@ -3796,7 +3796,7 @@ func testTwoManifestsAreNotReadAsNoMapping() {
 
 # regsBoth reads the mapping where two manifests stand.
 func regsBoth() {
-    registriesHere(os.tempDir() + "/jvc_cli_regsboth");
+    registriesHere(scratchRoot() + "/jvc_cli_regsboth");
 }
 
 func testNoManifestMeansNoMapping() {
@@ -3816,7 +3816,7 @@ func testTheMappingAloneStillRefusesABadKey() {
 
 # regsBadKey reads a mapping whose one key is a bare scope.
 func regsBadKey() {
-    registriesHere(os.tempDir() + "/jvc_cli_regsbadkey");
+    registriesHere(scratchRoot() + "/jvc_cli_regsbadkey");
 }
 
 # onPathNote is silent for a bin directory on PATH, gentle for one reached only
@@ -3845,4 +3845,17 @@ func testThePathNoteTellsALiteralTildeFromAMissingDirectory() {
     testing.assertContains($tilde, "only as a literal ~ entry");
     testing.assertEqual($both, "");
     testing.assertContains($missing, "is not on your PATH");
+}
+
+# scratchRoot is this suite's temp directory, created on demand. tearDown
+# removes it after every test, passed or failed, so no run leaves a fixture
+# behind in the shared temp directory.
+func scratchRoot() {
+    def dir as string init os.tempDir() + "/jvc_test_cli";
+    fs.mkdirAll($dir);
+    return $dir;
+}
+
+func tearDown() {
+    fs.removeAll(os.tempDir() + "/jvc_test_cli");
 }

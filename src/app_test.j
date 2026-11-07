@@ -12,7 +12,7 @@ use testing;
 
 # scratch returns a unique empty scratch directory.
 func scratch(label as string) {
-    def dir as string init os.tempDir() + "/jvc_app_" + $label;
+    def dir as string init scratchRoot() + "/jvc_app_" + $label;
     fs.removeAll($dir);
     fs.mkdirAll($dir);
     return $dir;
@@ -1343,4 +1343,17 @@ func testOtherOrRelativeEntriesAreNotTheBinDirectory() {
     testing.assertFalse(onSearchPath($bin, ".local/bin", ""));
     testing.assertFalse(onSearchPath($bin, "~/.local/bin", ""));
     testing.assertFalse(onSearchPath($bin, "~other/.local/bin", $root));
+}
+
+# scratchRoot is this suite's temp directory, created on demand. tearDown
+# removes it after every test, passed or failed, so no run leaves a fixture
+# behind in the shared temp directory.
+func scratchRoot() {
+    def dir as string init os.tempDir() + "/jvc_test_app";
+    fs.mkdirAll($dir);
+    return $dir;
+}
+
+func tearDown() {
+    fs.removeAll(os.tempDir() + "/jvc_test_app");
 }
