@@ -14,6 +14,7 @@
 use testing;
 use strings;
 use archive;
+use binary;
 use convert;
 use maps;
 import "./safepath.j" as safepath;
@@ -56,7 +57,7 @@ func commitTag(dir as string, name as string, version as string, tag as string, 
 # fixture builds a repository publishing @acme/beta at 1.0.0 and 1.1.0, plus a
 # non-version tag that must be ignored. Returns its path.
 func fixture(label as string) {
-    def dir as string init os.tempDir() + "/jvc_git_" + $label;
+    def dir as string init scratchRoot() + "/jvc_git_" + $label;
     fs.removeAll($dir);
     fs.mkdirAll($dir);
     git.run(["git", "-C", $dir, "init", "-q", "-b", "main"]);
@@ -74,7 +75,7 @@ func fixture(label as string) {
 #
 # Returns the repository path; the caller reads `good` out of it.
 func shadowFixture(label as string) {
-    def dir as string init os.tempDir() + "/jvc_shadow_" + $label;
+    def dir as string init scratchRoot() + "/jvc_shadow_" + $label;
     fs.removeAll($dir);
     fs.mkdirAll($dir);
     git.run(["git", "-C", $dir, "init", "-q", "-b", "main"]);
@@ -106,8 +107,8 @@ func testARefNamedAfterThePinnedCommitRefusesTheInstall() {
 
 # the throwing call, as its own function so assertThrows can run it
 func archiveShadowed() {
-    def repo as string init os.tempDir() + "/jvc_shadow_archive";
-    def cache as string init os.tempDir() + "/jvc_gitcache_shadow";
+    def repo as string init scratchRoot() + "/jvc_shadow_archive";
+    def cache as string init scratchRoot() + "/jvc_gitcache_shadow";
     def r as Fetch init candidates($cache, $repo, "@acme/beta");
     archiveBytes($cache, $r.candidates[0]);
 }
@@ -165,7 +166,7 @@ func testARecordWhoseRefLooksLikeACommitIsRefused() {
 
 # freshCache returns an empty cache root.
 func freshCache(label as string) {
-    def dir as string init os.tempDir() + "/jvc_gitcache_" + $label;
+    def dir as string init scratchRoot() + "/jvc_gitcache_" + $label;
     fs.removeAll($dir);
     return $dir;
 }
@@ -227,7 +228,7 @@ func testCandidatesCarriesTheGitPin() {
 }
 
 func testCandidatesReadsRequiresAndEnginesFromTheTag() {
-    def repo as string init os.tempDir() + "/jvc_git_reqs";
+    def repo as string init scratchRoot() + "/jvc_git_reqs";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -243,7 +244,7 @@ func testCandidatesReadsRequiresAndEnginesFromTheTag() {
 
 # a moved or mislabelled tag must not silently produce a wrong lockfile entry
 func testCandidatesRejectsATagDisagreeingWithItsManifest() {
-    def repo as string init os.tempDir() + "/jvc_git_mismatch";
+    def repo as string init scratchRoot() + "/jvc_git_mismatch";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -257,7 +258,7 @@ func testCandidatesRejectsATagDisagreeingWithItsManifest() {
 # A tag naming another deck is no release of this one: skipped and listed, so
 # the fetch is ok but offers nothing.
 func testATagOfAnotherDeckIsSkipped() {
-    def repo as string init os.tempDir() + "/jvc_git_wrongname";
+    def repo as string init scratchRoot() + "/jvc_git_wrongname";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -272,7 +273,7 @@ func testATagOfAnotherDeckIsSkipped() {
 
 # A deck renamed after its first release: the old tag must not hide the new one.
 func testATagFromBeforeARenameDoesNotHideLaterReleases() {
-    def repo as string init os.tempDir() + "/jvc_git_renamed";
+    def repo as string init scratchRoot() + "/jvc_git_renamed";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -302,7 +303,7 @@ func commitManifest(dir as string, file as string, text as string, tag as string
 
 # Spec section 1 allows four manifest names, and a tag's manifest may be any.
 func testATagsManifestMayBeJsonOrYaml() {
-    def repo as string init os.tempDir() + "/jvc_git_formats";
+    def repo as string init scratchRoot() + "/jvc_git_formats";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -331,7 +332,7 @@ func testATagsManifestMayBeJsonOrYaml() {
 
 # Two manifests at one tag is the one-manifest error, not a pick.
 func testATagWithTwoManifestsFails() {
-    def repo as string init os.tempDir() + "/jvc_git_twomanifests";
+    def repo as string init scratchRoot() + "/jvc_git_twomanifests";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -344,7 +345,7 @@ func testATagWithTwoManifestsFails() {
 }
 
 func testATagWithNoManifestIsSkippedAndListed() {
-    def repo as string init os.tempDir() + "/jvc_git_nomanifest";
+    def repo as string init scratchRoot() + "/jvc_git_nomanifest";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -369,7 +370,7 @@ func testCandidatesOfAnUnreachableRemote() {
 # a repository with no version tags is an empty list, not an error: the resolver
 # reports it as a missing deck against whatever asked for it
 func testCandidatesOfARepoWithNoReleases() {
-    def repo as string init os.tempDir() + "/jvc_git_untagged";
+    def repo as string init scratchRoot() + "/jvc_git_untagged";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -522,7 +523,7 @@ func testTheModuleDeclaresItsOwnNamespaces() {
 func testGitDirInTheEnvironmentCannotRedirectTheMirror() {
     def repo as string init fixture("hijack");
     def cache as string init freshCache("hijack");
-    def victim as string init os.tempDir() + "/jvc_git_victim";
+    def victim as string init scratchRoot() + "/jvc_git_victim";
     fs.removeAll($victim);
     fs.mkdirAll($victim);
     git.run(["git", "-C", $victim, "init", "-q", "-b", "main"]);
@@ -656,7 +657,7 @@ func testBothTagSpellingsOnOneCommitAreOneCandidate() {
 
 # On different commits the version means two things; neither is picked.
 func testBothTagSpellingsOnDifferentCommitsFail() {
-    def repo as string init os.tempDir() + "/jvc_git_split";
+    def repo as string init scratchRoot() + "/jvc_git_split";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -674,7 +675,7 @@ func testBothTagSpellingsOnDifferentCommitsFail() {
 # An old tag from before the repository was a deck is not a release, and must
 # not make every later release unusable.
 func testATagWithNoManifestIsSkipped() {
-    def repo as string init os.tempDir() + "/jvc_git_prehistory";
+    def repo as string init scratchRoot() + "/jvc_git_prehistory";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -692,7 +693,7 @@ func testATagWithNoManifestIsSkipped() {
 
 # An annotated tag is peeled to its commit by the single for-each-ref call.
 func testAnAnnotatedTagPinsItsCommit() {
-    def repo as string init os.tempDir() + "/jvc_git_annotated";
+    def repo as string init scratchRoot() + "/jvc_git_annotated";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -711,7 +712,7 @@ func testAnAnnotatedTagPinsItsCommit() {
 # A requirement key is folded like every deck name, so a mixed-case `requires`
 # cannot name a deck the resolver then never recognises as fetched.
 func testRequirementNamesAreFolded() {
-    def repo as string init os.tempDir() + "/jvc_git_fold";
+    def repo as string init scratchRoot() + "/jvc_git_fold";
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -752,7 +753,7 @@ func testAFailedArchiveLeavesNoTempFile() {
 
 # newRepo makes an empty repository under the temp directory for a test.
 func newRepo(label as string) {
-    def repo as string init os.tempDir() + "/jvc_git_" + $label;
+    def repo as string init scratchRoot() + "/jvc_git_" + $label;
     fs.removeAll($repo);
     fs.mkdirAll($repo);
     git.run(["git", "-C", $repo, "init", "-q", "-b", "main"]);
@@ -875,7 +876,7 @@ func testACommitIdIsFortyOrSixtyFourHexDigits() {
 # A repository created with `--object-format=sha256` has 64-digit ids; every
 # version used to read as "not pinned to a commit".
 func testASha256RepositoryIsASource() {
-    def dir as string init os.tempDir() + "/jvc_git_sha256";
+    def dir as string init scratchRoot() + "/jvc_git_sha256";
     fs.removeAll($dir);
     fs.mkdirAll($dir);
     if (not git.run(["git", "-C", $dir, "init", "-q", "--object-format=sha256", "-b", "main"]).ok) {
@@ -893,4 +894,31 @@ func testASha256RepositoryIsASource() {
     testing.assertTrue(len(safepath.unpack($data, "tar")) > 0);
     fs.removeAll($dir);
     fs.removeAll($cache);
+}
+
+# A deck.toml holding bytes that are not UTF-8 reaches the manifest check as
+# content: git did answer, so it is not reported as git failing to run.
+func testABinaryDeckTomlIsNotUtf8Text() {
+    def repo as string init newRepo("binmanifest");
+    fs.writeBytes($repo + "/deck.toml", binary.make(4, 255));
+    gitIn($repo, ["add", "-A"]);
+    gitIn($repo, ["-c", "user.email=t@x", "-c", "user.name=t", "commit", "-q", "-m", "odd"]);
+    gitIn($repo, ["tag", "v1.0.0"]);
+    def r as Fetch init candidates(freshCache("binmanifest"), $repo, "@acme/beta");
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.error, "is not utf-8 text");
+    testing.assertFalse(strings.contains($r.error, "cannot run"));
+}
+
+# scratchRoot is this suite's temp directory, created on demand. tearDown
+# removes it after every test, passed or failed, so no run leaves a fixture
+# behind in the shared temp directory.
+func scratchRoot() {
+    def dir as string init os.tempDir() + "/jvc_test_gitsource";
+    fs.mkdirAll($dir);
+    return $dir;
+}
+
+func tearDown() {
+    fs.removeAll(os.tempDir() + "/jvc_test_gitsource");
 }

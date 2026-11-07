@@ -515,3 +515,11 @@ func testANetworkRemoteIsOneThatLeavesTheMachine() {
         testing.assertFalse(isNetworkRemote($url));
     }
 }
+
+# Output that is not UTF-8 is git's answer, reported as such, not a failure to
+# start git.
+func testRunReportsOutputThatIsNotUtf8() {
+    def r as Result init run(["sh", "-c", "printf 'a\\377b'"]);
+    testing.assertFalse($r.ok);
+    testing.assertEqual($r.error, "git printed output that is not UTF-8 text");
+}

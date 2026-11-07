@@ -2,7 +2,7 @@
 
 ## From a clone
 
-The quickest way needs only `jennifer` (0.25.0 or later) and `git`: run jvc
+The quickest way needs only `jennifer` (0.26.0 or later) and `git`: run jvc
 straight out of a clone once, and have it install itself.
 
 ```sh
@@ -27,7 +27,7 @@ package.
 ## Release packages
 
 Each release publishes three artifacts, each with a sidecar `.sha256`. All
-need `jennifer` at jvc's `[engines]` floor (0.25.0). The `.deb` declares that
+need `jennifer` at jvc's `[engines]` floor (0.26.0). The `.deb` declares that
 floor. The Arch packages cannot: the interpreter packages provide an
 unversioned `jennifer`, so a versioned dependency would be unsatisfiable, and
 they depend on it bare. The interpreter still enforces the floor at load time,

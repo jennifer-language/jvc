@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.25.0
+# pragma-jennifer-version: >=0.26.0
 
 /**
  * A thin wrapper over the `git` binary: the few plumbing calls jvc needs to
@@ -167,9 +167,9 @@ func availableAt(exe as string) {
  * @return {Result} the outcome
  */
 export func run(argv as list of string) {
-    def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
+    def r as os.BytesResult;
     try {
-        $r = os.run($argv);
+        $r = os.runBytes($argv);
     } catch (err) {
         # A missing executable throws rather than exiting non-zero; the
         # contract here is a Result either way.
@@ -180,13 +180,30 @@ export func run(argv as list of string) {
             warning: ""
         };
     }
+    # Captured as bytes: git did run, so output that is not UTF-8 is an answer
+    # to report, not a failure to start it.
+    def stderr as string init textOrEmpty($r.stderr);
     if (not ($r.exitCode == 0)) {
-        def reason as string init strings.trim($r.stderr);
+        def reason as string init strings.trim($stderr);
         if ($reason == "") {
             # Never an empty reason: a caller prints this after a colon.
             $reason = io.sprintf("git exited with status %d and no message", $r.exitCode);
         }
         return Result{ok: false, output: "", error: $reason, warning: ""};
+    }
+    if ($r.truncated) {
+        return Result{ok: false, output: "", error: "git printed more than 16 MiB", warning: ""};
+    }
+    def stdout as string init "";
+    try {
+        $stdout = convert.stringFromBytes($r.stdout, "utf-8");
+    } catch (err) {
+        return Result{
+            ok: false,
+            output: "",
+            error: "git printed output that is not UTF-8 text",
+            warning: ""
+        };
     }
     # Standard error is kept on success too. git reports an ambiguous refname
     # as a *warning* and still exits 0, so a caller that reads only the exit
@@ -194,9 +211,9 @@ export func run(argv as list of string) {
     # things and I picked one".
     return Result{
         ok: true,
-        output: strings.trim($r.stdout),
+        output: strings.trim($stdout),
         error: "",
-        warning: strings.trim($r.stderr)
+        warning: strings.trim($stderr)
     };
 }
 
@@ -566,20 +583,37 @@ export func readBlobs(dir as string, specs as list of string) {
         $lines[] = $spec;
     }
     def argv as list of string init catFileArgv($dir);
-    def r as os.Result init os.Result{exitCode: 0, stdout: "", stderr: ""};
+    # Bytes, not text: a tree or a binary blob at a manifest path arrives as
+    # raw object content, which parseBlobs classifies instead of rejecting.
+    def r as os.BytesResult;
     try {
-        $r = os.run($argv, strings.join($lines, "\n") + "\n");
+        $r = os.runBytes($argv, strings.join($lines, "\n") + "\n");
     } catch (err) {
         return blobsFailed("cannot run " + $argv[0] + ": " + $err.message);
     }
     if (not ($r.exitCode == 0)) {
-        def reason as string init strings.trim($r.stderr);
+        def reason as string init strings.trim(textOrEmpty($r.stderr));
         if ($reason == "") {
             $reason = io.sprintf("git exited with status %d and no message", $r.exitCode);
         }
         return blobsFailed($reason);
     }
-    return parseBlobs(convert.bytesFromString($r.stdout, "utf-8"), $specs);
+    if ($r.truncated) {
+        return blobsFailed("git cat-file printed more than 16 MiB");
+    }
+    return parseBlobs($r.stdout, $specs);
+}
+
+# textOrEmpty decodes captured bytes as UTF-8, or gives "" for bytes that are
+# not: a message that cannot be shown is no worse than none, and the caller
+# falls back to the exit status.
+func textOrEmpty(b as bytes) {
+    try {
+        return convert.stringFromBytes($b, "utf-8");
+    } catch (err) {
+        return "";
+    }
+    return "";
 }
 
 /**

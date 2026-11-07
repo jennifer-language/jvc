@@ -34,7 +34,7 @@ sudo pacman -U jvc-0.1.0-1-any.pkg.tar.zst    # Arch
 tar xzf jvc-0.1.0.tar.gz                      # anywhere else
 ```
 
-Each artifact has a sidecar `.sha256`. All need `jennifer` 0.25.0 or later.
+Each artifact has a sidecar `.sha256`. All need `jennifer` 0.26.0 or later.
 See [Installing jvc](https://jvc.jennifer-lang.dev/install.html).
 
 ## Quick start

@@ -65,7 +65,7 @@ both ways before copying: the registry has held fixes of its own before.
 ## Continuous integration
 
 `.github/workflows/test.yml` runs every overlay, the linter, a launcher smoke
-test and jvc's own publish gate twice: against the **0.25.0 release tarball**,
+test and jvc's own publish gate twice: against the **0.26.0 release tarball**,
 the floor `[engines]` and the pragmas declare, and against an interpreter
 **built from the tip of the jennifer repository**. A release build enforces the
 version floors, so the first job proves jvc loads on the oldest interpreter it

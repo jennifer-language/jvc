@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.25.0
+# pragma-jennifer-version: >=0.26.0
 
 /**
  * The publish quality gate: the checks a deck must pass before it may be
@@ -55,6 +55,7 @@
  * # if (not $r.ok) { io.printf("%s\n", verify.reportText($r)); }
  */
 
+use binary;
 use os;
 use fs;
 use path;
@@ -269,7 +270,7 @@ func runBounded(argv as list of string) {
         $seconds = 0;
     }
     def started as int init time.unix(time.now());
-    def r as os.Result init os.run(boundedArgv($argv, $seconds, $command));
+    def r as os.Result init runText(boundedArgv($argv, $seconds, $command));
     def elapsed as int init time.unix(time.now()) - $started;
     return Bounded{result: $r, stopped: stoppedByLimit($r.exitCode, $elapsed, $seconds)};
 }
@@ -551,7 +552,53 @@ export func runIsolated(argv as list of string) {
 export func runIsolatedIn(argv as list of string, cwd as string, vendor as string) {
     def home as string init fs.makeTempDir("", HOME_PREFIX);
     defer fs.removeAll($home);
-    return os.run(isolatedArgvIn($argv, $home, $cwd, $vendor));
+    return runText(isolatedArgvIn($argv, $home, $cwd, $vendor));
+}
+
+# runText runs a command as `os.run` does, but takes output that is not UTF-8
+# (a deck's test printing raw bytes) as part of the report instead of a throw
+# that the gate would misreport as a failure to start the interpreter.
+# Throws as `os.run` does for a command that cannot be started.
+func runText(argv as list of string) {
+    def r as os.BytesResult init os.runBytes($argv);
+    def out as string init displayText($r.stdout);
+    def err as string init displayText($r.stderr);
+    if ($r.truncated) {
+        # The marker `os.run` appends to a stream its cap cut.
+        $out = $out + "\n[output truncated at 16 MiB]";
+    }
+    return os.Result{exitCode: $r.exitCode, stdout: $out, stderr: $err};
+}
+
+# displayText decodes captured output for a report: as a whole when it is
+# UTF-8, else line by line (`linesText`), so the readable lines (a test's
+# PASS / FAIL, the summary) survive.
+func displayText(b as bytes) {
+    try {
+        return convert.stringFromBytes($b, "utf-8");
+    } catch (whole) {
+        return linesText($b);
+    }
+    return "";
+}
+
+# linesText decodes output line by line, each line that is not UTF-8 shown as
+# a placeholder.
+func linesText(b as bytes) {
+    def lines as list of string init [];
+    for (def line in binary.split($b, convert.bytesFromString("\n", "utf-8"))) {
+        $lines[] = lineText($line);
+    }
+    return strings.join($lines, "\n");
+}
+
+func lineText(line as bytes) {
+    try {
+        return convert.stringFromBytes($line, "utf-8");
+    } catch (bad) {
+        return "[a line that is not UTF-8 text]";
+    }
+    return "";
 }
 
 # runIsolatedBounded is `runIsolatedIn` under the gate's time limit: `timeout`

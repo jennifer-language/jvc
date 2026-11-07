@@ -15,7 +15,7 @@ use strings;
 
 # deckDir makes an empty deck skeleton and returns its path.
 func deckDir(label as string) {
-    def dir as string init os.tempDir() + "/jvc_verify_" + $label;
+    def dir as string init scratchRoot() + "/jvc_verify_" + $label;
     fs.removeAll($dir);
     fs.mkdirAll($dir + "/src");
     return $dir;
@@ -75,7 +75,7 @@ func testModulesOfExcludesOverlays() {
 }
 
 func testModulesOfADeckWithoutSrc() {
-    def dir as string init os.tempDir() + "/jvc_verify_nosrc";
+    def dir as string init scratchRoot() + "/jvc_verify_nosrc";
     fs.removeAll($dir);
     fs.mkdirAll($dir);
     testing.assertEqual(len(modulesOf($dir)), 0);
@@ -793,4 +793,25 @@ func testTheGatesInterpreterNamesItsVersion() {
     def missing as string init interpreterVersion();
     os.setEnv("JVC_JENNIFER", $previous);
     testing.assertEqual($missing, "");
+}
+
+# A gated deck's test output that is not UTF-8 stays in the report: its
+# readable lines are kept, a broken line becomes a placeholder.
+func testRunTextKeepsTheReadableLines() {
+    def r as os.Result init runText(["sh", "-c", "printf 'PASS one\\n\\377\\376\\nok done\\n'"]);
+    testing.assertEqual($r.exitCode, 0);
+    testing.assertEqual($r.stdout, "PASS one\n[a line that is not UTF-8 text]\nok done\n");
+}
+
+# scratchRoot is this suite's temp directory, created on demand. tearDown
+# removes it after every test, passed or failed, so no run leaves a fixture
+# behind in the shared temp directory.
+func scratchRoot() {
+    def dir as string init os.tempDir() + "/jvc_test_verify";
+    fs.mkdirAll($dir);
+    return $dir;
+}
+
+func tearDown() {
+    fs.removeAll(os.tempDir() + "/jvc_test_verify");
 }

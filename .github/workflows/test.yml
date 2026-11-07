@@ -4,7 +4,7 @@
 # PR gate: run every module's test overlay and the linter against two
 # interpreters.
 #
-# - `release`: the 0.25.0 release tarball, the floor `[engines]` and every
+# - `release`: the 0.26.0 release tarball, the floor `[engines]` and every
 #   pragma declare. A release build enforces those floors, so this job is the
 #   one that proves jvc loads on the oldest interpreter it claims to support.
 # - `tip`: built from the tip of the jennifer repository. A `-dev` build skips
@@ -44,7 +44,7 @@ jobs:
         interpreter: [release, tip]
     env:
       # Bump together with `[engines]` and the pragmas.
-      JENNIFER_RELEASE: 0.25.0
+      JENNIFER_RELEASE: 0.26.0
     steps:
       - name: Checkout jvc
         uses: actions/checkout@v7
