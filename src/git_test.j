@@ -221,7 +221,7 @@ func testCatFileArgvIsABatchOnTheMirror() {
 
 # utf8 is the bytes of a text.
 func utf8(text as string) {
-    return convert.bytesFromString($text, "utf-8");
+    return convert.bytesFromString("utf-8", $text);
 }
 
 # The size in a header counts bytes. A manifest with a non-ASCII description

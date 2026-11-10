@@ -240,7 +240,7 @@ export func percentEncode(s as string) {
         if (strings.indexOf(UNRESERVED, $ch) >= 0) {
             $out[] = $ch;
         } else {
-            def raw as bytes init convert.bytesFromString($ch, "utf-8");
+            def raw as bytes init convert.bytesFromString("utf-8", $ch);
             for (def i as int init 0; $i < len($raw); $i = $i + 1) {
                 $out[] = "%" + hexByte($raw[$i]);
             }
@@ -1871,7 +1871,7 @@ func padSegment(seg as string) {
 # single-byte codecs, and reaching for `iso-8859-1` there mangles any claim that
 # is not ASCII.
 func segmentText(seg as string) {
-    return convert.stringFromBytes(encoding.fromText(padSegment($seg), "base64-url"), "utf-8");
+    return convert.stringFromBytes("utf-8", encoding.fromText("base64-url", padSegment($seg)));
 }
 
 /**

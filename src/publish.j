@@ -47,6 +47,7 @@ import "./manifest.j" as manifest;
 import "./manifestcheck.j" as manifestcheck;
 import "./deckname.j" as deckname;
 import "./constraint.j" as constraint;
+import "./enginerange.j" as enginerange;
 import "./pragma.j" as pragma;
 import "./verify.j" as verify;
 import "semver.j" as semver;
@@ -76,7 +77,7 @@ func fail(message as string) {
 
 # hexSha256 returns the lowercase hex SHA-256 of data.
 func hexSha256(data as bytes) {
-    return encoding.toText(hash.compute($data, "sha256"), "hex");
+    return encoding.toText("hex", hash.compute("sha256", $data));
 }
 
 /**
@@ -125,7 +126,7 @@ export func packDeck(dir as string) {
             };
         }
     }
-    return archive.pack($entries, "tar.gz");
+    return archive.pack("tar.gz", $entries);
 }
 
 /**
@@ -538,32 +539,60 @@ export func check(dir as string, runChecks as bool) {
 }
 
 /**
- * Warn when the interpreter the gate runs is older than the deck's `jennifer`
- * floor in `[engines]`.
+ * Warn when the interpreter the gate runs is outside the deck's `jennifer`
+ * range in `[engines]`: below its floor, or at or above its upper bound.
  *
- * A release build that old refuses the deck's files at load (their version
- * pragma), so the gate fails plainly. A `-dev` build skips every version floor
- * and loads them, so the gate runs, and the tests then fail, or hang until the
- * gate's time limit, wherever they call something the build does not have
- * yet. A development build is judged by its release core (`0.25.0` for
- * `0.25.0-dev+30`): it is a build towards that release, so one at or past the
- * floor's core gets no warning, though an early one may still lack a feature.
- * This is advice; the gate still runs.
+ * A release build below the floor refuses the deck's files at load (their
+ * version pragma), so the gate fails plainly. A `-dev` build skips every
+ * version floor and loads them, so the gate runs, and the tests then fail, or
+ * hang until the gate's time limit, wherever they call something the build
+ * does not have yet. A development build is judged against the floor by its
+ * release core (`0.25.0` for `0.25.0-dev+30`): it is a build towards that
+ * release, so one at or past the floor's core gets no warning, though an early
+ * one may still lack a feature.
+ *
+ * Against an upper bound, a release at or above it is outside the range the
+ * deck is published for, and a development build fails every upper bound
+ * (`enginerange.admits`): the gate is then testing the deck on an interpreter
+ * no consumer of this version can install it on. This is advice; the gate
+ * still runs.
  * @param engines {list of manifest.Dependency} the deck's `[engines]`
  * @param version {string} the gate interpreter's version, "" when unknown
  * @return {string} the warning, or "" when there is nothing to say
  */
 export func engineWarning(engines as list of manifest.Dependency, version as string) {
-    if ($version == "" or not semver.isValid($version) or
-        not manifest.depListHas($engines, "jennifer")) {
+    if ($version == "" or not manifest.depListHas($engines, "jennifer")) {
         return "";
     }
     def spec as string init manifest.depListGet($engines, "jennifer");
+    # A range outside the grammar is validate's to report, not this.
+    def range as enginerange.Range init enginerange.parse($spec);
+    if (not $range.ok) {
+        return "";
+    }
+    if (enginerange.isDevBuild($version) and not ($range.upper == "")) {
+        return "the gate runs jennifer " + $version + ", a development build, " +
+            "which fails the upper bound of this deck's [engines] jennifer \"" + $spec +
+            "\".\n  A development build counts as newer than any release, so no " +
+            "consumer on it can install this version.\n  Set $JVC_JENNIFER to a " +
+            "release below " + $range.upper + " to test what the range admits.";
+    }
+    # At or above the bound: the range up to it, from any floor, leaves it out.
+    if (not ($range.upper == "") and not enginerange.isDevBuild($version) and
+        enginerange.isKnownVersion($version) and
+        not enginerange.admits(">=0.0.0 <" + $range.upper, $version)) {
+        return "the gate runs jennifer " + $version + ", at or above the upper bound " +
+            "of this deck's [engines] jennifer \"" + $spec + "\"; no consumer on " +
+            $version + " can install this version. Set $JVC_JENNIFER to a release " +
+            "below " + $range.upper;
+    }
+    if (not semver.isValid($version)) {
+        return "";
+    }
     def v as semver.Version init semver.parse($version);
     def core as string init convert.toString($v.major) + "." + convert.toString($v.minor) +
         "." + convert.toString($v.patch);
-    # A floor outside the grammar is validate's to report, not this.
-    if (not constraint.isValidConstraint($spec) or constraint.satisfies($core, $spec)) {
+    if (enginerange.admits(">=" + $range.floor, $core)) {
         return "";
     }
     if ($v.prerelease == "") {

@@ -46,15 +46,23 @@ deck = "https://git.acme.example/acme/tool/raw/main/deck.toml"
 homepage = "https://acme.example/tool"
 
 # Jennifer engines that can run this deck: engine = version range. An allowlist
-# of alternatives: the running engine must be listed and satisfy its range.
-# Listing both jennifer and jennifer-tiny means "runs on either".
+# of alternatives: the running engine must be listed and its version inside its
+# range. Listing both jennifer and jennifer-tiny means "runs on either".
 #
-# A development build (a version with a -dev prerelease) bypasses the range, the
-# same way it bypasses a `# pragma-jennifer-version` floor, so a deck needing an
-# unreleased version can be tried on a dev build of it. The allowlist still
-# applies: a dev build of jennifer-tiny is still not jennifer.
+# A range takes exactly two forms, the ones `# pragma-jennifer-version` takes:
+#   ">=X.Y.Z"           a floor
+#   ">=X.Y.Z <A.B.C"    a floor and an exclusive upper bound above it
+# with one space between them, and nothing else (no ^, ~, ||, <=, or prerelease).
+# Install, update and publish refuse any other value.
+#
+# A development build (`dev`, or a version with -dev in it, such as
+# 0.25.0-dev+131.afd9207) passes every floor and fails every upper bound: it
+# counts as newer than any release. The allowlist still applies: a dev build of
+# jennifer-tiny is still not jennifer.
 [engines]
 jennifer = ">=0.25.0"
+# a release for the interpreters before a breaking 0.26.0:
+# jennifer = ">=0.25.0 <0.26.0"
 
 # Runtime requirements: deck = version constraint. Keys MUST be scoped
 # @scope/deck (and quoted, since they contain a `/`). A bundled module goes in

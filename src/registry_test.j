@@ -661,7 +661,7 @@ func testARefusalWithNoBodyStillSaysSomething() {
 # reads. The signature is deliberately nonsense: jvc holds no key and verifies
 # nothing, and a test that pretended otherwise would be testing a fiction.
 func tokenWith(payloadJson as string) {
-    return "header." + encoding.toText(encoding.encode($payloadJson, "ascii"), "base64-url") +
+    return "header." + encoding.toText("base64-url", encoding.encode("ascii", $payloadJson)) +
         ".signature";
 }
 
@@ -851,8 +851,8 @@ func testNoResponderMeansNoTag() {
 func testANonAsciiClaimSurvivesDecoding() {
     # The payload is utf-8, so decoding it as a single-byte codec would mangle
     # any login or organisation name outside ASCII.
-    def payload as bytes init convert.bytesFromString('{"login":"日本","sub":"1"}', "utf-8");
-    def c as Claims init decodeClaims("h." + encoding.toText($payload, "base64-url") + ".s");
+    def payload as bytes init convert.bytesFromString("utf-8", '{"login":"日本","sub":"1"}');
+    def c as Claims init decodeClaims("h." + encoding.toText("base64-url", $payload) + ".s");
     testing.assertEqual($c.login, "日本");
 }
 
@@ -1039,7 +1039,7 @@ func testATokenReplyWithOddTypesKeepsTheToken() {
 # A JWT `exp` written as a float is the same instant.
 func testAFloatExpiryIsRead() {
     def payload as string init '{"sub":"1","exp":1790000000.0,"iat":"soon"}';
-    def b64 as string init encoding.toText(convert.bytesFromString($payload, "utf-8"), "base64");
+    def b64 as string init encoding.toText("base64", convert.bytesFromString("utf-8", $payload));
     def segment as string init strings.replace(
         strings.replace(strings.replace($b64, "=", ""), "+", "-"),
         "/",
@@ -1196,7 +1196,7 @@ func testAnAuthorizeUrlWithNoScopesSendsNone() {
 # received, so a test can check exactly what the exchange sent.
 func standInTokenEndpoint(srv as httpd.Server) {
     def req as httpd.Request init httpd.accept($srv);
-    def got as string init convert.stringFromBytes(httpd.body($req), "utf-8");
+    def got as string init convert.stringFromBytes("utf-8", httpd.body($req));
     httpd.respond(
         $req,
         200,

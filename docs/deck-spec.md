@@ -219,9 +219,24 @@ version constraints** (string, §9).
 
 ### 5.1 The `[engines]` table
 
-`[engines]` maps a **Jennifer engine name** to a **version constraint** (§9) on
-the interpreter that can run this deck. Recognized engines: `jennifer` (the full
+`[engines]` maps a **Jennifer engine name** to an **engine range** on the
+interpreter that can run this deck. Recognized engines: `jennifer` (the full
 interpreter) and `jennifer-tiny` (the constrained, network-free build).
+
+An engine range takes exactly two forms, the two the interpreter's
+`# pragma-jennifer-version` takes, and a tool **MUST** refuse any other value
+(at install, update and publish):
+
+| Form | Admits |
+| ---- | ------ |
+| `>=X.Y.Z` | every release from `X.Y.Z` on |
+| `>=X.Y.Z <A.B.C` | releases from `X.Y.Z` up to, not including, `A.B.C` |
+
+Each version is a plain `X.Y.Z` (no prerelease, no build, no leading zeros), the
+two parts are separated by exactly one space, and `A.B.C` **MUST** be above
+`X.Y.Z` (a range nothing satisfies is refused). A caret, a tilde, `||`, `<=`
+or a missing floor is outside the grammar. A release interpreter is compared by
+its `X.Y.Z` core, numerically: `0.26.0-rc.1` is judged as `0.26.0`.
 
 The table is an **allowlist of alternatives (OR)**, not a conjunction: a deck
 runs under exactly one engine at a time, so the entries are the engines the deck
@@ -229,31 +244,50 @@ runs under exactly one engine at a time, so the entries are the engines the deck
 
 - If `[engines]` is **empty/absent**, the deck imposes no engine restriction.
 - Otherwise a tool **MUST** refuse to install the deck unless the running
-  engine is a key in the table and the running interpreter's version satisfies
-  that key's constraint.
-- **A development build of an engine MUST bypass the version constraint, and
-  MUST still be held to the allowlist.** A version with a SemVer prerelease
-  (`0.24.0-dev+28`) is a development build; only releases are compared, as for
-  `# pragma-jennifer-version`. A gate stricter than the interpreter would refuse
-  decks the interpreter loads. A `-dev` build of `jennifer-tiny` is still not
+  engine is a key in the table and the running interpreter's version is inside
+  that key's range.
+- **A development build of an engine passes every floor and fails every upper
+  bound, and MUST still be held to the allowlist.** A version that is the
+  literal `dev` (a plain `go build`) or has `-dev` in it (`0.25.0-dev+131`) is
+  a development build. It counts as newer than any release: it cannot know
+  whether the next tag is a patch or a minor, and `main` already carries the
+  next release's breaks. This is the interpreter's own rule for
+  `# pragma-jennifer-version`. A `-dev` build of `jennifer-tiny` is still not
   `jennifer`.
 
-So `jennifer = "^0.25.0"` alone means "only the full `jennifer` interpreter,
-0.25.x" (a `jennifer-tiny` run is refused); adding `jennifer-tiny = "^0.25.0"`
-means "either `jennifer` 0.25.x **or** `jennifer-tiny` 0.25.x". A net-using deck
-therefore lists only `jennifer`.
+So `jennifer = ">=0.25.0 <0.26.0"` alone means "only the full `jennifer`
+interpreter, 0.25.x" (a `jennifer-tiny` run is refused); adding
+`jennifer-tiny = ">=0.25.0 <0.26.0"` means "either `jennifer` 0.25.x **or**
+`jennifer-tiny` 0.25.x". A net-using deck therefore lists only `jennifer`.
 
 ```toml
 [engines]
-jennifer = "^0.25.0"
+jennifer = ">=0.25.0 <0.26.0"
 # add a second line only if the deck also runs on the tiny build:
-# jennifer-tiny = "^0.25.0"
+# jennifer-tiny = ">=0.25.0 <0.26.0"
 ```
+
+**The resolver honours it.** When resolving, a version whose recorded
+`[engines]` does not let the target interpreter run it is not a candidate,
+exactly as a yanked one is not: each deck gets the newest version that
+satisfies its constraints **and** runs on the interpreter. A version with no
+`[engines]` runs anywhere. When versions satisfy the constraints but none runs
+on the interpreter, resolution fails with a list of those versions and their
+ranges. So a deck can ship, from its last tag, a patch release capped at
+`<0.26.0` and a minor release from `>=0.26.0`, and every consumer gets the one
+that fits its interpreter.
+
+The **target interpreter** is the one `$JVC_JENNIFER` names when it is set (its
+`version` answer), else the one running jvc; its engine is `jennifer-tiny` when
+that build runs jvc, or when the `$JVC_JENNIFER` file name says so. When the
+version cannot be told (an interpreter that does not answer `version` with a
+development build or an `X.Y.Z`), only the allowlist is checked, and jvc says
+so in its report.
 
 **When and where `[engines]` is evaluated.** A deck's `[engines]` is checked at
 two distinct points, against two potentially different interpreters:
 
-1. **Install time, against the interpreter running jvc.** `jvc check`,
+1. **Install time, against the target interpreter** (above). `jvc check`,
    `jvc install` and `jvc update` gate the *root* manifest's `[engines]` before
    any network call, and `install` and `update` also gate every resolved deck,
    root and transitive, after resolution (§10.2). A published version's
@@ -276,10 +310,10 @@ two distinct points, against two potentially different interpreters:
    is required to read it.
 
 **What this table therefore does and does not guarantee.** `[engines]` is
-checked by jvc, at install time, and nowhere else. A pragma can say "at least
-this version" and "needs `net` / `exec` / `sql`"; it cannot say "not on
-`jennifer-tiny`" for any other reason, nor express an upper bound or a
-per-engine range. So the guarantees divide:
+checked by jvc, at install time, and nowhere else. A pragma can say "this
+version range" and "needs `net` / `exec` / `sql`"; it cannot say "not on
+`jennifer-tiny`" for any other reason, nor express a per-engine range. So the
+guarantees divide:
 
 | The deck needs | Refused at run time by | Caught at install by |
 | -------------- | ---------------------- | -------------------- |
@@ -432,8 +466,10 @@ valid SemVer.
 ## 9. Version constraints
 
 A **constraint** is the value of a `[decks]` or `[dev-decks]` entry, of a
-`[conflicts]` entry (§5), and of an `[engines]` entry (§5.1). Wherever this
-document says "constraint", it means one of those.
+`[conflicts]` entry (§5), and of an `[engines]` entry for an engine other than
+`jennifer` and `jennifer-tiny`. Wherever this document says "constraint", it
+means one of those. The two Jennifer engines take the narrower engine range of
+§5.1 instead.
 
 **The grammar and what each form matches are specified elsewhere**: they are
 normative in the
@@ -531,9 +567,14 @@ routeros.greet();                    # binds the `routeros.` namespace
 2. **Use the lockfile, else resolve** - when a `camcorder.lock` is present and
    **covers** the manifest (§11.1), a tool **MUST** install exactly the versions
    it records, without resolving and without any metadata lookup; that is what
-   makes an install reproducible. Otherwise resolve the manifest's `[decks]` and
-   every deck reachable through the resolved versions' `requires` into a single
-   flattened, version-locked set (§10.4). `jvc update` (§11.2) always resolves.
+   makes an install reproducible. A locked version whose recorded `[engines]`
+   does not let the target interpreter run it (§5.1) stops the install before
+   anything is fetched, naming it ("locked @scope/deck X needs jennifer
+   >=0.25.0 <0.26.0; run \`jvc update\`"); the lock is not quietly re-resolved.
+   Otherwise resolve the manifest's `[decks]` and every deck reachable through
+   the resolved versions' `requires` into a single flattened, version-locked set
+   (§10.4), choosing only versions the target interpreter can run (§5.1).
+   `jvc update` (§11.2) always resolves.
 3. **Graph-wide engine gate** - refuse if **any** deck in the resolved set (root
    or transitive) rules out the running interpreter by its recorded `[engines]`
    (§5.1). This checks the *installing* interpreter and fails fast; the

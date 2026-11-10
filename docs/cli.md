@@ -22,9 +22,9 @@ so no `-I` flag is needed.
 | `add <deck> [constraint] [--dev]`    | add/update a requirement (empty constraint → `*`) |
 | `remove <deck> [--dev]`              | remove a requirement (refused when it is not there) |
 | `list`                               | print the manifest                              |
-| `check`                              | verify the running interpreter satisfies the deck's `[engines]` |
+| `check`                              | verify the interpreter is inside the deck's `[engines]` range |
 | `conflict <deck> [constraint]`       | declare a conflict with a deck (empty range → `*`) |
-| `engine [name] [constraint]`         | require a Jennifer engine version (name → `jennifer`) |
+| `engine [name] <range>`              | require a Jennifer engine version, `">=X.Y.Z"` or `">=X.Y.Z <A.B.C"` (name → `jennifer`) |
 | `source <deck> [git-url]`            | resolve a deck from a git remote (no url → back to the repository) |
 | `query <deck> [constraint]`          | ask the deck's repository for the best matching version |
 | `install [--dev] [--runtests]`       | install exactly what `camcorder.lock` pins (resolving only if it is absent or stale) |
@@ -776,6 +776,42 @@ makes builds reproducible:
 
 Never edit `camcorder.lock` by hand to change a version; run `update`.
 
+### Engines
+
+Both verbs pick only versions the interpreter can run. A deck version's
+`[engines]` range (`">=0.25.0"`, or `">=0.25.0 <0.26.0"` with an exclusive
+upper bound; see the [manifest reference](manifest.md)) is compared with the
+interpreter: the one `$JVC_JENNIFER` names when set, else the one running jvc.
+The resolver takes the newest version that satisfies the constraints **and**
+admits the interpreter, so after a breaking interpreter release a deck's capped
+patch release (`>=0.25.0 <0.26.0`) goes to 0.25 users and its next minor
+(`>=0.26.0`) to 0.26 users. A version with no `[engines]` is eligible
+everywhere. A development build (`dev`, `0.26.0-dev+4`) passes every floor and
+fails every upper bound.
+
+When the constraint matches versions but none runs on the interpreter, the
+error lists them:
+
+```
+$ jvc install
+dependency resolution failed: no version of @acme/tool that satisfies ^1.0.0 runs on jennifer 0.26.0:
+  1.0.0 needs jennifer >=0.24.0 <0.26.0
+  1.0.1 needs jennifer >=0.25.0 <0.26.0
+```
+
+A version pinned in `camcorder.lock` that the interpreter cannot run (you
+upgraded the interpreter since) stops `install` before anything is fetched or
+removed; `update` re-resolves to versions that fit:
+
+```
+$ jvc install
+locked @acme/tool 1.0.1 needs jennifer >=0.25.0 <0.26.0; run `jvc update`
+```
+
+If the interpreter's version cannot be told (`$JVC_JENNIFER` names a binary
+that does not answer `version`), the ranges are not checked, only which engines
+a deck lists, and the report ends with a note saying so.
+
 ### When the lock is stale
 
 `install` re-resolves when the lock no longer describes a valid install, and the
@@ -916,11 +952,13 @@ writing the lock.
    version satisfying all of them. Each deck's metadata comes from whichever
    source owns it: its `[sources]` git remote, else the repository
    (`GET /deck?name=<deck>`), one lookup per deck as the resolver discovers it.
-   An unsatisfiable graph fails here. (`update` always takes this path.)
+   Only versions whose `[engines]` admits the interpreter are candidates (see
+   [Engines](#engines)), and a lock pin that does not admit it stops the install
+   here. An unsatisfiable graph fails here. (`update` always takes this path.)
 3. **Graph-wide engine gate** - refuse if **any** resolved deck (a root or a
    transitive dependency) rules out the running interpreter by its recorded
-   `[engines]`. This checks the *installing* interpreter (jvc runs under full
-   `jennifer`) and is advice only: nothing reads `[engines]` after install, and
+   `[engines]`. This checks the target interpreter (`$JVC_JENNIFER`, else the
+   one running jvc) and is advice only: nothing reads `[engines]` after install, and
    at run time the interpreter enforces each source file's version and
    capability pragmas.
 4. **Conflict gate** - refuse if **any** deck in the resolved graph (a root or a
@@ -1418,13 +1456,25 @@ another limit in seconds, and `0` removes it. `jvc install --runtests` uses the
 same limit. Where no `timeout` is on `PATH` (a stock macOS), the runs are not
 bounded.
 
-**An interpreter older than the deck's floor is named before the gate runs.**
+**An interpreter outside the deck's range is named before the gate runs.**
 When the gate's interpreter is below the `jennifer` floor in `[engines]`, jvc
 warns first and repeats the warning under a failure. That matters for a
 development build: it skips version floors, so it loads the deck, and the
 tests then fail, or hang until the time limit, wherever they call what it does
 not have yet. A development build is judged by the release it leads to, so
-`0.26.0-dev+3` meets `>=0.26.0`.
+`0.26.0-dev+3` meets `>=0.26.0`. jvc also warns when the gate's interpreter is
+at or above the range's upper bound, or is a development build while the range
+has one (a development build fails every upper bound): the gate then tests the
+deck where no consumer of this version can install it. Set `$JVC_JENNIFER` to a
+release inside the range.
+
+Publish refuses a `jennifer` or `jennifer-tiny` range outside the two forms,
+and one whose upper bound is not above its floor:
+
+```
+$ jvc publish
+[engines] jennifer = ">=0.26.0 <0.26.0": not a valid engine range (the upper bound 0.26.0 is not above the floor 0.26.0, so no version satisfies it); write ">=X.Y.Z" or ">=X.Y.Z <A.B.C"
+```
 
 ```
 $ jvc publish

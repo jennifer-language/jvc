@@ -282,11 +282,17 @@ func testRunRegistryRefusesSomethingThatIsNotAUrl() {
 func testRunEngine() {
     def dir as string init freshDir("engine");
     runInit($dir, "demo");
-    testing.assertTrue(runEngine($dir, "jennifer", "^0.17.0").ok);
+    testing.assertTrue(runEngine($dir, "jennifer", ">=0.17.0 <0.18.0").ok);
     # engine name defaults to "jennifer" when omitted
     testing.assertTrue(runEngine($dir, "", ">=0.16.0").ok);
     def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
     testing.assertEqual(manifest.depListGet($m.engines, "jennifer"), ">=0.16.0");
+    # Only the two forms, for either Jennifer engine.
+    def out as Outcome init runEngine($dir, "jennifer-tiny", "^0.17.0");
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "not a valid engine range");
+    testing.assertFalse(runEngine($dir, "jennifer", ">=0.17.0 <0.17.0").ok);
+    testing.assertFalse(runEngine($dir, "jennifer", "").ok);
     fs.removeAll($dir);
 }
 
@@ -361,7 +367,8 @@ func testResolveRootsResolvesTransitively() {
         offline(),
         seeded(),
         {"@acme/alpha": "^1.0.0"},
-        noSources());
+        noSources(),
+        anyInterpreter());
     testing.assertTrue($r.ok);
     testing.assertEqual(len($r.decks), 2);
     testing.assertEqual($r.decks[0].name, "@acme/alpha");
@@ -376,7 +383,12 @@ func testResolveRootsRoutesAGitSourcedDeckToGit() {
         noSources(),
         "@acme/gamma",
         "/no/such/repo.git");
-    def r as Resolved init resolveRoots(offline(), seeded(), {"@acme/gamma": "^1.0.0"}, $sources);
+    def r as Resolved init resolveRoots(
+        offline(),
+        seeded(),
+        {"@acme/gamma": "^1.0.0"},
+        $sources,
+        anyInterpreter());
     testing.assertFalse($r.ok);
     testing.assertContains($r.error, "cannot reach /no/such/repo.git");
 }
@@ -391,8 +403,18 @@ func testResolveRootsRoutesAnUnsourcedDeckToTheRepository() {
     testing.assertContains($r.error, "127.0.0.1:1");
 }
 
+# anyInterpreter resolves for no interpreter in particular: no [engines] filter.
+func anyInterpreter() {
+    return resolver.Target{engine: "", version: ""};
+}
+
 func resolveUnsourced() {
-    return resolveRoots(offline(), seeded(), {"@acme/gamma": "^1.0.0"}, noSources());
+    return resolveRoots(
+        offline(),
+        seeded(),
+        {"@acme/gamma": "^1.0.0"},
+        noSources(),
+        anyInterpreter());
 }
 
 func testResolveRootsReportsUnsatisfiable() {
@@ -400,7 +422,8 @@ func testResolveRootsReportsUnsatisfiable() {
         offline(),
         seeded(),
         {"@acme/beta": ">=9.0.0"},
-        noSources());
+        noSources(),
+        anyInterpreter());
     testing.assertFalse($r.ok);
     testing.assertContains($r.error, "no version of @acme/beta");
 }
@@ -912,7 +935,7 @@ func resolutionEng(name as string, version as string, engines as map of string t
 
 func testCheckGraphEnginesPasses() {
     def r as list of catalog.Candidate init [
-        resolutionEng("a", "1.0.0", {"jennifer": "^0.21.0"}),
+        resolutionEng("a", "1.0.0", {"jennifer": ">=0.21.0 <0.22.0"}),
         resolution("b", "1.0.0")
     ];
     testing.assertTrue(checkGraphEngines($r, "jennifer", "0.21.0").ok);
@@ -921,7 +944,7 @@ func testCheckGraphEnginesPasses() {
 func testCheckGraphEnginesRejectsWrongEngine() {
     # a jennifer-only dep, resolved for a jennifer-tiny runtime -> refused
     def r as list of catalog.Candidate init [
-        resolutionEng("net", "1.0.0", {"jennifer": "^0.21.0"})
+        resolutionEng("net", "1.0.0", {"jennifer": ">=0.21.0"})
     ];
     def out as Outcome init checkGraphEngines($r, "jennifer-tiny", "0.5.0");
     testing.assertFalse($out.ok);
@@ -931,7 +954,7 @@ func testCheckGraphEnginesRejectsWrongEngine() {
 
 func testCheckGraphEnginesRejectsBadVersion() {
     def r as list of catalog.Candidate init [
-        resolutionEng("net", "1.0.0", {"jennifer": "^0.22.0"})
+        resolutionEng("net", "1.0.0", {"jennifer": ">=0.22.0"})
     ];
     testing.assertFalse(checkGraphEngines($r, "jennifer", "0.21.0").ok);
 }
@@ -955,23 +978,27 @@ func testEngineEmptyAllowlistUnrestricted() {
 }
 
 func testEngineMatch() {
-    testing.assertTrue(engineSatisfied(engineList("jennifer", "^0.17.0"), "jennifer", "0.17.2").ok);
+    testing.assertTrue(engineSatisfied(
+        engineList("jennifer", ">=0.17.0 <0.18.0"),
+        "jennifer",
+        "0.17.2").ok);
 }
 
 func testEngineNotListed() {
     # allowlist has only jennifer-tiny -> running jennifer is refused (OR allowlist)
-    def e as list of manifest.Dependency init engineList("jennifer-tiny", "^0.5.0");
+    def e as list of manifest.Dependency init engineList("jennifer-tiny", ">=0.5.0");
     testing.assertFalse(engineSatisfied($e, "jennifer", "0.17.0").ok);
 }
 
 func testEngineVersionOutOfRange() {
-    def e as list of manifest.Dependency init engineList("jennifer", "^0.17.0");
+    def e as list of manifest.Dependency init engineList("jennifer", ">=0.17.0 <0.18.0");
     testing.assertFalse(engineSatisfied($e, "jennifer", "0.16.0").ok);
+    testing.assertFalse(engineSatisfied($e, "jennifer", "0.18.0").ok);
 }
 
 func testEngineAlternativesOr() {
-    def e as list of manifest.Dependency init engineList("jennifer", "^0.17.0");
-    $e = manifest.depListSet($e, "jennifer-tiny", "^0.5.0");
+    def e as list of manifest.Dependency init engineList("jennifer", ">=0.17.0 <0.18.0");
+    $e = manifest.depListSet($e, "jennifer-tiny", ">=0.5.0 <0.6.0");
     testing.assertTrue(engineSatisfied($e, "jennifer", "0.17.9").ok);
     testing.assertTrue(engineSatisfied($e, "jennifer-tiny", "0.5.3").ok);
     testing.assertFalse(engineSatisfied($e, "jennifer-tiny", "0.6.0").ok);
@@ -1004,7 +1031,7 @@ func testConflictNoneDeclared() {
 func entry(name as string, text as string) {
     return archive.Entry{
         name: $name,
-        data: convert.bytesFromString($text, "utf-8"),
+        data: convert.bytesFromString("utf-8", $text),
         mode: 0o644,
         mtime: 0
     };
@@ -1019,7 +1046,7 @@ func deckArchive() {
         entry("src/routeros.j", 'export func f() { return 1; }'),
         entry("src/query/words.j", "export def const N as int init 3;")
     ];
-    return archive.pack($files, "tar.gz");
+    return archive.pack("tar.gz", $files);
 }
 
 func testSrcSubpath() {
@@ -1031,8 +1058,8 @@ func testSrcSubpath() {
 }
 
 func testChecksumMatches() {
-    def data as bytes init convert.bytesFromString("hello", "utf-8");
-    def sum as string init encoding.toText(hash.compute($data, "sha256"), "hex");
+    def data as bytes init convert.bytesFromString("utf-8", "hello");
+    def sum as string init encoding.toText("hex", hash.compute("sha256", $data));
     testing.assertTrue(checksumMatches($data, "")); # empty = unverified
     testing.assertTrue(checksumMatches($data, $sum));
     testing.assertTrue(checksumMatches($data, "sha256:" + $sum));
@@ -1060,7 +1087,7 @@ func testInstallArchiveVendorsOnlySrc() {
 func testInstallArchiveChecksum() {
     def dir as string init freshDir("vendorsum");
     def data as bytes init deckArchive();
-    def sum as string init encoding.toText(hash.compute($data, "sha256"), "hex");
+    def sum as string init encoding.toText("hex", hash.compute("sha256", $data));
     testing.assertTrue(installArchive($dir, "@jennifer/routeros", $data, "sha256:" + $sum, "tar.gz").ok); # lint-disable: L203
     def bad as VendorResult init installArchive(
         $dir,
@@ -1075,7 +1102,7 @@ func testInstallArchiveChecksum() {
 
 func testInstallArchiveRequiresSrc() {
     def dir as string init freshDir("nosrc");
-    def data as bytes init archive.pack([entry("deck.toml", "x")], "tar.gz");
+    def data as bytes init archive.pack("tar.gz", [entry("deck.toml", "x")]);
     def vr as VendorResult init installArchive($dir, "@jennifer/routeros", $data, "", "tar.gz");
     testing.assertFalse($vr.ok);
     testing.assertContains($vr.message, "src/");
@@ -1097,8 +1124,8 @@ func testInstallArchiveLeavesTheOldTreeOnFailure() {
     testing.assertTrue(fs.exists($vendored));
     # a replacement archive with no entrypoint must be refused...
     def bad as bytes init archive.pack(
-        [entry("src/other.j", 'export func f() { return 1; }')],
-        "tar.gz");
+        "tar.gz",
+        [entry("src/other.j", 'export func f() { return 1; }')]);
     testing.assertFalse(installArchive($dir, "@jennifer/routeros", $bad, "", "tar.gz").ok);
     # ...and the working install must survive it
     testing.assertTrue(fs.exists($vendored));
@@ -1109,7 +1136,7 @@ func testInstallArchiveLeavesTheOldTreeOnFailure() {
 func testInstallArchiveLeavesNoStagingBehind() {
     def dir as string init freshDir("staging");
     installArchive($dir, "@jennifer/routeros", deckArchive(), "", "tar.gz");
-    def bad as bytes init archive.pack([entry("nothing/x.j", "x")], "tar.gz");
+    def bad as bytes init archive.pack("tar.gz", [entry("nothing/x.j", "x")]);
     installArchive($dir, "@jennifer/routeros", $bad, "", "tar.gz");
     for (def name in fs.list($dir + "/vendor")) {
         testing.assertFalse(strings.startsWith($name, ".jvc-staging"));
@@ -1120,8 +1147,8 @@ func testInstallArchiveLeavesNoStagingBehind() {
 func testInstallArchiveRequiresEntrypoint() {
     def dir as string init freshDir("noentry");
     def data as bytes init archive.pack(
-        [entry("src/other.j", "export def const X as int init 1;")],
-        "tar.gz");
+        "tar.gz",
+        [entry("src/other.j", "export def const X as int init 1;")]);
     def vr as VendorResult init installArchive($dir, "@jennifer/routeros", $data, "", "tar.gz");
     testing.assertFalse($vr.ok);
     testing.assertContains($vr.message, "entrypoint");
@@ -2019,21 +2046,7 @@ func testReloginAdviceNamesTheRegistry() {
     testing.assertContains(reloginAdvice("http://r.example"), "jvc login");
 }
 
-# --- a development build bypasses the engine floor ---------------------------
-
-func testIsDevVersionSpotsAPrerelease() {
-    testing.assertTrue(isDevVersion("0.24.0-dev+28.7c98d39"));
-    testing.assertTrue(isDevVersion("1.0.0-rc.1"));
-    testing.assertFalse(isDevVersion("0.24.0"));
-    testing.assertFalse(isDevVersion("1.2.3+build.5"));
-}
-
-func testAnUnparseableVersionIsTreatedAsDev() {
-    # It is not a release tag either, so there is nothing to compare against and
-    # refusing would be a guess.
-    testing.assertTrue(isDevVersion("not-a-version"));
-    testing.assertTrue(isDevVersion(""));
-}
+# --- a development build passes every floor, fails every upper bound --------
 
 func testADevBuildBypassesAFloorItCouldNotMeet() {
     # The case that started this: 0.24.0-dev refused a deck needing >=0.25.0,
@@ -2067,6 +2080,66 @@ func testTheGraphGateBypassesForADevBuildToo() {
     $c.engines = {"jennifer": ">=9.9.9"};
     testing.assertTrue(checkGraphEngines([$c], "jennifer", "0.24.0-dev+28").ok);
     testing.assertFalse(checkGraphEngines([$c], "jennifer", "0.24.0").ok);
+}
+
+# A development build counts as newer than any release: it fails an upper bound
+# whatever its core.
+func testADevBuildFailsAnUpperBound() {
+    def engines as list of manifest.Dependency init manifest.depListSet(
+        [],
+        "jennifer",
+        ">=0.25.0 <0.26.0");
+    def out as Outcome init engineSatisfied($engines, "jennifer", "0.25.0-dev+131.afd9207");
+    testing.assertFalse($out.ok);
+    testing.assertContains(
+        $out.message,
+        "development build, which fails the upper bound of >=0.25.0 <0.26.0");
+    testing.assertFalse(engineSatisfied($engines, "jennifer", "dev").ok);
+    testing.assertTrue(engineSatisfied($engines, "jennifer", "0.25.4").ok);
+    testing.assertFalse(engineSatisfied($engines, "jennifer", "0.26.0").ok);
+}
+
+# A range outside the two forms is refused as such, not as "does not satisfy".
+func testAnInvalidEngineRangeIsNamed() {
+    def out as Outcome init engineSatisfied(
+        engineList("jennifer", "^0.25.0"),
+        "jennifer",
+        "0.25.0");
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "not a valid engine range");
+    testing.assertContains($out.message, ">=X.Y.Z <A.B.C");
+}
+
+# An unknown interpreter version is held to the allowlist only.
+func testAnUnknownVersionChecksTheAllowlistOnly() {
+    def e as list of manifest.Dependency init engineList("jennifer", ">=0.25.0 <0.26.0");
+    def out as Outcome init engineSatisfied($e, "jennifer", "");
+    testing.assertTrue($out.ok);
+    testing.assertContains($out.message, "not checked");
+    testing.assertFalse(engineSatisfied($e, "jennifer-tiny", "").ok);
+    testing.assertContains(
+        unknownVersionNote(resolver.Target{engine: "jennifer", version: ""}),
+        "were not checked");
+    testing.assertEqual(
+        unknownVersionNote(resolver.Target{engine: "jennifer", version: "0.25.0"}),
+        "");
+}
+
+# An interpreter that answers something jvc cannot judge counts as unknown.
+func testAnUnjudgeableVersionIsUnknown() {
+    testing.assertEqual(knownTarget("jennifer", "garbage").version, "");
+    testing.assertEqual(knownTarget("jennifer", "dev").version, "dev");
+    testing.assertEqual(knownTarget("jennifer-tiny", "0.25.0").engine, "jennifer-tiny");
+}
+
+# $JVC_JENNIFER names the interpreter [engines] is judged against.
+func testJvcJenniferPicksTheTarget() {
+    def saved as string init os.getEnv("JVC_JENNIFER");
+    os.setEnv("JVC_JENNIFER", "/no/such/jennifer-tiny");
+    def t as resolver.Target init targetInterpreter();
+    os.setEnv("JVC_JENNIFER", $saved);
+    testing.assertEqual($t.engine, "jennifer-tiny");
+    testing.assertEqual($t.version, "");
 }
 
 # --- polling backs off, but not past the window ------------------------------
@@ -2626,7 +2699,7 @@ func testVendoringPreservesTheExecutableBit() {
             0o644),
         entryWithMode("src/tool", '#!/usr/bin/env -S jennifer run', 0o755)
     ];
-    def data as bytes init archive.pack($files, "tar.gz");
+    def data as bytes init archive.pack("tar.gz", $files);
     def vr as VendorResult init installArchive($dir, "@acme/tool", $data, "", "tar.gz");
     testing.assertTrue($vr.ok);
     def base as string init $dir + "/vendor/acme/tool/";
@@ -2639,7 +2712,7 @@ func testVendoringPreservesTheExecutableBit() {
 func entryWithMode(name as string, body as string, mode as int) {
     return archive.Entry{
         name: $name,
-        data: convert.bytesFromString($body, "utf-8"),
+        data: convert.bytesFromString("utf-8", $body),
         mode: $mode,
         mtime: 0
     };
@@ -2881,7 +2954,7 @@ func testANameThatWalksAPathIsNeverVendored() {
     def dir as string init freshDir("walk");
     fs.mkdirAll($dir + "/src");
     fs.writeString($dir + "/src/main.j", "mine");
-    def data as bytes init archive.pack([entry("src/src.j", "theirs")], "tar.gz");
+    def data as bytes init archive.pack("tar.gz", [entry("src/src.j", "theirs")]);
     def vr as VendorResult init installArchive($dir, "@../src", $data, "", "tar.gz");
     testing.assertFalse($vr.ok);
     testing.assertContains($vr.message, "invalid deck name");
@@ -2905,7 +2978,12 @@ func testARequirementNamingAnInvalidDeckIsNotFetched() {
     def a as catalog.Candidate init catalog.candidate("@acme/alpha", "1.0.0");
     $a.requires = {"@../src": "*"};
     $cat = catalog.add($cat, $a);
-    def r as Resolved init resolveRoots(offline(), $cat, {"@acme/alpha": "*"}, noSources());
+    def r as Resolved init resolveRoots(
+        offline(),
+        $cat,
+        {"@acme/alpha": "*"},
+        noSources(),
+        anyInterpreter());
     testing.assertFalse($r.ok);
     testing.assertContains($r.error, "@../src, which is not a valid deck name");
 }
@@ -2980,7 +3058,7 @@ func rawTar(names as list of string, bodies as list of string) {
         $out = $out + $header + $body + strings.repeat("\0", $pad);
         $i = $i + 1;
     }
-    return convert.bytesFromString($out + strings.repeat("\0", 1024), "utf-8");
+    return convert.bytesFromString("utf-8", $out + strings.repeat("\0", 1024));
 }
 
 # The interpreter now refuses the whole archive; srcSubpath's own segment check
@@ -3858,4 +3936,97 @@ func scratchRoot() {
 
 func tearDown() {
     fs.removeAll(os.tempDir() + "/jvc_test_cli");
+}
+
+# --- a lockfile pin the interpreter cannot run -------------------------------
+
+# fakeInterpreter writes an executable that answers `version` with the given
+# text, for $JVC_JENNIFER to name.
+func fakeInterpreter(dir as string, version as string) {
+    def file as string init $dir + "/jennifer";
+    fs.writeString($file, "#!/bin/sh\necho " + $version + "\n");
+    fs.chmod($file, 0o755);
+    return $file;
+}
+
+func testALockedPinOutsideTheRangeIsNamed() {
+    def ok as catalog.Candidate init lockedAt("@acme/new", "1.1.0", "http://127.0.0.1:1");
+    $ok.engines = {"jennifer": ">=0.26.0"};
+    def capped as catalog.Candidate init lockedAt("@acme/old", "1.0.1", "http://127.0.0.1:1");
+    $capped.engines = {"jennifer": ">=0.25.0 <0.26.0"};
+    def bare as catalog.Candidate init lockedAt("@acme/plain", "0.1.0", "http://127.0.0.1:1");
+    def got as list of string init lockEngineProblems(
+        [$ok, $capped, $bare],
+        resolver.Target{engine: "jennifer", version: "0.26.0"});
+    testing.assertEqual(len($got), 1);
+    testing.assertEqual(
+        $got[0],
+        "locked @acme/old 1.0.1 needs jennifer >=0.25.0 <0.26.0; run `jvc update`");
+    testing.assertEqual(
+        len(lockEngineProblems([$capped], resolver.Target{engine: "jennifer", version: "0.25.2"})),
+        0);
+}
+
+# Install stops before fetching or vendoring anything.
+func testInstallStopsOnALockedPinOutsideTheRange() {
+    def dir as string init fs.makeTempDir("", "jvc-lockeng");
+    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
+    $m = manifest.addDependency($m, "@acme/old", "^1.0.0");
+    manifest.save($m, $dir + "/deck.toml");
+    def capped as catalog.Candidate init lockedAt("@acme/old", "1.0.1", "http://127.0.0.1:1");
+    $capped.engines = {"jennifer": ">=0.25.0 <0.26.0"};
+    writeLock($dir, [$capped]);
+    def saved as string init os.getEnv("JVC_JENNIFER");
+    os.setEnv("JVC_JENNIFER", fakeInterpreter($dir, "0.26.0"));
+    def out as Outcome init runInstall($dir, "http://127.0.0.1:1", false, false);
+    os.setEnv("JVC_JENNIFER", $saved);
+    testing.assertFalse($out.ok);
+    testing.assertEqual(
+        $out.message,
+        "locked @acme/old 1.0.1 needs jennifer >=0.25.0 <0.26.0; run `jvc update`");
+    testing.assertFalse(fs.exists($dir + "/vendor"));
+    fs.removeAll($dir);
+}
+
+# A development build fails the bound too.
+func testInstallStopsOnALockedPinForADevBuild() {
+    def dir as string init fs.makeTempDir("", "jvc-lockdev");
+    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
+    $m = manifest.addDependency($m, "@acme/old", "^1.0.0");
+    manifest.save($m, $dir + "/deck.toml");
+    def capped as catalog.Candidate init lockedAt("@acme/old", "1.0.1", "http://127.0.0.1:1");
+    $capped.engines = {"jennifer": ">=0.25.0 <0.26.0"};
+    writeLock($dir, [$capped]);
+    def saved as string init os.getEnv("JVC_JENNIFER");
+    os.setEnv("JVC_JENNIFER", fakeInterpreter($dir, "0.25.0-dev+131.afd9207"));
+    def out as Outcome init runInstall($dir, "http://127.0.0.1:1", false, false);
+    os.setEnv("JVC_JENNIFER", $saved);
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "locked @acme/old 1.0.1 needs jennifer >=0.25.0 <0.26.0");
+    fs.removeAll($dir);
+}
+
+# The resolver filters what install and update fetch: with only a capped
+# release in the catalog, the failure lists it with its range.
+func testResolveRootsFiltersByTheInterpreter() {
+    def cat as catalog.Catalog init catalog.empty();
+    def capped as catalog.Candidate init catalog.candidate("@acme/old", "1.0.1");
+    $capped.engines = {"jennifer": ">=0.25.0 <0.26.0"};
+    $cat = catalog.add($cat, $capped);
+    def r as Resolved init resolveRoots(
+        offline(),
+        $cat,
+        {"@acme/old": "^1.0.0"},
+        noSources(),
+        resolver.Target{engine: "jennifer", version: "0.26.0"});
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.error, "runs on jennifer 0.26.0");
+    testing.assertContains($r.error, "1.0.1 needs jennifer >=0.25.0 <0.26.0");
+    def fits as Resolved init resolveRoots(
+        offline(),
+        $cat,
+        {"@acme/old": "^1.0.0"},
+        noSources(),
+        resolver.Target{engine: "jennifer", version: "0.25.1"});
+    testing.assertTrue($fits.ok);
 }

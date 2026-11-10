@@ -22,7 +22,7 @@ func entry(name as string, body as string) {
         name: $name,
         mode: 420,
         mtime: 0,
-        data: convert.bytesFromString($body, "utf-8")
+        data: convert.bytesFromString("utf-8", $body)
     };
 }
 
@@ -30,7 +30,7 @@ func entry(name as string, body as string) {
 func bodyOf(files as list of File, path as string) {
     for (def f in $files) {
         if ($f.path == $path) {
-            return convert.stringFromBytes($f.data, "utf-8");
+            return convert.stringFromBytes("utf-8", $f.data);
         }
     }
     return "";
@@ -117,7 +117,7 @@ func deckArchive() {
         entry("template/content/hello.md", '# {{name}}' + "\n"),
         entry('template/{{name}}.toml', 'site = "{{name}}"' + "\n")
     ];
-    return archive.pack($files, "tar.gz");
+    return archive.pack("tar.gz", $files);
 }
 
 func testFromArchiveTakesOnlyTheTemplateTree() {
@@ -146,7 +146,7 @@ func testFromArchiveSubstitutesInPaths() {
 # back to the built-in frame
 func testFromArchiveOfADeckWithoutATemplate() {
     def files as list of archive.Entry init [entry("src/cms.j", 'export func f() { return 1; }')];
-    def stamped as list of File init fromArchive(archive.pack($files, "tar.gz"), "tar.gz", bind());
+    def stamped as list of File init fromArchive(archive.pack("tar.gz", $files), "tar.gz", bind());
     testing.assertEqual(len($stamped), 0);
 }
 
@@ -160,7 +160,7 @@ func testFromArchiveCopiesBinaryAssetsVerbatim() {
     def files as list of archive.Entry init [
         archive.Entry{name: "template/logo.ico", mode: 420, mtime: 0, data: $raw}
     ];
-    def stamped as list of File init fromArchive(archive.pack($files, "tar.gz"), "tar.gz", bind());
+    def stamped as list of File init fromArchive(archive.pack("tar.gz", $files), "tar.gz", bind());
     testing.assertEqual(len($stamped), 1);
     testing.assertEqual(len($stamped[0].data), 3);
     testing.assertEqual($stamped[0].data[0], 0xff);
@@ -212,7 +212,7 @@ func testBuiltinReadmeStatesTheWebRootRule() {
 
 func testBuiltinLeavesNoUnsubstitutedPlaceholders() {
     for (def f in builtin(bind())) {
-        testing.assertFalse(strings.contains(convert.stringFromBytes($f.data, "utf-8"), '{{'));
+        testing.assertFalse(strings.contains(convert.stringFromBytes("utf-8", $f.data), '{{'));
     }
 }
 
@@ -247,7 +247,7 @@ func testFromArchiveIgnoresATemplateDirectoryUnderSrc() {
         entry("src/cms.j", 'export func render() { return 1; }'),
         entry("src/template/render.j", 'export func page() { return 2; }')
     ];
-    def stamped as list of File init fromArchive(archive.pack($files, "tar.gz"), "tar.gz", bind());
+    def stamped as list of File init fromArchive(archive.pack("tar.gz", $files), "tar.gz", bind());
     testing.assertEqual(len($stamped), 0);
 }
 
@@ -258,7 +258,7 @@ func testFromArchiveReadsAWrappedTemplate() {
         entry("cms-1.0/src/template/render.j", "no" + "\n"),
         entry("cms-1.0/template/main.j", '{{name}}' + "\n")
     ];
-    def stamped as list of File init fromArchive(archive.pack($files, "tar.gz"), "tar.gz", bind());
+    def stamped as list of File init fromArchive(archive.pack("tar.gz", $files), "tar.gz", bind());
     testing.assertEqual(len($stamped), 1);
     testing.assertEqual(bodyOf($stamped, "main.j"), "my-site" + "\n");
 }
@@ -293,7 +293,7 @@ func rawTar(names as list of string, bodies as list of string) {
         $out = $out + $header + $body + strings.repeat("\0", $pad);
         $i = $i + 1;
     }
-    return convert.bytesFromString($out + strings.repeat("\0", 1024), "utf-8");
+    return convert.bytesFromString("utf-8", $out + strings.repeat("\0", 1024));
 }
 
 # The interpreter refuses an archive with a `..` member outright, so fromArchive
@@ -317,7 +317,7 @@ func testFromArchiveSkipsAnUnsafeRenderedName() {
         entry('template/{{name}}.md', "hi" + "\n")
     ];
     def stamped as list of File init fromArchive(
-        archive.pack($files, "tar.gz"),
+        archive.pack("tar.gz", $files),
         "tar.gz",
         vars("..", "@you/cms", "1.0.0"));
     testing.assertEqual(len($stamped), 1);

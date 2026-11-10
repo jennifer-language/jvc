@@ -414,7 +414,7 @@ func testArchiveBytesFollowsTheCommitNotTheTag() {
     def entries as list of archive.Entry init safepath.unpack($data, "tar");
     for (def e in $entries) {
         if ($e.name == "src/beta.j") {
-            testing.assertContains(convert.stringFromBytes($e.data, "utf-8"), "v1.0.0");
+            testing.assertContains(convert.stringFromBytes("utf-8", $e.data), "v1.0.0");
         }
     }
     fs.removeAll($repo);

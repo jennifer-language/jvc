@@ -575,7 +575,7 @@ func runText(argv as list of string) {
 # PASS / FAIL, the summary) survive.
 func displayText(b as bytes) {
     try {
-        return convert.stringFromBytes($b, "utf-8");
+        return convert.stringFromBytes("utf-8", $b);
     } catch (whole) {
         return linesText($b);
     }
@@ -586,7 +586,7 @@ func displayText(b as bytes) {
 # a placeholder.
 func linesText(b as bytes) {
     def lines as list of string init [];
-    for (def line in binary.split($b, convert.bytesFromString("\n", "utf-8"))) {
+    for (def line in binary.split($b, convert.bytesFromString("utf-8", "\n"))) {
         $lines[] = lineText($line);
     }
     return strings.join($lines, "\n");
@@ -594,7 +594,7 @@ func linesText(b as bytes) {
 
 func lineText(line as bytes) {
     try {
-        return convert.stringFromBytes($line, "utf-8");
+        return convert.stringFromBytes("utf-8", $line);
     } catch (bad) {
         return "[a line that is not UTF-8 text]";
     }

@@ -46,6 +46,7 @@ import "./ciauth.j" as ciauth;
 import "./scopemap.j" as scopemap;
 import "./catalog.j" as catalog;
 import "./resolver.j" as resolver;
+import "./enginerange.j" as enginerange;
 import "./gitsource.j" as gitsource;
 import "./scaffold.j" as scaffold;
 import "./app.j" as app;
@@ -57,7 +58,6 @@ import "./forge.j" as forge;
 import "./authcode.j" as authcode;
 import "./about.j" as about;
 import "http.j" as http;
-import "semver.j" as semver;
 
 # jvc's own version, reported by `jvc version`; set in about.j.
 def const VERSION as string init about.VERSION;
@@ -3241,11 +3241,13 @@ func shadowWarning(
 
 /**
  * Require a Jennifer engine version range for dir's deck (which interpreter
- * versions can run it). The engine name defaults to "jennifer" and the
- * constraint to "*".
+ * versions can run it). The engine name defaults to "jennifer". The range of
+ * `jennifer` and `jennifer-tiny` is one of the two forms `enginerange` accepts,
+ * `>=X.Y.Z` or `>=X.Y.Z <A.B.C`; another engine name takes any constraint and
+ * defaults to "*".
  * @param dir {string} the directory holding the manifest
  * @param name {string} the engine name ("jennifer" / "jennifer-tiny"; "" -> "jennifer")
- * @param constraint {string} the interpreter version range ("" -> "*")
+ * @param constraint {string} the interpreter version range
  * @return {Outcome} the result to print
  */
 export func runEngine(dir as string, name as string, constraint as string) {
@@ -3260,7 +3262,13 @@ export func runEngine(dir as string, name as string, constraint as string) {
     if ($loc.path == "") {
         return noManifest($dir);
     }
-    if (not constraint.isValidConstraint($constraint)) {
+    if (enginerange.isEngineKey($engine)) {
+        def parsed as enginerange.Range init enginerange.parse($constraint);
+        if (not $parsed.ok) {
+            return fail("not a valid engine range: \"" + $constraint + "\" (" + $parsed.problem +
+                "); write " + enginerange.FORMS);
+        }
+    } elseif (not constraint.isValidConstraint($constraint)) {
         return fail("not a valid constraint: \"" + $constraint + "\"");
     }
     def spec as string init $constraint;
@@ -3633,7 +3641,7 @@ export func sourceStaleReason(
 
 # hexSha256 returns the lowercase hex SHA-256 of data.
 func hexSha256(data as bytes) {
-    return encoding.toText(hash.compute($data, "sha256"), "hex");
+    return encoding.toText("hex", hash.compute("sha256", $data));
 }
 
 /**
@@ -3883,7 +3891,7 @@ func vendoredBin(entries as list of archive.Entry, name as string) {
     }
     try {
         def m as manifest.Manifest init manifest.parse(
-            convert.stringFromBytes($found[0].data, "utf-8"),
+            convert.stringFromBytes("utf-8", $found[0].data),
             manifest.detectFormat(manifestEntry($found[0].name, $root)));
         if ($m.pkg.bin == "") {
             return "";
@@ -4472,21 +4480,27 @@ export func noGitRelease(name as string, url as string, skipped as list of strin
  * `seed` is the catalog to start from. Pass `catalog.empty()` in production; a
  * pre-filled catalog resolves without touching the network or git, which is how
  * the tests exercise this offline.
+ *
+ * Only versions the target interpreter can run are chosen
+ * (`resolver.resolveGraphOn`): the newest version that fits the constraints and
+ * whose `[engines]` admits the interpreter wins.
  * @param mapper {Mapper} which repository each scope resolves at
  * @param seed {catalog.Catalog} the candidates already known
  * @param roots {map of string to string} the root requirements (name -> constraint)
  * @param sources {list of manifest.Dependency} the `[sources]` table (deck -> git URL)
+ * @param target {resolver.Target} the interpreter the decks are for (`targetInterpreter`)
  * @return {Resolved} the locked set, or the reason it could not be resolved
  */
 export func resolveRoots(
     mapper as Mapper,
     seed as catalog.Catalog,
     roots as map of string to string,
-    sources as list of manifest.Dependency) {
+    sources as list of manifest.Dependency,
+    target as resolver.Target) {
     def cat as catalog.Catalog init $seed;
     def fetched as map of string to bool init {};
     for (def round as int init 0; $round < MAX_FETCH_ROUNDS + len($fetched); $round = $round + 1) {
-        def g as resolver.GraphResult init resolver.resolveGraph($cat, $roots);
+        def g as resolver.GraphResult init resolver.resolveGraphOn($cat, $roots, $target);
         if ($g.ok) {
             return Resolved{ok: true, decks: $g.resolved, error: ""};
         }
@@ -4590,12 +4604,13 @@ func applySet(
     m as manifest.Manifest,
     resolved as list of catalog.Candidate,
     headline as string,
-    runTests as bool) {
+    runTests as bool,
+    target as resolver.Target) {
     # Refuse if any deck (root or transitive) can't run on this engine. This is an
-    # install-time gate against the *installing* interpreter, and advice: the
+    # install-time gate against the target interpreter (`targetInterpreter`); the
     # interpreter reads no lockfile and enforces only each file's own pragmas
     # (see checkGraphEngines).
-    def graphEng as Outcome init checkGraphEngines($resolved, runningEngine(), runningVersion());
+    def graphEng as Outcome init checkGraphEngines($resolved, $target.engine, $target.version);
     if (not $graphEng.ok) {
         return fail("a dependency does not support this engine:\n  " + $graphEng.message);
     }
@@ -4647,6 +4662,10 @@ func applySet(
     def warned as string init "";
     for (def line in capabilityWarnings($resolved, meta.CAPABILITIES)) {
         $warned = $warned + "\n  warning: " + $line;
+    }
+    def unknown as string init unknownVersionNote($target);
+    if (not ($unknown == "")) {
+        $warned = $warned + "\n" + $unknown;
     }
     return ok($headline + $report + "\nlock: " + $lock + $warned);
 }
@@ -4710,7 +4729,8 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool, run
         return noManifest($dir);
     }
     def m as manifest.Manifest init manifest.load($loc.path);
-    def engineCheck as Outcome init engineSatisfied($m.engines, runningEngine(), runningVersion());
+    def target as resolver.Target init targetInterpreter();
+    def engineCheck as Outcome init engineSatisfied($m.engines, $target.engine, $target.version);
     if (not $engineCheck.ok) {
         return $engineCheck;
     }
@@ -4747,13 +4767,21 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool, run
             $stale = sourceStaleReason($m.sources, $locked.decks);
         }
         if ($stale == "") {
+            # A pin the interpreter cannot run stops the install before anything
+            # is fetched: the lock is what makes an install reproducible, so it
+            # is not quietly re-resolved, and `jvc update` is the way forward.
+            def pinned as list of string init lockEngineProblems($locked.decks, $target);
+            if (len($pinned) > 0) {
+                return fail(strings.join($pinned, "\n"));
+            }
             return applySet(
                 $dir,
                 $m,
                 $locked.decks,
                 "installed " + convertCount(len($locked.decks)) +
                     " deck(s) from " + LOCK_FILE + ":",
-                $runTests);
+                $runTests,
+                $target);
         }
         def resolvedOut as Outcome init resolveAndApply(
             $dir,
@@ -4761,7 +4789,8 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool, run
             $roots,
             $baseUrl,
             "re-resolved (" + LOCK_FILE + " is stale: " + $stale + ")",
-            $runTests);
+            $runTests,
+            $target);
         return $resolvedOut;
     }
     return resolveAndApply(
@@ -4770,7 +4799,8 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool, run
         $roots,
         $baseUrl,
         "resolved (no " + LOCK_FILE + " yet)",
-        $runTests);
+        $runTests,
+        $target);
 }
 
 # resolveAndApply resolves a root set against the sources the manifest names,
@@ -4782,23 +4812,35 @@ func resolveAndApply(
     roots as map of string to string,
     baseUrl as string,
     why as string,
-    runTests as bool) {
+    runTests as bool,
+    target as resolver.Target) {
     def mapper as Mapper init newMapper($m.registries, $baseUrl);
     def graph as Resolved init resolveFailed("");
     try {
-        $graph = resolveRoots($mapper, catalog.empty(), $roots, $m.sources);
+        $graph = resolveRoots($mapper, catalog.empty(), $roots, $m.sources, $target);
     } catch (err) {
         return fail("could not resolve: " + $err.message);
     }
     if (not $graph.ok) {
-        return fail("dependency resolution failed: " + $graph.error);
+        return fail("dependency resolution failed: " + $graph.error + unknownSuffix($target));
     }
     return applySet(
         $dir,
         $m,
         $graph.decks,
         $why + "\ninstalled " + convertCount(len($graph.decks)) + " deck(s):",
-        $runTests);
+        $runTests,
+        $target);
+}
+
+# unknownSuffix is unknownVersionNote on a line of its own, for a failure
+# report, or "" when the version is known.
+func unknownSuffix(target as resolver.Target) {
+    def note as string init unknownVersionNote($target);
+    if ($note == "") {
+        return "";
+    }
+    return "\n" + $note;
 }
 
 /**
@@ -4832,7 +4874,8 @@ export func runUpdate(
         return noManifest($dir);
     }
     def m as manifest.Manifest init manifest.load($loc.path);
-    def engineCheck as Outcome init engineSatisfied($m.engines, runningEngine(), runningVersion());
+    def target as resolver.Target init targetInterpreter();
+    def engineCheck as Outcome init engineSatisfied($m.engines, $target.engine, $target.version);
     if (not $engineCheck.ok) {
         return $engineCheck;
     }
@@ -4864,22 +4907,23 @@ export func runUpdate(
     def graph as Resolved init resolveFailed("");
     try {
         if (len($named) == 0) {
-            $graph = resolveRoots($mapper, catalog.empty(), $roots, $m.sources);
+            $graph = resolveRoots($mapper, catalog.empty(), $roots, $m.sources, $target);
         } else {
-            $graph = resolveTargeted($mapper, $roots, $locked.decks, $named, $m.sources);
+            $graph = resolveTargeted($mapper, $roots, $locked.decks, $named, $m.sources, $target);
         }
     } catch (err) {
         return fail("could not resolve: " + $err.message);
     }
     if (not $graph.ok) {
-        return fail("dependency resolution failed: " + $graph.error);
+        return fail("dependency resolution failed: " + $graph.error + unknownSuffix($target));
     }
     def applied as Outcome init applySet(
         $dir,
         $m,
         $graph.decks,
         "updated " + convertCount(len($graph.decks)) + " deck(s):",
-        $runTests);
+        $runTests,
+        $target);
     if (not $applied.ok) {
         return $applied;
     }
@@ -4900,13 +4944,19 @@ func resolveTargeted(
     roots as map of string to string,
     locked as list of catalog.Candidate,
     named as list of string,
-    sources as list of manifest.Dependency) {
+    sources as list of manifest.Dependency,
+    target as resolver.Target) {
     def current as list of catalog.Candidate init onlyReachable($roots, $locked);
     def pinned as map of string to string init pinsFor($roots, $current, $named, false);
-    def graph as Resolved init resolveRoots($mapper, catalog.empty(), $pinned, $sources);
+    def graph as Resolved init resolveRoots($mapper, catalog.empty(), $pinned, $sources, $target);
     if (not $graph.ok) {
         $pinned = pinsFor($roots, $current, $named, true);
-        def looser as Resolved init resolveRoots($mapper, catalog.empty(), $pinned, $sources);
+        def looser as Resolved init resolveRoots(
+            $mapper,
+            catalog.empty(),
+            $pinned,
+            $sources,
+            $target);
         if (not $looser.ok) {
             return $graph;
         }
@@ -5045,7 +5095,7 @@ func templateBody(files as list of scaffold.File, path as string) {
     for (def f in $files) {
         if ($f.path == $path) {
             try {
-                return convert.stringFromBytes($f.data, "utf-8");
+                return convert.stringFromBytes("utf-8", $f.data);
             } catch (err) {
                 return "";
             }
@@ -5126,6 +5176,38 @@ func dirIsUsable(dir as string) {
     return len(fs.list($dir)) == 0;
 }
 
+# resolveFrame resolves a new frame's engine deck and its whole graph for the
+# target interpreter, then runs the engine gate install applies; a new frame
+# has no [conflicts] of its own to check. A failure carries the message to
+# print.
+func resolveFrame(
+    deck as string,
+    roots as map of string to string,
+    sources as list of manifest.Dependency,
+    baseUrl as string) {
+    def target as resolver.Target init targetInterpreter();
+    def graph as Resolved init resolveFailed("");
+    try {
+        $graph = resolveRoots(
+            newMapper(noRegistries(), $baseUrl),
+            catalog.empty(),
+            $roots,
+            $sources,
+            $target);
+    } catch (err) {
+        return resolveFailed("could not resolve: " + $err.message);
+    }
+    if (not $graph.ok) {
+        return resolveFailed("cannot resolve " + $deck + ": " + $graph.error +
+            unknownSuffix($target));
+    }
+    def graphEng as Outcome init checkGraphEngines($graph.decks, $target.engine, $target.version);
+    if (not $graphEng.ok) {
+        return resolveFailed("a dependency does not support this engine:\n  " + $graphEng.message);
+    }
+    return $graph;
+}
+
 /**
  * Scaffold an app **frame** (the third deck shape) from an engine deck.
  *
@@ -5181,21 +5263,9 @@ export func runNew(
     if (not ($sourceUrl == "")) {
         $sources = manifest.depListSet($sources, $engineName, $sourceUrl);
     }
-    def mapper as Mapper init newMapper(noRegistries(), $baseUrl);
-    def graph as Resolved init resolveFailed("");
-    try {
-        $graph = resolveRoots($mapper, catalog.empty(), $roots, $sources);
-    } catch (err) {
-        return fail("could not resolve: " + $err.message);
-    }
+    def graph as Resolved init resolveFrame($deck, $roots, $sources, $baseUrl);
     if (not $graph.ok) {
-        return fail("cannot resolve " + $deck + ": " + $graph.error);
-    }
-    # The same engine gate install applies, before anything is created. A new
-    # frame has no [conflicts] of its own to check.
-    def graphEng as Outcome init checkGraphEngines($graph.decks, runningEngine(), runningVersion());
-    if (not $graphEng.ok) {
-        return fail("a dependency does not support this engine:\n  " + $graphEng.message);
+        return fail($graph.error);
     }
     def engine as catalog.Candidate init $graph.decks[0];
     for (def res in $graph.decks) {
@@ -5207,7 +5277,7 @@ export func runNew(
     # and it is verified before either: the template is written into the new
     # project, so it is as much the deck's code as its src/ is.
     def got as Fetched init Fetched{
-        data: convert.bytesFromString("", "utf-8"),
+        data: convert.bytesFromString("utf-8", ""),
         format: "",
         checksum: ""
     };
@@ -5828,7 +5898,8 @@ func runningEngine() {
 }
 
 # runningVersion is the interpreter's version as it describes itself. The
-# prerelease is kept, because it decides the engine floor (see isDevVersion).
+# prerelease is kept, because it decides the engine range (a `-dev` build fails
+# every upper bound).
 func runningVersion() {
     def raw as string init meta.VERSION;
     if (strings.startsWith($raw, "v")) {
@@ -5838,36 +5909,66 @@ func runningVersion() {
 }
 
 /**
- * Report whether an interpreter version names a development build.
- *
- * A `-dev` build bypasses a version floor, which is the interpreter's own rule
- * for `# pragma-jennifer-version` and so must be jvc's for `[engines]` too: a
- * gate stricter than the thing it stands in for would refuse decks the
- * interpreter loads.
- * @param version {string} the interpreter version, e.g. "0.26.0-dev+12.7c98d39"
- * @return {bool} true when it carries a prerelease tag
+ * The interpreter `[engines]` is judged against when resolving, installing and
+ * checking: the one `$JVC_JENNIFER` names when it is set (asked for its
+ * version), else the one running jvc. The engine is the running build's, or,
+ * under `$JVC_JENNIFER`, `jennifer-tiny` when the override's file name says so
+ * and `jennifer` otherwise. A version that cannot be read, or that is neither a
+ * development build nor `X.Y.Z`, is "": unknown, and then only the engine list
+ * is checked, not the ranges (`unknownVersionNote` says so).
+ * @return {resolver.Target} the interpreter installs are for
  */
-export func isDevVersion(version as string) {
-    if (not semver.isValid($version)) {
-        # Unparseable is not a release tag either, so it cannot be compared.
-        return true;
+export func targetInterpreter() {
+    def override as string init os.getEnv("JVC_JENNIFER");
+    def engine as string init runningEngine();
+    def version as string init runningVersion();
+    if (not ($override == "")) {
+        $engine = "jennifer";
+        if (strings.contains(path.base($override), "jennifer-tiny")) {
+            $engine = "jennifer-tiny";
+        }
+        $version = verify.interpreterVersion();
     }
-    return not (semver.parse($version).prerelease == "");
+    return knownTarget($engine, $version);
+}
+
+# knownTarget builds a Target, dropping a version enginerange cannot judge.
+func knownTarget(engine as string, version as string) {
+    if (not enginerange.isKnownVersion($version)) {
+        return resolver.Target{engine: $engine, version: ""};
+    }
+    return resolver.Target{engine: $engine, version: $version};
+}
+
+/**
+ * The note an install or update adds when the interpreter's version is
+ * unknown, so the `[engines]` ranges went unchecked; "" when it is known.
+ * @param target {resolver.Target} the interpreter installs are for
+ * @return {string} the note, or ""
+ */
+export func unknownVersionNote(target as resolver.Target) {
+    if (not ($target.version == "")) {
+        return "";
+    }
+    return "note: the interpreter's version is unknown (" + verify.interpreter() +
+        " version gave no X.Y.Z or dev build), so [engines] ranges were not checked";
 }
 
 /**
  * Check a running engine against a deck's `[engines]` allowlist. An empty
  * allowlist imposes no restriction. Otherwise the engine must be listed and its
- * version must satisfy that entry's range (the entries are alternatives - OR).
+ * version must be inside that entry's range (the entries are alternatives -
+ * OR), by `enginerange.admits`.
  *
- * **A development build bypasses the version range**, matching the interpreter's
- * own `# pragma-jennifer-version` rule, where any `-dev` build passes and only a
- * release tag is compared. The allowlist itself still applies: a `-dev` build of
- * `jennifer-tiny` is still not `jennifer`, because that is a question of which
- * engine is running, not of how new it is.
+ * **A development build passes every floor and fails every upper bound**, the
+ * interpreter's own rule for `# pragma-jennifer-version`. The allowlist itself
+ * still applies: a `-dev` build of `jennifer-tiny` is still not `jennifer`,
+ * because that is a question of which engine is running, not of how new it is.
+ * An unknown version ("") is held to the allowlist only.
  * @param engines {list of manifest.Dependency} the manifest's engine allowlist
  * @param engineName {string} the running engine ("jennifer" / "jennifer-tiny")
- * @param engineVersion {string} the running interpreter version, prerelease included
+ * @param engineVersion {string} the running interpreter version, prerelease
+ *     included ("" when unknown)
  * @return {Outcome} ok when the engine may run the deck, else a failure
  */
 export func engineSatisfied(
@@ -5877,19 +5978,64 @@ export func engineSatisfied(
     if (len($engines) == 0) {
         return ok("no engine restriction (runs on any Jennifer)");
     }
+    def shown as string init $engineVersion;
+    if ($shown == "") {
+        $shown = "(version unknown)";
+    }
     if (not manifest.depListHas($engines, $engineName)) {
-        return fail("engine " + $engineName + " " + $engineVersion +
+        return fail("engine " + $engineName + " " + $shown +
             " is not in the deck's [engines] allowlist");
     }
     def spec as string init manifest.depListGet($engines, $engineName);
-    if (isDevVersion($engineVersion)) {
-        return ok("engine " + $engineName + " " + $engineVersion +
-            " is a development build, which bypasses the " + $spec + " floor");
+    def parsed as enginerange.Range init enginerange.parse($spec);
+    if (not $parsed.ok) {
+        return fail("[engines] " + $engineName + " = \"" + $spec +
+            "\": not a valid engine range (" +
+            $parsed.problem + "); write " + enginerange.FORMS);
     }
-    if (not constraint.satisfies($engineVersion, $spec)) {
+    if ($engineVersion == "") {
+        return ok("engine " + $engineName + " of unknown version; the range " + $spec +
+            " was not checked");
+    }
+    def dev as bool init enginerange.isDevBuild($engineVersion);
+    if (not enginerange.admits($spec, $engineVersion)) {
+        if ($dev) {
+            return fail("engine " + $engineName + " " + $engineVersion +
+                " is a development build, which fails the upper bound of " + $spec);
+        }
         return fail("engine " + $engineName + " " + $engineVersion + " does not satisfy " + $spec);
     }
+    if ($dev) {
+        return ok("engine " + $engineName + " " + $engineVersion +
+            " is a development build, which passes the " + $spec + " floor");
+    }
     return ok("engine " + $engineName + " " + $engineVersion + " satisfies " + $spec);
+}
+
+/**
+ * List the `camcorder.lock` pins the interpreter cannot run, one line each:
+ * "locked @scope/deck X needs jennifer <range>; run `jvc update`". A pin whose
+ * recorded `[engines]` is empty (a lock written before they were recorded, or a
+ * deck that declares none) runs anywhere. An unknown version is held to the
+ * engine list only (`enginerange.runsOn`).
+ * @param locked {list of catalog.Candidate} the lockfile's pins
+ * @param target {resolver.Target} the interpreter installs are for
+ * @return {list of string} the refusals, empty when every pin can run
+ */
+export func lockEngineProblems(locked as list of catalog.Candidate, target as resolver.Target) {
+    def out as list of string init [];
+    for (def res in $locked) {
+        if (enginerange.runsOn($res.engines, $target.engine, $target.version)) {
+            continue;
+        }
+        def range as string init enginerange.rangeFor($res.engines, $target.engine);
+        def need as string init "does not list " + $target.engine + " in [engines]";
+        if (not ($range == "")) {
+            $need = "needs " + $target.engine + " " + $range;
+        }
+        $out[] = "locked " + $res.name + " " + $res.version + " " + $need + "; run `jvc update`";
+    }
+    return $out;
 }
 
 /**
@@ -5993,7 +6139,8 @@ export func runCheck(dir as string) {
         return noManifest($dir);
     }
     def m as manifest.Manifest init manifest.load($loc.path);
-    return engineSatisfied($m.engines, runningEngine(), runningVersion());
+    def target as resolver.Target init targetInterpreter();
+    return engineSatisfied($m.engines, $target.engine, $target.version);
 }
 
 # --- version and provenance -------------------------------------------------

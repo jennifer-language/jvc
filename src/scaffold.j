@@ -129,8 +129,8 @@ export func templateSubpath(entryName as string, root as string) {
 # icon, which must survive byte for byte).
 func stampBytes(data as bytes, bindings as map of string to string) {
     try {
-        def text as string init convert.stringFromBytes($data, "utf-8");
-        return convert.bytesFromString(substitute($text, $bindings), "utf-8");
+        def text as string init convert.stringFromBytes("utf-8", $data);
+        return convert.bytesFromString("utf-8", substitute($text, $bindings));
     } catch (err) {
         return $data;
     }
@@ -180,7 +180,7 @@ export func fromArchive(data as bytes, format as string, bindings as map of stri
 # readable, with no escaping at all.
 func text(path as string, lines as list of string, bindings as map of string to string) {
     def body as string init strings.join($lines, "\n") + "\n";
-    return File{path: $path, data: convert.bytesFromString(substitute($body, $bindings), "utf-8")};
+    return File{path: $path, data: convert.bytesFromString("utf-8", substitute($body, $bindings))};
 }
 
 # --- the built-in frame -----------------------------------------------------

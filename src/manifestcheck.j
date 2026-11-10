@@ -30,15 +30,19 @@ use maps;
 import "./manifest.j" as manifest;
 import "./deckname.j" as deckname;
 import "./constraint.j" as constraint;
+import "./enginerange.j" as enginerange;
 import "./scopemap.j" as scopemap;
 import "./safepath.j" as safepath;
 
 /**
  * List what is wrong with a manifest, one line each, or an empty list when
  * nothing is. Checked: deck names and constraints in `[decks]`, `[dev-decks]`
- * and `[conflicts]`, constraints in `[engines]`, names in `[sources]`, `bin`
+ * and `[conflicts]`, ranges in `[engines]`, names in `[sources]`, `bin`
  * and `bin-dir`, and `[registries]` keys and values. An empty constraint is
- * refused (write `*`), as the registry refuses it at publish.
+ * refused (write `*`), as the registry refuses it at publish. The range of a
+ * `jennifer` or `jennifer-tiny` engine takes only the two forms `enginerange`
+ * accepts, `>=X.Y.Z` and `>=X.Y.Z <A.B.C` with the bound above the floor, which
+ * is also all the interpreter's `# pragma-jennifer-version` takes.
  *
  * A constraint outside the grammar matches nothing, so unchecked it surfaces as
  * a misleading "no version satisfies" in `[decks]`, and in `[conflicts]` as no
@@ -58,6 +62,13 @@ export func problems(m as manifest.Manifest) {
     for (def dep in $m.engines) {
         if (isBlank($dep.constraint)) {
             $out[] = emptyProblem("engines", $dep.name);
+        } elseif (enginerange.isEngineKey($dep.name)) {
+            def parsed as enginerange.Range init enginerange.parse($dep.constraint);
+            if (not $parsed.ok) {
+                $out[] = "[engines] " + $dep.name + " = \"" + $dep.constraint +
+                    "\": not a valid engine range (" + $parsed.problem + "); write " +
+                    enginerange.FORMS;
+            }
         } elseif (not constraint.isValidConstraint($dep.constraint)) {
             $out[] = "[engines] " + $dep.name + " = \"" + $dep.constraint +
                 "\": not a valid constraint";

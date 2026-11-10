@@ -43,7 +43,7 @@ func makeDeck(tag as string, name as string, withDep as bool) {
 
 # entryNames unpacks an archive and returns whether it holds each probe path.
 func hasEntry(data as bytes, name as string) {
-    for (def e in archive.unpack($data, "tar.gz")) {
+    for (def e in archive.unpack("tar.gz", $data)) {
         if ($e.name == $name) {
             return true;
         }
@@ -63,7 +63,7 @@ func testPackDeckIncludesSrcAndManifestOnly() {
 
 # modeOf returns the mode an archive gives a member, or -1 when it is absent.
 func modeOf(data as bytes, name as string) {
-    for (def e in archive.unpack($data, "tar.gz")) {
+    for (def e in archive.unpack("tar.gz", $data)) {
         if ($e.name == $name) {
             return $e.mode & 0o777;
         }
@@ -561,6 +561,51 @@ func testNoFloorOrNoVersionIsNoWarning() {
     # What an interpreter built with a plain `go build` calls itself.
     testing.assertEqual(engineWarning(floor(">=0.26.0"), "dev"), "");
     testing.assertEqual(engineWarning(floor("whenever"), "0.25.0"), "");
+}
+
+# At or above the upper bound, the gate tests the deck where no consumer of
+# this version can install it.
+func testAReleaseAtOrAboveTheUpperBoundIsWarnedAbout() {
+    def w as string init engineWarning(floor(">=0.25.0 <0.26.0"), "0.26.0");
+    testing.assertContains($w, "jennifer 0.26.0, at or above the upper bound");
+    testing.assertContains($w, "jennifer \">=0.25.0 <0.26.0\"");
+    testing.assertContains($w, "below 0.26.0");
+    testing.assertContains(engineWarning(floor(">=0.25.0 <0.26.0"), "0.27.1"), "at or above");
+    testing.assertContains(engineWarning(floor(">=0.25.0 <0.26.0"), "0.26.0-rc.1"), "at or above");
+    # Inside the range, nothing to say; below it, the floor warning.
+    testing.assertEqual(engineWarning(floor(">=0.25.0 <0.26.0"), "0.25.9"), "");
+    testing.assertContains(engineWarning(floor(">=0.25.0 <0.26.0"), "0.24.0"), "below this deck's");
+}
+
+# A development build fails every upper bound, whatever its core.
+func testADevelopmentBuildIsWarnedAboutAnUpperBound() {
+    def w as string init engineWarning(floor(">=0.25.0 <0.26.0"), "0.25.0-dev+131.afd9207");
+    testing.assertContains($w, "a development build, which fails the upper bound");
+    testing.assertContains($w, "release below 0.26.0");
+    testing.assertContains(
+        engineWarning(floor(">=0.25.0 <0.26.0"), "dev"),
+        "fails the upper bound");
+    # A floor alone it passes.
+    testing.assertEqual(engineWarning(floor(">=0.25.0"), "0.25.0-dev+131.afd9207"), "");
+}
+
+# Publish refuses a range outside the two forms, and one nothing satisfies.
+func testPublishRefusesAnInvalidOrUnsatisfiableEngineRange() {
+    def dir as string init makeDeck("badrange", "@jennifer/routeros", false);
+    def m as manifest.Manifest init manifest.load($dir + "/deck.toml");
+    for (def bad in ["^0.25.0", ">=0.26.0 <0.26.0", ">=0.26.0 <0.25.0"]) {
+        $m = manifest.addEngine($m, "jennifer", $bad);
+        manifest.save($m, $dir + "/deck.toml");
+        def r as Result init check($dir, false);
+        testing.assertFalse($r.ok);
+        testing.assertContains(
+            $r.message,
+            "[engines] jennifer = \"" + $bad + "\": not a valid engine range");
+    }
+    $m = manifest.addEngine($m, "jennifer", ">=0.25.0 <0.26.0");
+    manifest.save($m, $dir + "/deck.toml");
+    testing.assertTrue(check($dir, false).ok);
+    fs.removeAll($dir);
 }
 
 # scratchRoot is this suite's temp directory, created on demand. tearDown

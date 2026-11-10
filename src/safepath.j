@@ -72,7 +72,7 @@ def const UNPACK_OPTIONS as archive.UnpackOptions init archive.UnpackOptions{
  * @throws {Error} when the archive is corrupt, over a size cap, or names a member unsafely
  */
 export func unpack(data as bytes, format as string) {
-    return archive.unpackWith($data, $format, UNPACK_OPTIONS);
+    return archive.unpackWith($format, $data, UNPACK_OPTIONS);
 }
 
 /**

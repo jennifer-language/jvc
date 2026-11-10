@@ -84,7 +84,7 @@ export def struct Answer {
  * @return {string} the verifier
  */
 export func newVerifier() {
-    return unpadded(encoding.toText(crypto.randBytes(32), "base64-url"));
+    return unpadded(encoding.toText("base64-url", crypto.randBytes(32)));
 }
 
 /**
@@ -94,8 +94,8 @@ export func newVerifier() {
  * @return {string} the code challenge
  */
 export func challengeOf(verifier as string) {
-    def digest as bytes init hash.compute(convert.bytesFromString($verifier, "utf-8"), "sha256");
-    return unpadded(encoding.toText($digest, "base64-url"));
+    def digest as bytes init hash.compute("sha256", convert.bytesFromString("utf-8", $verifier));
+    return unpadded(encoding.toText("base64-url", $digest));
 }
 
 /**
@@ -103,7 +103,7 @@ export func challengeOf(verifier as string) {
  * @return {string} the state
  */
 export func newState() {
-    return unpadded(encoding.toText(crypto.randBytes(16), "base64-url"));
+    return unpadded(encoding.toText("base64-url", crypto.randBytes(16)));
 }
 
 # unpadded strips the `=` padding base64url carries here and PKCE forbids.

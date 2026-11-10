@@ -196,7 +196,7 @@ export func run(argv as list of string) {
     }
     def stdout as string init "";
     try {
-        $stdout = convert.stringFromBytes($r.stdout, "utf-8");
+        $stdout = convert.stringFromBytes("utf-8", $r.stdout);
     } catch (err) {
         return Result{
             ok: false,
@@ -609,7 +609,7 @@ export func readBlobs(dir as string, specs as list of string) {
 # falls back to the exit status.
 func textOrEmpty(b as bytes) {
     try {
-        return convert.stringFromBytes($b, "utf-8");
+        return convert.stringFromBytes("utf-8", $b);
     } catch (err) {
         return "";
     }
@@ -629,7 +629,7 @@ func textOrEmpty(b as bytes) {
  */
 export func parseBlobs(output as bytes, specs as list of string) {
     def out as list of Blob init [];
-    def nl as bytes init convert.bytesFromString("\n", "utf-8");
+    def nl as bytes init convert.bytesFromString("utf-8", "\n");
     def pos as int init 0;
     for (def spec in $specs) {
         def eol as int init binary.indexOf($output, $nl, $pos);
@@ -638,7 +638,7 @@ export func parseBlobs(output as bytes, specs as list of string) {
         }
         def header as string init "";
         try {
-            $header = convert.stringFromBytes(binary.slice($output, $pos, $eol), "utf-8");
+            $header = convert.stringFromBytes("utf-8", binary.slice($output, $pos, $eol));
         } catch (err) {
             return blobsFailed("git cat-file answered \"" + $spec + "\" with an unreadable header");
         }
@@ -670,8 +670,8 @@ export func parseBlobs(output as bytes, specs as list of string) {
         if ($f[1] == "blob") {
             try {
                 $content = convert.stringFromBytes(
-                    binary.slice($output, $pos, $pos + $size),
-                    "utf-8");
+                    "utf-8",
+                    binary.slice($output, $pos, $pos + $size));
             } catch (err) {
                 return blobsFailed("\"" + $spec + "\" is not utf-8 text");
             }
@@ -757,8 +757,8 @@ export func versionOfTag(tag as string) {
  */
 export func cacheDirName(url as string) {
     def digest as string init encoding.toText(
-        hash.compute(convert.bytesFromString($url, "utf-8"), "sha256"),
-        "hex");
+        "hex",
+        hash.compute("sha256", convert.bytesFromString("utf-8", $url)));
     def short as string init strings.substring($digest, 0, 12);
     # The last non-empty "/"-separated segment.
     def base as string init "";

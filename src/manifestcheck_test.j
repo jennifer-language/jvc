@@ -117,3 +117,38 @@ func testAnUnreadableKeyGetsNoSuggestion() {
     testing.assertEqual(len($got), 1);
     testing.assertFalse(strings.contains($got[0], "write"));
 }
+
+# The range of a Jennifer engine takes exactly two forms, and the refusal names
+# the key and both of them.
+func testAnEngineRangeTakesOnlyTheTwoForms() {
+    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
+    $m.engines = manifest.depListSet($m.engines, "jennifer", ">=0.25.0 <0.26.0");
+    $m.engines = manifest.depListSet($m.engines, "jennifer-tiny", ">=0.25.0");
+    testing.assertEqual(len(problems($m)), 0);
+    for (def bad in [
+        "^0.25.0",
+        "~0.25.0",
+        ">=0.25.0 || >=0.27.0",
+        ">=0.25.0 <=0.26.0",
+        "<0.26.0",
+        "*"
+    ]) {
+        $m.engines = manifest.depListSet($m.engines, "jennifer", $bad);
+        def got as list of string init problems($m);
+        testing.assertEqual(len($got), 1);
+        testing.assertContains(
+            $got[0],
+            "[engines] jennifer = \"" + $bad + "\": not a valid engine range");
+        testing.assertContains($got[0], "write \">=X.Y.Z\" or \">=X.Y.Z <A.B.C\"");
+    }
+}
+
+# An upper bound not above the floor is a range nothing satisfies.
+func testAnUnsatisfiableEngineRangeIsRefused() {
+    def m as manifest.Manifest init manifest.empty("@acme/app", "0.1.0");
+    $m.engines = manifest.depListSet($m.engines, "jennifer-tiny", ">=0.26.0 <0.26.0");
+    def got as list of string init problems($m);
+    testing.assertEqual(len($got), 1);
+    testing.assertContains($got[0], "[engines] jennifer-tiny");
+    testing.assertContains($got[0], "not above the floor 0.26.0");
+}
