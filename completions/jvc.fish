@@ -157,7 +157,7 @@ function __jvc_positionals
         end
         switch $w
             case --registry --from --version --source --url --out \
-                --scope --repository --tag --remote --name
+                --scope --repository --tag --remote --name --commit
                 set skip 1
             case '-*'
                 # a flag that takes no value
@@ -252,6 +252,7 @@ complete -c jvc -n '__jvc_verb_is pack' -l operator-command \
     -d 'also print the operator command that registers it'
 complete -c jvc -n '__jvc_verb_is new' -l from -x -a '(__jvc_decks)' -d 'the engine deck to frame'
 complete -c jvc -n '__jvc_verb_is new app' -l version -x -d 'the version constraint'
+complete -c jvc -n '__jvc_verb_is app' -l commit -x -d 'a commit to pin instead of a version'
 complete -c jvc -n '__jvc_verb_is new' -l source -x -d 'a git URL to take the engine deck from'
 complete -c jvc -n '__jvc_verb_is app' -l scope -x -a 'project user system' \
     -d 'where to install it'

@@ -180,7 +180,7 @@ _jvc() {
             return
             ;;
         --from|--version|--source|--url|--repository|--tag|--remote|--name\
-            |--repository-id)
+            |--repository-id|--commit)
             return
             ;;
     esac
@@ -193,7 +193,7 @@ _jvc() {
         case $w in
             --registry|--from|--version|--source|--url|--out|--scope\
                 |--repository|--tag|--remote|--name|--workflow|--refs\
-                |--provider|--repository-id)
+                |--provider|--repository-id|--commit)
                 skip=1; continue ;;
             -*) continue ;;
         esac
@@ -229,7 +229,7 @@ _jvc() {
             publish) flags="$flags --no-verify --repository --tag --remote" ;;
             pack) flags="$flags --out --url --no-verify --operator-command" ;;
             new) flags="$flags --from --version --source" ;;
-            app) flags="$flags --scope --system --version --name" ;;
+            app) flags="$flags --scope --system --version --commit --name" ;;
             owners) flags="$flags --remove" ;;
             trust) flags="$flags --workflow --refs --provider --repository-id --remove" ;;
             login) flags="$flags --no-browser" ;;

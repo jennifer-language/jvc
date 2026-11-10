@@ -32,7 +32,7 @@ so no `-I` flag is needed.
 | `new <name> --from <deck> [--version C] [--source U]` | scaffold an app frame over an engine deck |
 | `publish [--remote N] [--repository R] [--tag T] [--no-verify]` | validate, run the quality gate, then publish to the repository |
 | `pack [--out D] [--url U] [--operator-command] [--no-verify]` | build a release tarball instead of publishing |
-| `app install <git-url\|@scope/deck> [--version C]` | install a runnable app and put its command on PATH |
+| `app install <git-url\|@scope/deck> [--version C \| --commit ID]` | install a runnable app and put its command on PATH |
 | `app list`                           | show installed apps                             |
 | `app update [name...]`               | reinstall installed apps at the newest allowed version |
 | `app uninstall <name>`               | remove an app and its command                   |
@@ -1103,6 +1103,7 @@ installed grimoire 1.0.0
 | Flag                | Meaning                                                     |
 | ------------------- | ----------------------------------------------------------- |
 | `--version <range>` | the version constraint to install (default: the newest)      |
+| `--commit <id>`     | one commit of a git URL instead of a version (below)         |
 | `--scope <scope>`   | where to install it (below); default `user`                  |
 | `--system`          | the same as `--scope system`                                 |
 | `--name <command>`  | the command to install it as, whatever the repository says   |
@@ -1171,6 +1172,25 @@ A repository with **no** version tags installs its default branch head
 instead; an explicit `--version` is then an error, not a silent branch install.
 Two tags naming one version (`1.0.0` and `v1.0.0`) at different commits are
 refused, rather than letting tag order decide what runs.
+
+**`--commit <id>` installs one commit** instead, for a development build that
+has no tag yet:
+
+```
+$ jvc app install https://github.com/jennifer-language/jvc --commit 5af610b
+installed jvc (5af610b6b7b7)
+  ...
+  pinned:  `jvc app update` leaves it at this commit
+```
+
+The id is lowercase hex, 7 to 64 digits. An abbreviation is resolved once, at
+install, and the full id is what is unpacked and recorded. Only a commit id is
+taken, never a branch or tag: an id that resolves through a ref of that name,
+or names both a ref and an object, is refused. `--commit` and `--version`
+cannot be combined, and `--commit` takes a git URL, not a published
+`@scope/deck`, since a registry publishes versions rather than commits.
+`jvc app update` reports a pinned app as `pinned at <commit>` and leaves it;
+reinstall with `--version` (or no flag) to return it to released versions.
 
 **An app names itself** in a `deck.toml` with a plain (unscoped) name and a
 `[package] bin` naming its entry script. Both are optional: without a manifest

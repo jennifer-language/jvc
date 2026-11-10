@@ -105,7 +105,7 @@ func valuedFlag(token as string) {
         $token == "--repository" or $token == "--tag" or
         $token == "--remote" or $token == "--scope" or $token == "--name" or
         $token == "--workflow" or $token == "--refs" or $token == "--provider" or
-        $token == "--repository-id";
+        $token == "--repository-id" or $token == "--commit";
 }
 
 # verbAt returns the index of the verb: the first argument after the program
@@ -5406,6 +5406,8 @@ func appUsage() {
     return "usage: jvc app <install|list|update|uninstall> [args]\n" +
         "  install <git-url|@scope/deck> [--version C] [--scope S] [--name N]\n" +
         "                                                fetch an app and put it on PATH\n" +
+        "      --commit <id>       one commit of a git URL instead of a version;\n" +
+        "                          `update` leaves it there\n" +
         "      --name <command>    the command to install it as\n" +
         "      --scope project     into ./bin, pinned to this project\n" +
         "      --scope user        just this user (the default)\n" +
@@ -5446,9 +5448,13 @@ func installAppStep(
     loc as app.Locations,
     given as string,
     spec as string,
+    commit as string,
     command as string,
     baseUrl as string) {
     def none as app.Record;
+    if (not ($commit == "")) {
+        return installCommitStep($loc, $given, $commit, $command, $baseUrl);
+    }
     # A scoped name is a published deck: resolve it to its clone URL, so
     # `app install` takes either form.
     def source as string init $given;
@@ -5487,6 +5493,47 @@ func installAppStep(
     return AppStep{ok: true, message: $inst.message + $decks, record: $rec};
 }
 
+# installCommitStep is installAppStep for `--commit`: one commit of a git URL,
+# outside the version tags. A published `@scope/deck` is refused: the registry
+# vouches for the versions it publishes, not for an arbitrary commit of the
+# repository behind them, so a commit is asked for by the URL it comes from.
+func installCommitStep(
+    loc as app.Locations,
+    given as string,
+    commit as string,
+    command as string,
+    baseUrl as string) {
+    def none as app.Record;
+    if (deckname.isScoped($given)) {
+        return AppStep{
+            ok: false,
+            message: "--commit takes the app's git URL, not the published deck " + $given +
+                ": a registry publishes versions, not commits",
+            record: $none
+        };
+    }
+    def inst as app.Installation init app.installCommitWith(
+        $loc,
+        $given,
+        $commit,
+        gitsource.cacheRoot(),
+        app.Prepare{run: vendorStagedDecks, context: $baseUrl},
+        app.Naming{deck: "", command: $command});
+    if (not $inst.ok) {
+        return AppStep{ok: false, message: $inst.message, record: $none};
+    }
+    app.remember($loc, $inst.record);
+    def decks as string init "";
+    if ($inst.hasManifest) {
+        $decks = "\n  decks:   vendored into " + $inst.dir + "/vendor";
+    }
+    return AppStep{
+        ok: true,
+        message: $inst.message + $decks + "\n  pinned:  `jvc app update` leaves it at this commit",
+        record: $inst.record
+    };
+}
+
 /**
  * Install an app from a git URL or a published `@scope/deck`: fetch it, vendor
  * any decks it declares, put its command on PATH, and record it. The decks are
@@ -5494,6 +5541,7 @@ func installAppStep(
  * failure leaves that install working.
  * @param url {string} the app's git URL, or a scoped deck name
  * @param spec {string} the version constraint ("" for the newest)
+ * @param commit {string} the commit to pin to (`--commit`), or "" to pick a version
  * @param command {string} the command name (`--name`), or "" to derive it
  * @param scope {string} `project`, `user`, `system`, or a path ("" for user)
  * @param baseUrl {string} the repository base URL, for the app's own decks
@@ -5502,11 +5550,15 @@ func installAppStep(
 export func runAppInstall(
     url as string,
     spec as string,
+    commit as string,
     command as string,
     scope as string,
     baseUrl as string) {
     if ($url == "") {
         return fail(appUsage());
+    }
+    if (not ($spec == "") and not ($commit == "")) {
+        return fail("--version and --commit both choose what to install; give one");
     }
     if (not ($command == "") and not app.isAppName($command)) {
         return fail("--name " + $command + ": a command name is one file name of letters, " +
@@ -5525,7 +5577,7 @@ export func runAppInstall(
         return fail("cannot write to " + $loc.bin + "\n" +
             "  pick a directory you can write with --scope <dir>, or fix its permissions");
     }
-    def step as AppStep init installAppStep($loc, $url, $spec, $command, $baseUrl);
+    def step as AppStep init installAppStep($loc, $url, $spec, $commit, $command, $baseUrl);
     if (not $step.ok) {
         return fail($step.message);
     }
@@ -5584,7 +5636,13 @@ export func runAppUpdate(names as list of string, scope as string, baseUrl as st
         }
         # Under the name it already has: the repository may have renamed its
         # command since, and an update is not the place to move it.
-        def step as AppStep init installAppStep($loc, $given, $was.spec, $was.name, $baseUrl);
+        # A commit pin was asked for by id, and no constraint can move it.
+        if (app.isCommitPin($was)) {
+            $report = $report + "\n  ok    " + $was.name + " pinned at " +
+                strings.substring($was.commit, 0, 12);
+            continue;
+        }
+        def step as AppStep init installAppStep($loc, $given, $was.spec, "", $was.name, $baseUrl);
         if (not $step.ok) {
             $report = $report + "\n  FAIL  " + $was.name + ": " + $step.message;
             $failedAny = true;
@@ -5742,6 +5800,7 @@ export func runApp(args as list of string, pos as list of string) {
             runAppInstall(
                 posAt($pos, 1),
                 flagValue($args, "--version"),
+                flagValue($args, "--commit"),
                 flagValue($args, "--name"),
                 $scope,
                 registryBase($args)));
@@ -6259,6 +6318,7 @@ func helpText() {
         "\napp commands (runnable programs, not decks):\n" +
         "  app install <git-url|@scope/deck> [--version C]\n" +
         "                              fetch an app and put its command on PATH\n" +
+        "      --commit <id>  a commit of a git URL instead of a version\n" +
         "      --scope project|user|system|<dir>   where to install it\n" +
         "  app list                    show installed apps\n" +
         "  app update [name...]        advance installed apps\n" +

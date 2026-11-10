@@ -460,6 +460,93 @@ func testPickRefWithNoSatisfyingVersion() {
     fs.removeAll($root);
 }
 
+# --- choosing a commit (--commit) ---------------------------------------------
+
+# headOf returns a repository's HEAD commit id.
+func headOf(repo as string) {
+    return strings.trim(gitIn($repo, ["rev-parse", "HEAD"]).output);
+}
+
+func testPickCommitTakesAnUntaggedCommit() {
+    def repo as string init appRepo("pc", "demo", "", "v1.0.0");
+    def first as string init headOf($repo);
+    fs.writeString(path.join($repo, "more"), "x");
+    gitIn($repo, ["add", "-A"]);
+    gitIn($repo, ["-c", "user.email=t@x", "-c", "user.name=t", "commit", "-q", "-m", "two"]);
+    def second as string init headOf($repo);
+    def root as string init scratch("pccache");
+    gitsource.ensureMirror($root, $repo);
+    def mirror as string init gitsource.mirrorDir($root, $repo);
+    def p as Pick init pickCommit($mirror, $second);
+    testing.assertTrue($p.ok);
+    testing.assertEqual($p.commit, $second);
+    testing.assertEqual($p.ref, $second);
+    testing.assertEqual($p.version, "");
+    # an abbreviation resolves to the full id
+    def short as Pick init pickCommit($mirror, strings.substring($first, 0, 8));
+    testing.assertTrue($short.ok);
+    testing.assertEqual($short.commit, $first);
+    fs.removeAll($repo);
+    fs.removeAll($root);
+}
+
+func testPickCommitRefusesWhatIsNotACommitId() {
+    def repo as string init appRepo("pcbad", "demo", "", "");
+    def root as string init scratch("pcbadcache");
+    gitsource.ensureMirror($root, $repo);
+    def mirror as string init gitsource.mirrorDir($root, $repo);
+    def head as string init headOf($repo);
+    testing.assertContains(pickCommit($mirror, strings.substring($head, 0, 6)).error, "7 to 64");
+    testing.assertContains(pickCommit($mirror, strings.upper($head)).error, "lowercase hex");
+    testing.assertContains(pickCommit($mirror, "main").error, "7 to 64");
+    testing.assertContains(pickCommit($mirror, "HEAD~1^0").error, "lowercase hex");
+    testing.assertContains(pickCommit($mirror, "0000000000").error, "no commit 0000000000");
+    fs.removeAll($repo);
+    fs.removeAll($root);
+}
+
+# a branch named like a commit id is a ref, and `--commit` takes none
+func testPickCommitRefusesARefShapedLikeAnId() {
+    def repo as string init appRepo("pcref", "demo", "", "");
+    gitIn($repo, ["branch", "deadbeef00"]);
+    def root as string init scratch("pcrefcache");
+    gitsource.ensureMirror($root, $repo);
+    def p as Pick init pickCommit(gitsource.mirrorDir($root, $repo), "deadbeef00");
+    testing.assertFalse($p.ok);
+    testing.assertContains($p.error, "has a ref of that name");
+    fs.removeAll($repo);
+    fs.removeAll($root);
+}
+
+func testInstallCommitRecordsAPin() {
+    def repo as string init appRepo("icpin", "demo", manifestFor("demo", "1.0.0", ""), "v1.0.0");
+    def head as string init headOf($repo);
+    def root as string init scratch("icpinroot");
+    def loc as Locations init where($root);
+    def r as Installation init installCommitWith(
+        $loc,
+        $repo,
+        strings.substring($head, 0, 9),
+        path.join($root, "cache"),
+        Prepare{run: preparedAsIs, context: ""},
+        Naming{deck: "", command: ""});
+    testing.assertTrue($r.ok);
+    testing.assertEqual($r.record.commit, $head);
+    testing.assertEqual($r.record.ref, $head);
+    testing.assertEqual($r.record.version, "");
+    testing.assertTrue(isCommitPin($r.record));
+    testing.assertTrue(fs.exists(path.join($loc.store, "demo", "demo")));
+    # a tag install, or a head install, is not a pin
+    def tagged as Installation init install($loc, $repo, "*", path.join($root, "cache"));
+    testing.assertFalse(isCommitPin($tagged.record));
+    def untagged as Record init $tagged.record;
+    $untagged.version = "";
+    $untagged.ref = "HEAD";
+    testing.assertFalse(isCommitPin($untagged));
+    fs.removeAll($repo);
+    fs.removeAll($root);
+}
+
 # --- installing -------------------------------------------------------------
 
 func testInstallPutsTheCommandOnPath() {

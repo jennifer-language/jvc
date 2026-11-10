@@ -776,6 +776,52 @@ export func pickRef(mirror as string, spec as string) {
     return $picked;
 }
 
+# The shortest commit id `--commit` takes, which is git's own default
+# abbreviation length.
+def const MIN_COMMIT_ABBREV as int init 7;
+
+/**
+ * Resolve the commit an install was asked for by id (`--commit`), bypassing
+ * the version tags. The id may be abbreviated, down to `MIN_COMMIT_ABBREV`
+ * hex digits; it is resolved once, here, and the full id is what gets
+ * installed and recorded, so a later collision cannot change the pin.
+ *
+ * Only an object id is accepted, never a ref: `git rev-parse` resolves a
+ * branch or tag *named* like the abbreviation just as readily, so the full id
+ * it answers with must begin with what was asked for, and a name that is both
+ * a ref and an object (git's ambiguity warning) is refused outright.
+ * @param mirror {string} the local bare mirror directory
+ * @param given {string} the commit id asked for, full or abbreviated
+ * @return {Pick} the commit as both ref and commit, with no version
+ */
+export func pickCommit(mirror as string, given as string) {
+    def n as int init len($given);
+    if ($n < MIN_COMMIT_ABBREV or $n > 64) {
+        return pickFailed("--commit " + $given + ": a commit id is " +
+            convert.toString(MIN_COMMIT_ABBREV) + " to 64 hex digits");
+    }
+    for (def ch in strings.chars($given)) {
+        if (not strings.contains("0123456789abcdef", $ch)) {
+            return pickFailed("--commit " + $given + ": a commit id is lowercase hex digits");
+        }
+    }
+    def r as git.Result init git.run(git.revParseArgv($mirror, $given));
+    if (not $r.ok) {
+        return pickFailed("no commit " + $given +
+            " in the repository (an abbreviation matching several objects is refused too)");
+    }
+    if (git.isAmbiguousRef($r.warning)) {
+        return pickFailed("the repository has a ref named " + $given +
+            ", so it names both a ref and a commit; refusing to install either");
+    }
+    def full as string init strings.trim($r.output);
+    if (not gitsource.isCommit($full) or not strings.startsWith($full, $given)) {
+        return pickFailed($given + " resolves to " + $full + ", not a commit with that id: " +
+            "the repository has a ref of that name");
+    }
+    return Pick{ok: true, ref: $full, version: "", commit: $full, error: ""};
+}
+
 # --- installing -------------------------------------------------------------
 
 /**
@@ -1405,6 +1451,55 @@ export func installWith(
     cacheRoot as string,
     prep as Prepare,
     asked as Naming) {
+    return installFrom($loc, $url, $spec, "", $cacheRoot, $prep, $asked);
+}
+
+/**
+ * `installWith` at one commit instead of a version (`app install --commit`):
+ * the commit is resolved by `pickCommit`, and the record carries no version,
+ * with the full commit id as its ref, which is how `app update` knows to
+ * leave it where it is.
+ * @param loc {Locations} where apps and commands go
+ * @param url {string} the app's git URL
+ * @param commit {string} the commit id, full or abbreviated
+ * @param cacheRoot {string} the git mirror cache root
+ * @param prep {Prepare} the step to run on the staged tree
+ * @param asked {Naming} any `--name`, which decides the command name
+ * @return {Installation} what was installed, or the reason it failed
+ */
+export func installCommitWith(
+    loc as Locations,
+    url as string,
+    commit as string,
+    cacheRoot as string,
+    prep as Prepare,
+    asked as Naming) {
+    if ($commit == "") {
+        return noInstall("no commit given");
+    }
+    return installFrom($loc, $url, "", $commit, $cacheRoot, $prep, $asked);
+}
+
+/**
+ * Report whether an installed app was pinned to a commit with `--commit`
+ * rather than chosen by a version constraint or as the default branch head.
+ * @param r {Record} the installed app
+ * @return {bool} true for a commit pin, which `app update` leaves alone
+ */
+export func isCommitPin(r as Record) {
+    return $r.version == "" and not ($r.commit == "") and $r.ref == $r.commit;
+}
+
+# installFrom is installWith and installCommitWith: a non-empty commit pins the
+# install to it, otherwise spec picks a version tag.
+func installFrom(
+    loc as Locations,
+    url as string,
+    spec as string,
+    commit as string,
+    cacheRoot as string,
+    prep as Prepare,
+    asked as Naming) {
     if (not git.isAvailable()) {
         return noInstall("git is not on PATH, so " + $url + " cannot be installed");
     }
@@ -1417,7 +1512,12 @@ export func installWith(
     if ($want == "") {
         $want = "*";
     }
-    def picked as Pick init pickRef($mirror, $want);
+    def picked as Pick;
+    if ($commit == "") {
+        $picked = pickRef($mirror, $want);
+    } else {
+        $picked = pickCommit($mirror, $commit);
+    }
     if (not $picked.ok) {
         return noInstall($url + ": " + $picked.error);
     }
@@ -1618,7 +1718,9 @@ export func listApps(loc as Locations) {
     def out as string init "installed apps (" + $loc.store + "):";
     for (def r in $apps) {
         def version as string init $r.version;
-        if ($version == "") {
+        if (isCommitPin($r)) {
+            $version = "commit " + strings.substring($r.commit, 0, 12);
+        } elseif ($version == "") {
             $version = $r.ref + " " + strings.substring($r.commit, 0, 12);
         }
         $out = $out + "\n  " + $r.name + " " + $version + "\n      " + $r.url;

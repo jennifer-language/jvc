@@ -3641,9 +3641,47 @@ func testAnAppRecordForALocalRepositoryIsRefused() {
 # --name is a command name like any other, checked before anything is fetched.
 func testAppInstallRefusesABadCommandName() {
     def url as string init "https://git.example/x.git";
-    def out as Outcome init runAppInstall($url, "", "-rf", "", "http://127.0.0.1:1");
+    def out as Outcome init runAppInstall($url, "", "", "-rf", "", "http://127.0.0.1:1");
     testing.assertFalse($out.ok);
     testing.assertContains($out.message, "--name -rf");
+}
+
+func testAppInstallTakesVersionOrCommitNotBoth() {
+    def url as string init "https://git.example/x.git";
+    def out as Outcome init runAppInstall($url, "^1.0.0", "5af610b", "", "", "http://127.0.0.1:1");
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "give one");
+}
+
+# a registry publishes versions; a commit is asked for by the URL it comes from
+func testAppInstallCommitRefusesAPublishedDeck() {
+    def root as string init os.tempDir() + "/jvc_cli_commitdeck";
+    fs.removeAll($root);
+    fs.mkdirAll($root);
+    def step as AppStep init installAppStep(
+        app.locations($root, "."),
+        "@acme/tool",
+        "",
+        "5af610b",
+        "",
+        "http://127.0.0.1:1");
+    fs.removeAll($root);
+    testing.assertFalse($step.ok);
+    testing.assertContains($step.message, "--commit takes the app's git URL");
+}
+
+func testCommitIsAValuedFlag() {
+    def args as list of string init [
+        "jvc",
+        "app",
+        "install",
+        "--commit",
+        "5af610b",
+        "https://x/y.git"
+    ];
+    def pos as list of string init positionals($args, 1);
+    testing.assertEqual($pos[len($pos) - 1], "https://x/y.git");
+    testing.assertFalse(listHas($pos, "5af610b"));
 }
 
 func testNameIsAValuedFlag() {
