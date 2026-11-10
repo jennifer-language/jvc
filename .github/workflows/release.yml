@@ -149,6 +149,8 @@ jobs:
 
   publish:
     name: Publish the release
+    # Publishes to GitHub; skipped on the project's Forgejo, which runs this too.
+    if: github.server_url == 'https://github.com'
     needs: [linux, arch]
     runs-on: ubuntu-latest
     permissions:

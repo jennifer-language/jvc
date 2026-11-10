@@ -32,6 +32,8 @@ permissions:
 
 jobs:
   pages:
+    # Publishes to GitHub; skipped on the project's Forgejo, which runs this too.
+    if: github.server_url == 'https://github.com'
     # A called workflow can narrow what it is given but never widen it, so the
     # Pages deployment permissions are granted here.
     permissions:
