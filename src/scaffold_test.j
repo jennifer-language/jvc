@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.25.0
+# pragma-jennifer-version: >=0.26.0
 #
 # White-box tests for scaffold.j: placeholder bindings, substitution, the
 # template/ extraction rule, and the built-in frame. All pure - no filesystem
