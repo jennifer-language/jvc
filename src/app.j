@@ -439,8 +439,9 @@ export func linkCommand(loc as Locations, name as string, entry as string) {
         return ok($target);
     } catch (err) {
         # Something appeared at the path since it was checked: not ours to
-        # replace, and the shim's rename would replace it.
-        if (strings.contains($err.message, "file exists")) {
+        # replace, and the shim's rename would replace it. Asked of the path,
+        # not of the error's text: fs has no kind for "exists".
+        if (occupied($target)) {
             return fail($target + " appeared while the command was being " +
                 "created; leaving it alone");
         }
