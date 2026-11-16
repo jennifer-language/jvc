@@ -4068,3 +4068,19 @@ func testResolveRootsFiltersByTheInterpreter() {
         resolver.Target{engine: "jennifer", version: "0.25.1"});
     testing.assertTrue($fits.ok);
 }
+
+# --- the other-remote hint ---------------------------------------------------------
+
+func testTheOtherRemoteHintFollowsOnlyASourceRefusal() {
+    def missing as Sent init Sent{outcome: fail("tag not found"), sourceRefused: true};
+    testing.assertTrue(remoteHintWanted($missing, ""));
+    # --repository already chose the URL
+    testing.assertFalse(remoteHintWanted($missing, "https://github.com/a/b"));
+    # a 503 or any other refusal is not fixed by another remote
+    def down as Sent init Sent{
+        outcome: fail("the forge refused the registry's own credential"),
+        sourceRefused: false
+    };
+    testing.assertFalse(remoteHintWanted($down, ""));
+    testing.assertFalse(remoteHintWanted(Sent{outcome: ok("published"), sourceRefused: false}, ""));
+}

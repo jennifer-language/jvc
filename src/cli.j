@@ -821,13 +821,14 @@ func pushedTagProblem(dir as string, src as Source, repoFlag as string, remote a
     return "";
 }
 
-# otherForges points at the remotes on other hosts, when a registry's refusal
-# names the host of the one published from: a registry reading only some forges
-# refuses `origin` on a self-hosted one, while a second remote is on a forge it
-# reads. "" when the refusal is about something else or no other host is set.
-func otherForges(dir as string, remote as string, repository as string, refusal as string) {
+# otherForges points at the remotes on other hosts. The caller asks only when
+# the registry's refusal was about where the repository is
+# (`registry.namesTheSource`): a registry reading only some forges refuses
+# `origin` on a self-hosted one, or finds no such repository or tag there, while
+# a second remote is on a forge it reads. "" when no other host is set.
+func otherForges(dir as string, remote as string, repository as string) {
     def host as string init git.hostOfRemote($repository);
-    if ($host == "" or not strings.contains(strings.lower($refusal), $host)) {
+    if ($host == "") {
         return "";
     }
     def got as git.Result init git.run(git.remotesArgv($dir));
@@ -847,6 +848,13 @@ func otherForges(dir as string, remote as string, repository as string, refusal 
         }
     }
     return strings.join($lines, "");
+}
+
+# remoteHintWanted reports whether a publish's refusal may be fixed by another
+# remote: the registry said the source is the problem (never a 503, which is
+# its own failure), and no --repository chose the URL already.
+func remoteHintWanted(done as Sent, repoFlag as string) {
+    return not $done.outcome.ok and $done.sourceRefused and strings.trim($repoFlag) == "";
 }
 
 # otherRemotes names the remotes that do exist, when the one asked for does not.
@@ -938,20 +946,38 @@ func tagForVersion(dir as string, version as string) {
  * @return {Outcome} what the registry recorded, or its refusal
  */
 export func publishToRegistry(base as string, src as Source) {
+    return sendPublish($base, $src).outcome;
+}
+
+# Sent is a publish's outcome, and whether the registry's refusal was about
+# where the repository is (`registry.namesTheSource`), the one case another
+# remote may fix.
+def struct Sent {
+    outcome as Outcome,
+    sourceRefused as bool
+};
+
+func sent(outcome as Outcome) {
+    return Sent{outcome: $outcome, sourceRefused: false};
+}
+
+# sendPublish is `publishToRegistry`, keeping what the refusal was about.
+func sendPublish(base as string, src as Source) {
     def api as registry.Negotiated init scopeConnection($base, "publish");
     if (not $api.ok) {
-        return fail($api.error);
+        return sent(fail($api.error));
     }
     def client as registry.Client init registry.newClient($base);
     if (not canAuthorise($base, $api.auth, registry.publishUrl($client, $api.basePath))) {
-        return fail(noAuthorityAdvice($base));
+        return sent(fail(noAuthorityAdvice($base)));
     }
     def reply as registry.PublishReply init registry.PublishReply{
         status: 0,
         name: "",
         version: "",
         commit: "",
-        error: ""
+        error: "",
+        reason: ""
     };
     def by as string init "";
     try {
@@ -971,13 +997,13 @@ export func publishToRegistry(base as string, src as Source) {
             $reply.error = authOutcome($base, $raw.refreshNote, $raw.refreshFatal);
         }
     } catch (err) {
-        return fail("could not reach the repository at " + $base + ": " + $err.message);
+        return sent(fail("could not reach the repository at " + $base + ": " + $err.message));
     }
     if ($reply.status == 401) {
-        return fail(authRefusal($base, $reply.error));
+        return sent(fail(authRefusal($base, $reply.error)));
     }
     if (not ($reply.error == "")) {
-        return fail($reply.error);
+        return Sent{outcome: fail($reply.error), sourceRefused: registry.namesTheSource($reply)};
     }
     def report as string init "published " + $reply.name + "@" + $reply.version +
         " to " + $base +
@@ -988,7 +1014,7 @@ export func publishToRegistry(base as string, src as Source) {
     if (not ($by == "")) {
         $report = $report + "\n  auth:   " + $by;
     }
-    return ok($report);
+    return sent(ok($report));
 }
 
 # canAuthorise reports whether anything here could authorise a write, without
@@ -5885,11 +5911,12 @@ export func runPublish(
     if (not ($src.error == "")) {
         return fail($head + $src.error);
     }
-    def sent as Outcome init publishToRegistry($base, $src);
-    if (not $sent.ok and strings.trim($repoFlag) == "") {
-        $sent.message = $sent.message + otherForges($dir, $remote, $src.repository, $sent.message);
+    def done as Sent init sendPublish($base, $src);
+    def out as Outcome init $done.outcome;
+    if (remoteHintWanted($done, $repoFlag)) {
+        $out.message = $out.message + otherForges($dir, $remote, $src.repository);
     }
-    return Outcome{ok: $sent.ok, message: $head + $sent.message};
+    return Outcome{ok: $out.ok, message: $head + $out.message};
 }
 
 /**

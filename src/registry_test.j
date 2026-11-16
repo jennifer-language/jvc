@@ -1248,3 +1248,39 @@ func testARequestNamesJvcAsItsAgent() {
     testing.assertEqual($resp.status, 200);
     testing.assertEqual($agent, about.USER_AGENT);
 }
+
+# --- what a publish refusal is about ----------------------------------------------
+
+func testARefusalNamingTheSourceCarriesItsReason() {
+    def r as PublishReply init parsePublishReply(
+        400,
+        '{"error":"the tag 0.3.0 was not found in https://github.com/a/b",' +
+            '"reason":"absent"}');
+    testing.assertEqual($r.reason, ABSENT_REASON);
+    testing.assertTrue(namesTheSource($r));
+    def host as PublishReply init parsePublishReply(
+        400,
+        '{"error":"this registry does not publish from git.example.org","reason":"host"}');
+    testing.assertTrue(namesTheSource($host));
+}
+
+func testOnlyTheReasonFieldSaysTheSourceIsMissing() {
+    # 2026-11-15: a 503 naming github.com (the registry's own token refused)
+    # was read as "publish from another remote"
+    def down as PublishReply init parsePublishReply(
+        503,
+        '{"error":"could not read https://github.com/deckyard/deck-routeros.git at 0.3.0: ' +
+            'could not resolve the tag 0.3.0: the forge answered 403"}');
+    testing.assertEqual($down.reason, "");
+    testing.assertFalse(namesTheSource($down));
+    # a 400 without the field, whatever its message says, is not about the source
+    def plain as PublishReply init parsePublishReply(
+        400,
+        '{"error":"the tag 0.3.0 was not found in https://github.com/a/b"}');
+    testing.assertFalse(namesTheSource($plain));
+    # nor is a reason on any status but 400, or one jvc does not know
+    testing.assertFalse(namesTheSource(parsePublishReply(503, '{"error":"x","reason":"absent"}')));
+    testing.assertFalse(namesTheSource(parsePublishReply(400, '{"error":"x","reason":"other"}')));
+    testing.assertFalse(namesTheSource(parsePublishReply(400, '{"error":"x","reason":7}')));
+    testing.assertFalse(namesTheSource(parsePublishReply(400, "<html>")));
+}

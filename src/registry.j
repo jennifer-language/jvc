@@ -1972,14 +1972,45 @@ export func publishUrl(client as Client, basePath as string) {
  * @field version {string} the version it recorded
  * @field commit {string} the commit the tag resolved to, which is the pin
  * @field error {string} the registry's own explanation ("" on success)
+ * @field reason {string} the refusal's machine-readable `reason`, when the
+ *     registry sent one (`ABSENT_REASON`, `HOST_REASON`), else ""
  */
 export def struct PublishReply {
     status as int,
     name as string,
     version as string,
     commit as string,
-    error as string
+    error as string,
+    reason as string
 };
+
+/** A publish refusal's `reason` when the forge has no such repository or tag. */
+export def const ABSENT_REASON as string init "absent";
+/** A publish refusal's `reason` when the registry does not read from that host. */
+export def const HOST_REASON as string init "host";
+
+/**
+ * Whether a publish refusal is about where the repository is: the registry
+ * found no such repository or tag on the forge, or does not read from its host
+ * (a `400` carrying `reason` `absent` or `host`). Only then may another remote
+ * be the fix. Decided by the status and the `reason` field, never the message:
+ * a `503` naming the same repository is the registry's own failure. Pure.
+ * @param r {PublishReply} the parsed reply
+ * @return {bool} true when the refusal names the source
+ */
+export func namesTheSource(r as PublishReply) {
+    return $r.status == 400 and ($r.reason == ABSENT_REASON or $r.reason == HOST_REASON);
+}
+
+# reasonOf reads a refusal body's `reason`, or "" when the body is not a JSON
+# object carrying a string one.
+func reasonOf(body as string) {
+    try {
+        return strOr(json.decode($body), "/reason");
+    } catch (e) {
+        return "";
+    }
+}
 
 /**
  * Parse a publish reply.
@@ -1995,7 +2026,8 @@ export func parsePublishReply(status as int, body as string) {
             name: "",
             version: "",
             commit: "",
-            error: failureLine($status, "publish", $why)
+            error: failureLine($status, "publish", $why),
+            reason: reasonOf($body)
         };
     }
     if (not isJson($body)) {
@@ -2004,7 +2036,8 @@ export func parsePublishReply(status as int, body as string) {
             name: "",
             version: "",
             commit: "",
-            error: unreadableReply($status, $body)
+            error: unreadableReply($status, $body),
+            reason: ""
         };
     }
     def doc as json.Value init json.decode($body);
@@ -2013,7 +2046,8 @@ export func parsePublishReply(status as int, body as string) {
         name: strOr($doc, "/name"),
         version: strOr($doc, "/version"),
         commit: strOr($doc, "/commit"),
-        error: ""
+        error: "",
+        reason: ""
     };
 }
 

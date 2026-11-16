@@ -216,6 +216,14 @@ jvc publish --remote github
 When the named remote does not exist, jvc lists the ones that do. `--repository
 <clone-url>` bypasses remotes entirely, and `--tag` overrides the tag.
 
+When the registry refuses a publish because of where the repository is, jvc
+names your remotes on other hosts (`` `github` is on github.com: jvc publish
+--remote github ``). It does so only for a `400` whose `reason` is `absent`
+(the forge has no such repository or tag) or `host` (the registry does not
+read from that host), never by reading the message: a `503` is the registry's
+own failure, such as its forge credential being refused, and another remote
+would not help.
+
 Without a tag, and against a repository that accepts no publishes or that you
 are not logged in to, `jvc publish` says so and stops. **It never writes a
 file**, on any path.
