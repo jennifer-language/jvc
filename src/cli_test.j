@@ -1160,7 +1160,7 @@ func testInstallArchiveRequiresEntrypoint() {
 func testDispatchVersion() {
     def outcome as Outcome init dispatch(["jvc", "version"]);
     testing.assertTrue($outcome.ok);
-    testing.assertContains($outcome.message, "0.1.0");
+    testing.assertContains($outcome.message, "jvc " + about.VERSION);
 }
 
 func testDispatchHelp() {

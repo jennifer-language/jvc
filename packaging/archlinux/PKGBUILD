@@ -14,8 +14,8 @@
 # it, and a prerelease must sort below its release. The release pipeline
 # stamps both lines from the tag.
 pkgname=jvc
-_tag=0.1.0
-pkgver=0.1.0
+_tag=0.2.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='The Jennifer deck manager: dependency resolution, vendoring, and publishing for Jennifer projects'
 arch=('any')
