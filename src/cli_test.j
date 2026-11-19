@@ -881,6 +881,36 @@ func testInstallReresolvesWhenTheLockIsStale() {
     fs.removeAll($dir);
 }
 
+# A manifest requiring no decks installs nothing and says so, instead of an
+# empty "installed 0 deck(s):" list; the (empty) lock is still written.
+func testInstallWithNoDecksSaysNothingToInstall() {
+    def dir as string init freshDir("installnothing");
+    runInit($dir, "demo");
+    def out as Outcome init runInstall($dir, "http://127.0.0.1:1", false, false);
+    testing.assertTrue($out.ok);
+    testing.assertContains($out.message, "nothing to install: deck.toml requires no decks");
+    testing.assertFalse(strings.contains($out.message, "installed 0"));
+    testing.assertTrue(fs.exists($dir + "/camcorder.lock"));
+    # and again, now from the lock
+    $out = runInstall($dir, "http://127.0.0.1:1", false, false);
+    testing.assertContains($out.message, "nothing to install");
+    fs.removeAll($dir);
+}
+
+# Only [dev-decks]: a plain install points at --dev, which does install them.
+func testInstallOfOnlyDevDecksPointsAtDev() {
+    def dir as string init freshDir("installdevonly");
+    runInit($dir, "demo");
+    runAdd($dir, "@acme/alpha", "^1.0.0", true);
+    def out as Outcome init runInstall($dir, "http://127.0.0.1:1", false, false);
+    testing.assertTrue($out.ok);
+    testing.assertContains($out.message, "has no [decks]; run 'jvc install --dev'");
+    $out = runInstall($dir, "http://127.0.0.1:1", true, false);
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, "could not reach the repository");
+    fs.removeAll($dir);
+}
+
 func testInstallRefusesACorruptLock() {
     def dir as string init freshDir("installbadlock");
     runInit($dir, "demo");

@@ -778,7 +778,9 @@ makes builds reproducible:
   versions are installed with **no resolution and no metadata lookup at all**, so
   `git clone` + `jvc install` rebuilds the same tree however much has been
   published since. It resolves only when the lock is absent or stale, and says
-  which happened.
+  which happened. A manifest that requires no decks prints `nothing to install`
+  (pointing at `--dev` when it has only `[dev-decks]`), still writes an empty
+  lock, and removes from `vendor/` any deck it no longer requires.
 - **`update` advances.** It ignores the lock, re-resolves within the manifest's
   constraints, installs, and rewrites the lock, reporting what moved.
 

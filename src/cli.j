@@ -4773,6 +4773,19 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool, run
     if (not ($locked.error == "")) {
         return fail($locked.error);
     }
+    # Nothing to resolve: say so rather than report "installed 0 deck(s)". The
+    # empty set is still applied, so the lock is written and decks the manifest
+    # dropped leave vendor/. A lock pinning [dev-decks] a plain install keeps is
+    # left to the path below.
+    if (len($roots) == 0 and (not $locked.present or len(rootsOf($m, true)) == 0)) {
+        return applySet(
+            $dir,
+            $m,
+            [],
+            nothingToInstall(path.base($loc.path), $m, $includeDev),
+            $runTests,
+            $target);
+    }
     if ($locked.present) {
         # A mapping that disagrees with the lock is a hard stop, checked before
         # staleness: re-resolving would quietly fetch the same names from a
@@ -4827,6 +4840,16 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool, run
         "resolved (no " + LOCK_FILE + " yet)",
         $runTests,
         $target);
+}
+
+# nothingToInstall heads an install whose manifest requires no decks: the
+# reason, and the flag that would install [dev-decks] when it holds only those.
+func nothingToInstall(file as string, m as manifest.Manifest, includeDev as bool) {
+    if (not $includeDev and len($m.devDecks) > 0) {
+        return "nothing to install: " + $file + " has no [decks]; " +
+            "run 'jvc install --dev' to install its [dev-decks]";
+    }
+    return "nothing to install: " + $file + " requires no decks";
 }
 
 # resolveAndApply resolves a root set against the sources the manifest names,
