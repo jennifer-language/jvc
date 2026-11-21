@@ -87,6 +87,9 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: jennifer-language/jennifer
+          # Named, not looked up: without a ref, checkout asks the GitHub API
+          # for the default branch, which Forgejo does not answer.
+          ref: main
           path: .interpreter
           # The interpreter stamps its version from `git describe`, and a
           # shallow checkout would leave it without tags to describe from.

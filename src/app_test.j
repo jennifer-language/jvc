@@ -1360,7 +1360,26 @@ func lockStore(dir as string, hasManifest as bool, context as string) {
     return "";
 }
 
+# Does a read-only directory refuse a write? Not for root (a CI job in a
+# container), where a test that relies on it has nothing to check.
+func modesEnforced() {
+    def dir as string init scratch("modeprobe");
+    fs.chmod($dir, 0o555);
+    def refused as bool init false;
+    try {
+        fs.writeString(path.join($dir, "probe"), "x");
+    } catch (e) {
+        $refused = true;
+    }
+    fs.chmod($dir, 0o755);
+    fs.removeAll($dir);
+    return $refused;
+}
+
 func testAFailedFirstInstallLeavesNoCommandBehind() {
+    if (not modesEnforced()) {
+        return;
+    }
     def repo as string init appRepo("swapfail", "demo", manifestFor("demo", "1.0.0", ""), "v1.0.0");
     def root as string init scratch("swapfailroot");
     def loc as Locations init where($root);

@@ -78,6 +78,7 @@ jobs:
           ls -l release
 
       - name: Upload
+        if: github.server_url == 'https://github.com'
         uses: actions/upload-artifact@v7
         with:
           name: linux
@@ -87,6 +88,9 @@ jobs:
   arch:
     name: Arch package
     needs: linux
+    # The package feeds the GitHub release only, and the archlinux container
+    # has no node for the JavaScript actions under Forgejo's runner.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
@@ -141,6 +145,7 @@ jobs:
           ls -l out
 
       - name: Upload
+        if: github.server_url == 'https://github.com'
         uses: actions/upload-artifact@v7
         with:
           name: arch
