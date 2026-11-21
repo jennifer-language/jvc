@@ -225,7 +225,7 @@ _jvc() {
             add|remove|rm|install|sync|update|upgrade) flags="$flags --dev" ;;
         esac
         case $verb in
-            install|sync|update|upgrade) flags="$flags --runtests" ;;
+            install|sync|update|upgrade) flags="$flags --run-untrusted-tests" ;;
             publish) flags="$flags --no-verify --repository --tag --remote" ;;
             pack) flags="$flags --out --url --no-verify --operator-command" ;;
             new) flags="$flags --from --version --source" ;;

@@ -450,8 +450,8 @@ func leakOverlay(realHome as string, marker as string) {
     return strings.join($lines, "\n") + "\n";
 }
 
-# The overlays a consumer runs with --runtests are third-party code; a CI job
-# holding a publish token, or a developer with a stored login, must not hand
+# The overlays a consumer runs with --run-untrusted-tests are third-party code;
+# a CI job holding a publish token, or a developer with a stored login, must not hand
 # either to them. The parent's own environment is untouched, because the rest of
 # the run may still need it, and the throwaway home is gone afterwards.
 func testRunOverlaysWithholdsSecretsAndTheHome() {
@@ -627,8 +627,8 @@ func fixtureOverlay() {
         "\n");
 }
 
-# A fixture outside src/ is not in the release, so a consumer's --runtests
-# cannot read it; the gate, run from a copy of src/, fails the same way, says
+# A fixture outside src/ is not in the release, so a consumer's
+# --run-untrusted-tests cannot read it; the gate, run from a copy of src/, fails the same way, says
 # why, and names the overlay as it is in the deck.
 func testTheGateRunsTheOverlaysFromACopyOfSrc() {
     def dir as string init deckDir("staged");

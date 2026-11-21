@@ -1148,6 +1148,23 @@ func unhandled() {
     return Outcome{ok: false, message: UNHANDLED};
 }
 
+# dispatchInstall routes install / sync and update / upgrade, split out of
+# `dispatch` to keep it inside the linter's statement limit. It refuses the
+# pre-0.3.0 `--runtests` before anything is resolved.
+func dispatchInstall(command as string, args as list of string, pos as list of string) {
+    if (not lists.contains(["install", "sync", "update", "upgrade"], $command)) {
+        return unhandled();
+    }
+    if (hasFlag($args, "--runtests")) {
+        return fail(RUNTESTS_RENAMED);
+    }
+    def runTests as bool init hasFlag($args, "--run-untrusted-tests");
+    if ($command == "install" or $command == "sync") {
+        return runInstall(".", registryBase($args), hasFlag($args, "--dev"), $runTests);
+    }
+    return runUpdate(".", registryBase($args), hasFlag($args, "--dev"), $pos, $runTests);
+}
+
 # dispatchScope routes whoami, scopes, yank/unyank, claim, owners and trust,
 # split out of `dispatch` to keep it inside the linter's statement limit.
 func dispatchScope(command as string, args as list of string, pos as list of string) {
@@ -3838,8 +3855,8 @@ func writeVendored(dir as string, name as string, entries as list of archive.Ent
             continue;
         }
         # A test overlay belongs to the deck's own development, not to its
-        # consumers: it ships in the release (so the gate and `--runtests` can
-        # use it) but never reaches a vendor tree.
+        # consumers: it ships in the release (so the gate and
+        # `--run-untrusted-tests` can use it) but never reaches a vendor tree.
         if (strings.endsWith($sub, "_test.j")) {
             continue;
         }
@@ -4623,6 +4640,29 @@ func unscopedRoot(roots as map of string to string) {
     return "";
 }
 
+# The flag before 0.3.0. It is refused rather than read as the new one: its name
+# did not say that it runs every dependency's code on this machine.
+def const RUNTESTS_RENAMED as string init
+    "--runtests is now --run-untrusted-tests: it runs the test code of every " +
+    "deck being installed on this machine, as you, with your file access";
+
+/**
+ * The line `--run-untrusted-tests` prints before the first overlay runs: whose
+ * code is about to run, and with what rights. The overlays run with a scrubbed
+ * environment but as the user, so they can read and write whatever the user
+ * can; deck capabilities are not a sandbox.
+ * @param resolved {list of catalog.Candidate} the decks whose overlays run
+ * @return {string} the notice, no trailing newline
+ */
+func untrustedTestsNotice(resolved as list of catalog.Candidate) {
+    def names as list of string init [];
+    for (def res in $resolved) {
+        $names[] = $res.name + " " + $res.version;
+    }
+    return "running the tests of " + convert.toString(len($resolved)) +
+        " deck(s) as you, with your file access: " + strings.join($names, ", ");
+}
+
 # applySet runs the gates over a resolved set, vendors every deck, and rewrites
 # the lockfile. Shared by install and update so both enforce the same rules.
 func applySet(
@@ -4655,6 +4695,10 @@ func applySet(
     def linked as string init projectLinkProblem($dir, binDirOf($m));
     if (not ($linked == "")) {
         return fail($linked);
+    }
+    if ($runTests and len($resolved) > 0) {
+        # Before the first overlay runs, not in the report after it.
+        io.printf("%s\n", untrustedTestsNotice($resolved));
     }
     def report as string init "";
     def failedAny as bool init false;
@@ -6352,10 +6396,10 @@ func helpText() {
         "\nrepository commands:\n" +
         "  query <deck> [constraint]   resolve a deck against the repository\n" +
         "  install                     install what camcorder.lock pins (--dev too)\n" +
-        "      --runtests          also run each deck's own tests on this machine\n" +
+        "      --run-untrusted-tests  also run every deck's own tests here, as you\n" +
         "  update [deck...]            advance to the newest allowed versions, relock\n" +
         "      --dev               include [dev-decks]\n" +
-        "      --runtests          also run each deck's own tests on this machine\n" +
+        "      --run-untrusted-tests  also run every deck's own tests here, as you\n" +
         "  new <name> --from <deck>    scaffold an app frame over an engine deck\n" +
         "      --version C --source URL    the engine's constraint, or a git URL for it\n" +
         "  publish [--remote N] [--repository R] [--tag T]\n" +
@@ -6451,20 +6495,9 @@ export func dispatch(args as list of string) {
     if ($command == "query" or $command == "search") {
         return runQuery(registryBase($args), posAt($pos, 0), posAt($pos, 1));
     }
-    if ($command == "install" or $command == "sync") {
-        return runInstall(
-            ".",
-            registryBase($args),
-            hasFlag($args, "--dev"),
-            hasFlag($args, "--runtests"));
-    }
-    if ($command == "update" or $command == "upgrade") {
-        return runUpdate(
-            ".",
-            registryBase($args),
-            hasFlag($args, "--dev"),
-            $pos,
-            hasFlag($args, "--runtests"));
+    def installed as Outcome init dispatchInstall($command, $args, $pos);
+    if (not ($installed.message == UNHANDLED)) {
+        return $installed;
     }
     if ($command == "app") {
         return runApp($args, $pos);

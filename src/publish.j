@@ -87,8 +87,8 @@ func hexSha256(data as bytes) {
  * frame template `jvc new` stamps, which is read from the release but never
  * vendored). Nothing else: `vendor/`, `dist/`, a README, VCS metadata and
  * anything else at the top level are left out. The `_test.j` overlays under
- * `src/` are **kept**, because `jvc install --runtests` runs them against the
- * installed copy.
+ * `src/` are **kept**, because `jvc install --run-untrusted-tests` runs them
+ * against the installed copy.
  *
  * Reproducible: every member has mtime 0, and its mode is `0o755` when the
  * source file has any execute bit (so a deck's `[package] bin` stays runnable

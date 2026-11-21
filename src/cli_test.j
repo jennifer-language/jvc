@@ -4114,3 +4114,25 @@ func testTheOtherRemoteHintFollowsOnlyASourceRefusal() {
     testing.assertFalse(remoteHintWanted($down, ""));
     testing.assertFalse(remoteHintWanted(Sent{outcome: ok("published"), sourceRefused: false}, ""));
 }
+
+# --runtests ran dependency code under a harmless-sounding name; it is refused
+# with the new name rather than read as it, and before anything is resolved.
+func testTheOldRuntestsFlagIsRefused() {
+    for (def command in ["install", "sync", "update", "upgrade"]) {
+        def out as Outcome init dispatch(["jvc", $command, "--runtests"]);
+        testing.assertFalse($out.ok);
+        testing.assertContains($out.message, "--run-untrusted-tests");
+        testing.assertContains($out.message, "as you");
+    }
+}
+
+func testTheUntrustedTestsNoticeNamesEveryDeck() {
+    def notice as string init untrustedTestsNotice([
+        catalog.candidate("@acme/widget", "1.0.0"),
+        catalog.candidate("@deckyard/geo", "0.2.0")
+    ]);
+    testing.assertEqual(
+        $notice,
+        "running the tests of 2 deck(s) as you, with your file access: " +
+            "@acme/widget 1.0.0, @deckyard/geo 0.2.0");
+}

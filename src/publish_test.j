@@ -88,7 +88,7 @@ func testPackDeckKeepsTheExecutableBit() {
     fs.removeAll($dir);
 }
 
-# The overlays ship, because `jvc install --runtests` runs them.
+# The overlays ship, because `jvc install --run-untrusted-tests` runs them.
 func testPackDeckKeepsTheTestOverlays() {
     def dir as string init makeDeck("overlay", "@jennifer/routeros", false);
     fs.writeString($dir + "/src/routeros_test.j", "use testing;\n");

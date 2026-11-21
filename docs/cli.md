@@ -27,8 +27,8 @@ so no `-I` flag is needed.
 | `engine [name] <range>`              | require a Jennifer engine version, `">=X.Y.Z"` or `">=X.Y.Z <A.B.C"` (name → `jennifer`) |
 | `source <deck> [git-url]`            | resolve a deck from a git remote (no url → back to the repository) |
 | `query <deck> [constraint]`          | ask the deck's repository for the best matching version |
-| `install [--dev] [--runtests]`       | install exactly what `camcorder.lock` pins (resolving only if it is absent or stale) |
-| `update [deck...] [--dev] [--runtests]` | advance to the newest allowed versions and rewrite the lockfile |
+| `install [--dev] [--run-untrusted-tests]` | install exactly what `camcorder.lock` pins (resolving only if it is absent or stale) |
+| `update [deck...] [--dev] [--run-untrusted-tests]` | advance to the newest allowed versions and rewrite the lockfile |
 | `new <name> --from <deck> [--version C] [--source U]` | scaffold an app frame over an engine deck |
 | `publish [--remote N] [--repository R] [--tag T] [--no-verify]` | validate, run the quality gate, then publish to the repository |
 | `pack [--out D] [--url U] [--operator-command] [--no-verify]` | build a release tarball instead of publishing |
@@ -904,11 +904,14 @@ enforces each source file's pragma header at run time.
 
 ### Running a dependency's own tests
 
-`install --runtests` and `update --runtests` run each deck's own test overlays on
-**your** machine and interpreter, and fail the install if any of them fail.
+`install --run-untrusted-tests` and `update --run-untrusted-tests` run each
+deck's own test overlays on **your** machine and interpreter, and fail the
+install if any of them fail. Before the first one runs, jvc names every deck
+whose code it is about to run.
 
 ```
-$ jvc install --runtests
+$ jvc install --run-untrusted-tests
+running the tests of 1 deck(s) as you, with your file access: @acme/widget 1.0.0
 installed 1 deck(s):
   ok    @acme/widget 1.0.0 -> ...
         vendored @acme/widget (1 file(s))
@@ -935,10 +938,15 @@ The check is weaker than the publish gate: it runs whatever overlays a deck
 ships, without requiring one per module, since coverage is enforced at publish.
 A deck shipping no tests passes.
 
-> **It executes code from your dependencies**, so it is opt-in and will never be
-> the default. A test file can do anything the deck's declared capabilities
-> allow. Use it to evaluate a deck or debug a version mismatch, not on every
-> install.
+> **It executes code from your dependencies**, so it is opt-in, will never be
+> the default, and its name says so. A test file can do anything your account
+> can: a deck's declared capabilities say which interpreter builds can run it,
+> they are not a sandbox, and reading and writing files needs none. Use it to
+> evaluate a deck or debug a version mismatch, on a machine or account that
+> holds nothing you would not hand the deck's author, not on every install.
+>
+> Before 0.3.0 the flag was `--runtests`. jvc now refuses that name and points
+> to this one.
 
 Overlays are **not vendored** (see below), so they are extracted from the release
 archive into a temporary directory and run there, with the project's `vendor/`
@@ -1395,9 +1403,9 @@ It packages the manifest + the `src/` subtree + any `template/` (the frame
 template `jvc new` stamps) into `<out>/<deck>-<version>.tar.gz` and computes its
 sha256; `README`, `vendor/` and everything else outside those are left out.
 The `*_test.j` overlays under `src/` **are** shipped, so that `install
---runtests` has something to run, but they are never vendored. A file keeps
-its exec bit: one with any execute bit set is packed as `0755`, everything else
-as `0644`, so a `[package] bin` script stays runnable.
+--run-untrusted-tests` has something to run, but they are never vendored. A
+file keeps its exec bit: one with any execute bit set is packed as `0755`,
+everything else as `0644`, so a `[package] bin` script stays runnable.
 
 ### Claiming `jennifer-tiny`
 
@@ -1436,10 +1444,10 @@ A file another `src/` file `include`s, or one named `NAME.inc.j`, is part of
 its includer rather than a module: in a "topics" deck, `src/tool.j` includes
 `src/topics/*.j` and `src/tool_test.j` includes their overlays. Such a file is
 linted and tested through its includer, needs no overlay of its own, and an
-included overlay is not run alone. `jvc install --runtests` skips included
-overlays the same way. Only a real `include` statement counts: one inside a
-block comment or a multi-line string is text, and the file it names is still
-checked on its own. The `use` scan behind the `jennifer-tiny` check reads code
+included overlay is not run alone. `jvc install --run-untrusted-tests` skips
+included overlays the same way. Only a real `include` statement counts: one
+inside a block comment or a multi-line string is text, and the file it names
+is still checked on its own. The `use` scan behind the `jennifer-tiny` check reads code
 the same way.
 
 An overlay "defines no test" when the runner refuses it as an empty suite: its
@@ -1449,8 +1457,8 @@ is a passing test.
 **The overlays run against what ships, not your checkout.** The gate copies
 `src/` into a temporary directory and runs each overlay there, with that
 directory as the working directory and the deck's own `vendor/` as
-`$JENNIFER_VENDOR`. That is the layout a consumer's `jvc install --runtests`
-has, so a test that reads a fixture from a top-level `testdata/` fails here
+`$JENNIFER_VENDOR`. That is the layout a consumer's
+`jvc install --run-untrusted-tests` has, so a test that reads a fixture from a top-level `testdata/` fails here
 rather than on every consumer's machine. Keep fixtures under `src/` (they ship
 with the release) and read them relative to the working directory, or build
 them inside the test. Lint and the docblock check read the working tree, since
@@ -1482,8 +1490,8 @@ that never comes, such as a stand-in server's `httpd.accept` for a request the
 code under test failed before sending, would otherwise hang `jvc publish` with
 no output. Each run goes through coreutils `timeout` and is stopped after 600
 seconds, reported as a failed check that says so. `$JVC_GATE_TIMEOUT` sets
-another limit in seconds, and `0` removes it. `jvc install --runtests` uses the
-same limit. Where no `timeout` is on `PATH` (a stock macOS), the runs are not
+another limit in seconds, and `0` removes it. `jvc install
+--run-untrusted-tests` uses the same limit. Where no `timeout` is on `PATH` (a stock macOS), the runs are not
 bounded.
 
 **An interpreter outside the deck's range is named before the gate runs.**

@@ -22,8 +22,8 @@
  *     **The overlays run against what ships, not the working tree.** The gate
  *     copies `src/` into a temporary directory and runs each overlay there,
  *     with that directory as the working directory and the deck's `vendor/`
- *     as `$JENNIFER_VENDOR`: the layout `jvc install --runtests` gives a
- *     consumer. A test reading a fixture outside `src/` (a top-level
+ *     as `$JENNIFER_VENDOR`: the layout `jvc install --run-untrusted-tests`
+ *     gives a consumer. A test reading a fixture outside `src/` (a top-level
  *     `testdata/`) passed in the author's checkout and failed on every
  *     consumer's machine; it now fails here first.
  *
@@ -78,8 +78,8 @@ def const NO_TESTS as list of string init ["no test methods found", "no test fun
 
 /**
  * The environment variables an overlay's process inherits; every other one is
- * withheld. An overlay is code, and at install time (`--runtests`) it is
- * somebody else's code, so it is not handed what would let it act as whoever
+ * withheld. An overlay is code, and at install time
+ * (`--run-untrusted-tests`) it is somebody else's code, so it is not handed what would let it act as whoever
  * ran jvc: a publish token (`$JVC_TOKEN`), a CI job's identity-token
  * coordinates, a forge or cloud credential (`GITHUB_TOKEN`, `CI_JOB_TOKEN`,
  * `AWS_*`, `NPM_TOKEN`, ...), an `SSH_AUTH_SOCK`, or `$JVC_CREDENTIALS`. The
@@ -138,8 +138,8 @@ def const CHDIR_SCRIPT as string init 'cd -- "$1" || exit 126; shift; exec "$@"'
 # Appended to a failed overlay's report at publish, since the failure may be
 # one the working tree hid.
 def const STAGED_NOTE as string init "\n      (the overlays ran from a copy of src/, " +
-    "which was also their working directory, as `jvc install --runtests` runs " +
-    "them: a file outside src/ is not there)";
+    "which was also their working directory, as " +
+    "`jvc install --run-untrusted-tests` runs them: a file outside src/ is not there)";
 
 /**
  * One check's outcome.
@@ -707,8 +707,8 @@ func absolute(p as string) {
 }
 
 # stageSources copies every file under the deck's `src/` into stage, keeping
-# its path below `src/`: what a release vendors, and what `install --runtests`
-# runs the overlays from.
+# its path below `src/`: what a release vendors, and what
+# `install --run-untrusted-tests` runs the overlays from.
 func stageSources(dir as string, stage as string) {
     def src as string init path.join($dir, "src");
     for (def st in fs.walk($src)) {
@@ -803,7 +803,7 @@ func lintCheck(dir as string) {
 # author's code. A test that needs a variable outside PASSED_ENV, something in
 # the user's home, or a file outside `src/`, does not pass the gate; that is
 # deliberate. The overlays run from a copy of `src/` (`stageSources`), the
-# layout a consumer's `install --runtests` has.
+# layout a consumer's `install --run-untrusted-tests` has.
 func overlayCheck(dir as string) {
     def absent as list of string init missingOverlays($dir);
     if (len($absent) > 0) {

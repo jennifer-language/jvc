@@ -32,9 +32,9 @@ when the lock is absent or stale, and says which. `jvc update` always resolves
 and rewrites the lock.
 
 **Checks before running.** `jvc check` asks whether the running interpreter is
-in the deck's `[engines]` allowlist. `jvc install --runtests` (and `update`)
-also runs each fetched deck's own test overlays on this machine, in an
-environment stripped of credentials.
+in the deck's `[engines]` allowlist. `jvc install --run-untrusted-tests` (and
+`update`) also runs each fetched deck's own test overlays on this machine, as
+the user, in an environment stripped of credentials.
 
 **Publishing.** `jvc publish` runs the quality gate, then registers a
 **repository and a tag**: nothing is uploaded, and the registry resolves the
@@ -78,8 +78,8 @@ reference](cli.md#git-sources).
 **The publish quality gate.** `jvc publish` refuses a deck whose `jennifer
 lint` is not clean, whose modules lack a passing overlay each, or whose
 docblocks have drifted from the code. The overlays run from a copy of `src/`,
-as a consumer's `install --runtests` runs them. `--no-verify` bypasses it and
-says so.
+as a consumer's `install --run-untrusted-tests` runs them. `--no-verify`
+bypasses it and says so.
 
 ## Not implemented, and known
 
