@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * What `jvc trust` needs to know about the repository it binds: the forge's
@@ -68,14 +68,14 @@ export func repositoryPath(text as string) {
     def p as string init strings.trim($text);
     for (def prefix in ["https://github.com/", "http://github.com/", "git@github.com:"]) {
         if (strings.startsWith(strings.lower($p), $prefix)) {
-            $p = strings.substring($p, len($prefix), len($p));
+            $p = $p[len($prefix)..len($p)];
         }
     }
     if (strings.endsWith($p, "/")) {
-        $p = strings.substring($p, 0, len($p) - 1);
+        $p = $p[..len($p) - 1];
     }
     if (strings.endsWith($p, ".git")) {
-        $p = strings.substring($p, 0, len($p) - 4);
+        $p = $p[..len($p) - 4];
     }
     def parts as list of string init strings.split($p, "/");
     if (not (len($parts) == 2)) {

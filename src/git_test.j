@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 #
 # White-box tests for git.j: the pure command builders and tag handling. The
 # calls that invoke git (`run` / `isAvailable`) are exercised end to end by
@@ -221,7 +221,7 @@ func testCatFileArgvIsABatchOnTheMirror() {
 
 # utf8 is the bytes of a text.
 func utf8(text as string) {
-    return convert.bytesFromString("utf-8", $text);
+    return encoding.encode("utf-8", $text);
 }
 
 # The size in a header counts bytes. A manifest with a non-ASCII description

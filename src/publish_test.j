@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 #
 # White-box tests for publish.j: packaging (what goes into the tarball),
 # manifest validation, capability and jennifer-tiny checks, the operator
@@ -270,7 +270,7 @@ func testPublishCommandSurvivesAHostileDescription() {
         ""
     ];
     testing.assertEqual(len($got), len($want));
-    for (def i in lists.range(0, len($want))) {
+    for (def i in 0..len($want)) {
         testing.assertEqual($got[$i], $want[$i]);
     }
     testing.assertFalse(fs.exists($marker));

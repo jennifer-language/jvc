@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 #
 # White-box tests for gitsource.j. These build a throwaway git repository in a
 # temp directory and read it back as deck candidates, so they exercise the real
@@ -15,8 +15,8 @@ use testing;
 use strings;
 use archive;
 use binary;
-use convert;
 use maps;
+use encoding;
 import "./safepath.j" as safepath;
 
 # --- building a throwaway deck repository -----------------------------------
@@ -414,7 +414,7 @@ func testArchiveBytesFollowsTheCommitNotTheTag() {
     def entries as list of archive.Entry init safepath.unpack($data, "tar");
     for (def e in $entries) {
         if ($e.name == "src/beta.j") {
-            testing.assertContains(convert.stringFromBytes("utf-8", $e.data), "v1.0.0");
+            testing.assertContains(encoding.decode("utf-8", $e.data), "v1.0.0");
         }
     }
     fs.removeAll($repo);
@@ -868,7 +868,7 @@ func testACommitIdIsFortyOrSixtyFourHexDigits() {
     testing.assertTrue(isCommit("37a9149cb59d6cc6bf8a20926d45166dbed269fe"));
     def long as string init "37a9149cb59d6cc6bf8a20926d45166dbed269fe" + "0123456789abcdef01234567";
     testing.assertTrue(isCommit($long));
-    testing.assertFalse(isCommit(strings.substring($long, 0, 63)));
+    testing.assertFalse(isCommit($long[..63]));
     testing.assertFalse(isCommit(strings.upper($long)));
     testing.assertTrue(git.looksLikeObjectId($long));
 }

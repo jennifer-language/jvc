@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * The one check of a loaded manifest's contents, shared by every verb that
@@ -135,11 +135,11 @@ export func registryProblems(registries as list of manifest.Dependency) {
 func keySuggestion(key as string) {
     def scope as string init deckname.fold($key);
     if (strings.startsWith($scope, "@")) {
-        $scope = strings.substring($scope, 1, len($scope));
+        $scope = $scope[1..len($scope)];
     }
     def slash as int init strings.indexOf($scope, "/");
     if ($slash >= 0) {
-        $scope = strings.substring($scope, 0, $slash);
+        $scope = $scope[..$slash];
     }
     if (not deckname.isScopeIdent($scope)) {
         return "";
@@ -158,7 +158,7 @@ export func isRegistryUrl(url as string) {
     def u as string init strings.lower(strings.trim($url));
     for (def scheme in ["https://", "http://"]) {
         if (strings.startsWith($u, $scheme)) {
-            def rest as string init strings.substring($u, len($scheme), len($u));
+            def rest as string init $u[len($scheme)..len($u)];
             return not ($rest == "") and not strings.startsWith($rest, "/") and
                 strings.indexOf($rest, " ") < 0;
         }

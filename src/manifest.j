@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * The deck manifest: the file that declares a deck's identity and its
@@ -278,9 +278,9 @@ func fieldWhere(pointer as string) {
         return "[package.urls]";
     }
     if (strings.startsWith($pointer, "/package/")) {
-        return "[package] " + strings.substring($pointer, len("/package/"), len($pointer));
+        return "[package] " + $pointer[len("/package/")..len($pointer)];
     }
-    return strings.substring($pointer, 1, len($pointer));
+    return $pointer[1..len($pointer)];
 }
 
 /**

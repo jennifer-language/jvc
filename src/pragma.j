@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * Reading the interpreter's read-time pragma headers out of Jennifer source.
@@ -129,15 +129,15 @@ func lexLine(raw as string, state as Lexed) {
         def at as int init nextMarker($raw, $i, MARKERS[$top]);
         if ($at < 0) {
             if ($keep and not ($top == COMMENT)) {
-                $kept[] = strings.substring($raw, $i, $n);
+                $kept[] = $raw[$i..$n];
             }
             break;
         }
         if ($keep and not ($top == COMMENT)) {
-            $kept[] = strings.substring($raw, $i, $at);
+            $kept[] = $raw[$i..$at];
         }
-        def c as string init strings.substring($raw, $at, $at + 1);
-        def two as string init strings.substring($raw, $at, minInt($at + 2, $n));
+        def c as string init $raw[$at..$at + 1];
+        def two as string init $raw[$at..minInt($at + 2, $n)];
         $i = $at + 1;
         if ($top == COMMENT) {
             $i = $at + 2;
@@ -166,7 +166,7 @@ func lexLine(raw as string, state as Lexed) {
             $c = $two;
         } elseif ($c == "\"" and $top == COOKED or $c == "'" and $top == RAW or
             $c == '}') {
-            $stack = lists.slice($stack, 0, len($stack) - 1);
+            $stack = $stack[..len($stack) - 1];
         } elseif ($c == "\"") {
             $stack[] = COOKED;
         } elseif ($c == "'") {
@@ -289,7 +289,7 @@ func skipBlock(s as string, depth as int) {
             $d = $d - 1;
             $i = $close + 2;
             if ($d == 0) {
-                return Skipped{depth: 0, rest: strings.substring($s, $i, $size)};
+                return Skipped{depth: 0, rest: $s[$i..$size]};
             }
         }
     }
@@ -313,7 +313,7 @@ func skipComments(line as string, depth as int) {
         if (not strings.startsWith($at.rest, "/*")) {
             return $at;
         }
-        $at = skipBlock(strings.substring($at.rest, 2, len($at.rest)), 1);
+        $at = skipBlock($at.rest[2..len($at.rest)], 1);
         $at.rest = strings.trim($at.rest);
     }
     return $at;
@@ -326,7 +326,7 @@ func headerLines(source as string) {
     def out as list of string init [];
     def text as string init $source;
     if (strings.startsWith($text, BOM)) {
-        $text = strings.substring($text, 1, len($text));
+        $text = $text[1..len($text)];
     }
     def depth as int init 0;
     for (def raw in strings.split($text, "\n")) {
@@ -350,19 +350,19 @@ func headerLines(source as string) {
 # allows it.
 func valueAfter(line as string, key as string) {
     # Drop the "#" (and a "#!" shebang cannot carry a pragma).
-    def body as string init strings.trim(strings.substring($line, 1, len($line)));
+    def body as string init strings.trim($line[1..len($line)]);
     if (not strings.startsWith($body, PREFIX)) {
         return "";
     }
-    def rest as string init strings.substring($body, len(PREFIX), len($body));
+    def rest as string init $body[len(PREFIX)..len($body)];
     def colon as int init strings.indexOf($rest, ":");
     if ($colon < 0) {
         return "";
     }
-    if (not (strings.trim(strings.substring($rest, 0, $colon)) == $key)) {
+    if (not (strings.trim($rest[..$colon]) == $key)) {
         return "";
     }
-    return strings.trim(strings.substring($rest, $colon + 1, len($rest)));
+    return strings.trim($rest[$colon + 1..len($rest)]);
 }
 
 # namesIn splits a capability value the way the interpreter does: commas and

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 #
 # White-box tests for scaffold.j: placeholder bindings, substitution, the
 # template/ extraction rule, and the built-in frame. All pure - no filesystem
@@ -10,6 +10,8 @@
 
 use testing;
 use archive;
+use io;
+use convert;
 
 # bind is the standard binding set the tests stamp with.
 func bind() {
@@ -18,19 +20,14 @@ func bind() {
 
 # entry builds a UTF-8 archive entry at a path.
 func entry(name as string, body as string) {
-    return archive.Entry{
-        name: $name,
-        mode: 420,
-        mtime: 0,
-        data: convert.bytesFromString("utf-8", $body)
-    };
+    return archive.Entry{name: $name, mode: 420, mtime: 0, data: encoding.encode("utf-8", $body)};
 }
 
 # bodyOf returns a stamped file's contents as text, or "" when absent.
 func bodyOf(files as list of File, path as string) {
     for (def f in $files) {
         if ($f.path == $path) {
-            return convert.stringFromBytes("utf-8", $f.data);
+            return encoding.decode("utf-8", $f.data);
         }
     }
     return "";
@@ -212,7 +209,7 @@ func testBuiltinReadmeStatesTheWebRootRule() {
 
 func testBuiltinLeavesNoUnsubstitutedPlaceholders() {
     for (def f in builtin(bind())) {
-        testing.assertFalse(strings.contains(convert.stringFromBytes("utf-8", $f.data), '{{'));
+        testing.assertFalse(strings.contains(encoding.decode("utf-8", $f.data), '{{'));
     }
 }
 
@@ -266,8 +263,8 @@ func testFromArchiveReadsAWrappedTemplate() {
 # octalField renders n as the zero-padded octal a tar header field holds,
 # NUL-terminated, width bytes in all.
 func octalField(n as int, width as int) {
-    def digits as string init convert.toString($n, 8);
-    return strings.repeat("0", $width - 1 - len($digits)) + $digits + "\0";
+    def digits as string init io.sprintf("%d|base=8", $n);
+    return strings.replicate("0", $width - 1 - len($digits)) + $digits + "\0";
 }
 
 # rawTar writes a ustar archive by hand. `archive.pack` refuses a member name
@@ -279,21 +276,21 @@ func rawTar(names as list of string, bodies as list of string) {
     while ($i < len($names)) {
         def name as string init $names[$i];
         def body as string init $bodies[$i];
-        def head as string init $name + strings.repeat("\0", 100 - len($name)) +
+        def head as string init $name + strings.replicate("\0", 100 - len($name)) +
             octalField(420, 8) + octalField(0, 8) + octalField(0, 8) +
             octalField(len($body), 12) + octalField(0, 12);
-        def rest as string init "0" + strings.repeat("\0", 100) + "ustar\0" + "00";
+        def rest as string init "0" + strings.replicate("\0", 100) + "ustar\0" + "00";
         def sum as int init 0;
         for (def c in strings.chars($head + "        " + $rest)) {
             $sum = $sum + convert.toCodepoint($c);
         }
         def header as string init $head + octalField($sum, 7) + " " + $rest;
-        $header = $header + strings.repeat("\0", 512 - len($header));
+        $header = $header + strings.replicate("\0", 512 - len($header));
         def pad as int init (512 - len($body) % 512) % 512;
-        $out = $out + $header + $body + strings.repeat("\0", $pad);
+        $out = $out + $header + $body + strings.replicate("\0", $pad);
         $i = $i + 1;
     }
-    return convert.bytesFromString("utf-8", $out + strings.repeat("\0", 1024));
+    return encoding.encode("utf-8", $out + strings.replicate("\0", 1024));
 }
 
 # The interpreter refuses an archive with a `..` member outright, so fromArchive

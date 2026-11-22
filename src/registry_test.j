@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 #
 # White-box tests for registry.j: URL building and response parsing, the
 # readers fed fake `http.Response`s. No request is sent. Run with:
@@ -781,14 +781,14 @@ func testANonJsonBodyIsReportedRatherThanDiscarded() {
 }
 
 func testAVeryLongForeignBodyIsTrimmed() {
-    def long as string init strings.repeat("x", 400);
+    def long as string init strings.replicate("x", 400);
     testing.assertTrue(len(parsePublishReply(500, $long).error) < 200);
 }
 
 # The registry's own `error` text is foreign too, and was shown without bound;
 # a runaway one is cut at ERROR_MAX.
 func testAVeryLongJsonErrorIsTrimmed() {
-    def body as string init '{"error":"' + strings.repeat("y", ERROR_MAX + 400) + '"}';
+    def body as string init '{"error":"' + strings.replicate("y", ERROR_MAX + 400) + '"}';
     def why as string init errorDetail($body);
     testing.assertEqual(len($why), ERROR_MAX + 3);
     testing.assertTrue(strings.endsWith($why, "..."));
@@ -851,7 +851,7 @@ func testNoResponderMeansNoTag() {
 func testANonAsciiClaimSurvivesDecoding() {
     # The payload is utf-8, so decoding it as a single-byte codec would mangle
     # any login or organisation name outside ASCII.
-    def payload as bytes init convert.bytesFromString("utf-8", '{"login":"日本","sub":"1"}');
+    def payload as bytes init encoding.encode("utf-8", '{"login":"日本","sub":"1"}');
     def c as Claims init decodeClaims("h." + encoding.toText("base64-url", $payload) + ".s");
     testing.assertEqual($c.login, "日本");
 }
@@ -1039,7 +1039,7 @@ func testATokenReplyWithOddTypesKeepsTheToken() {
 # A JWT `exp` written as a float is the same instant.
 func testAFloatExpiryIsRead() {
     def payload as string init '{"sub":"1","exp":1790000000.0,"iat":"soon"}';
-    def b64 as string init encoding.toText("base64", convert.bytesFromString("utf-8", $payload));
+    def b64 as string init encoding.toText("base64", encoding.encode("utf-8", $payload));
     def segment as string init strings.replace(
         strings.replace(strings.replace($b64, "=", ""), "+", "-"),
         "/",
@@ -1196,7 +1196,7 @@ func testAnAuthorizeUrlWithNoScopesSendsNone() {
 # received, so a test can check exactly what the exchange sent.
 func standInTokenEndpoint(srv as httpd.Server) {
     def req as httpd.Request init httpd.accept($srv);
-    def got as string init convert.stringFromBytes("utf-8", httpd.body($req));
+    def got as string init encoding.decode("utf-8", httpd.body($req));
     httpd.respond(
         $req,
         200,

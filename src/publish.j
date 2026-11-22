@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * The local half of `jvc publish` and `jvc pack`: checking a deck (its
@@ -109,7 +109,7 @@ export func packDeck(dir as string) {
         }
         def rel as string init $st.path;
         if (strings.startsWith($rel, $prefix)) {
-            $rel = strings.substring($rel, len($prefix), len($rel));
+            $rel = $rel[len($prefix)..len($rel)];
         }
         if ($rel == "deck.toml" or $rel == "deck.yaml" or $rel == "deck.yml" or
             $rel == "deck.json" or strings.startsWith($rel, "src/") or
@@ -292,7 +292,7 @@ export func usesOf(source as string) {
         if (not strings.startsWith($t, "use ") or not strings.endsWith($t, ";")) {
             continue;
         }
-        def rest as string init strings.trim(strings.substring($t, 4, len($t) - 1));
+        def rest as string init strings.trim($t[4..len($t) - 1]);
         def name as string init firstWord($rest);
         if (not ($name == "")) {
             $out[] = $name;
@@ -307,7 +307,7 @@ func firstWord(text as string) {
     for (def sep in [" ", "\t"]) {
         def at as int init strings.indexOf($out, $sep);
         if ($at >= 0) {
-            $out = strings.substring($out, 0, $at);
+            $out = $out[..$at];
         }
     }
     return $out;

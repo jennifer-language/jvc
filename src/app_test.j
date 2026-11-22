@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 #
 # White-box tests for app.j: installing runnable programs onto PATH. The install
 # tests build a throwaway git repository in a temp directory and install it, so
@@ -483,7 +483,7 @@ func testPickCommitTakesAnUntaggedCommit() {
     testing.assertEqual($p.ref, $second);
     testing.assertEqual($p.version, "");
     # an abbreviation resolves to the full id
-    def short as Pick init pickCommit($mirror, strings.substring($first, 0, 8));
+    def short as Pick init pickCommit($mirror, $first[..8]);
     testing.assertTrue($short.ok);
     testing.assertEqual($short.commit, $first);
     fs.removeAll($repo);
@@ -496,7 +496,7 @@ func testPickCommitRefusesWhatIsNotACommitId() {
     gitsource.ensureMirror($root, $repo);
     def mirror as string init gitsource.mirrorDir($root, $repo);
     def head as string init headOf($repo);
-    testing.assertContains(pickCommit($mirror, strings.substring($head, 0, 6)).error, "7 to 64");
+    testing.assertContains(pickCommit($mirror, $head[..6]).error, "7 to 64");
     testing.assertContains(pickCommit($mirror, strings.upper($head)).error, "lowercase hex");
     testing.assertContains(pickCommit($mirror, "main").error, "7 to 64");
     testing.assertContains(pickCommit($mirror, "HEAD~1^0").error, "lowercase hex");
@@ -526,7 +526,7 @@ func testInstallCommitRecordsAPin() {
     def r as Installation init installCommitWith(
         $loc,
         $repo,
-        strings.substring($head, 0, 9),
+        $head[..9],
         path.join($root, "cache"),
         Prepare{run: preparedAsIs, context: ""},
         Naming{deck: "", command: ""});
@@ -1192,11 +1192,7 @@ func testUnpackIntoCleansItsTempFileWhenArchiveFails() {
     def mirror as string init gitsource.mirrorDir(path.join($root, "cache"), $repo);
     def commit as string init strings.trim(gitIn($mirror, ["rev-parse", "HEAD"]).output);
     def tree as string init strings.trim(gitIn($mirror, ["rev-parse", "HEAD^" + '{tree}']).output);
-    fs.remove(path.join(
-        $mirror,
-        "objects",
-        strings.substring($tree, 0, 2),
-        strings.substring($tree, 2, len($tree))));
+    fs.remove(path.join($mirror, "objects", $tree[..2], $tree[2..len($tree)]));
     def oldTmp as string init os.getEnv("TMPDIR");
     os.setEnv("TMPDIR", $tmp);
     def dest as string init path.join($root, "dest");

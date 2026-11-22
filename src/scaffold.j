@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * Stamping an app **frame** out of an engine deck: the pure half of `jvc new`.
@@ -37,8 +37,8 @@
  */
 
 use strings;
-use convert;
 use archive;
+use encoding;
 import "./safepath.j" as safepath;
 
 /**
@@ -72,7 +72,7 @@ export func vars(name as string, deck as string, version as string) {
     def namespace as string init $deck;
     def slash as int init strings.indexOf($deck, "/");
     if ($slash >= 0) {
-        $namespace = strings.substring($deck, $slash + 1, len($deck));
+        $namespace = $deck[$slash + 1..len($deck)];
     }
     return {"name": $name, "deck": $deck, "namespace": $namespace, "version": $version};
 }
@@ -117,7 +117,7 @@ export func templateSubpath(entryName as string, root as string) {
     if (not strings.startsWith($n, "template/")) {
         return "";
     }
-    def sub as string init strings.substring($n, 9, len($n));
+    def sub as string init $n[9..len($n)];
     if (not safepath.isSafeRelative($sub)) {
         return "";
     }
@@ -129,8 +129,8 @@ export func templateSubpath(entryName as string, root as string) {
 # icon, which must survive byte for byte).
 func stampBytes(data as bytes, bindings as map of string to string) {
     try {
-        def text as string init convert.stringFromBytes("utf-8", $data);
-        return convert.bytesFromString("utf-8", substitute($text, $bindings));
+        def text as string init encoding.decode("utf-8", $data);
+        return encoding.encode("utf-8", substitute($text, $bindings));
     } catch (err) {
         return $data;
     }
@@ -180,7 +180,7 @@ export func fromArchive(data as bytes, format as string, bindings as map of stri
 # readable, with no escaping at all.
 func text(path as string, lines as list of string, bindings as map of string to string) {
     def body as string init strings.join($lines, "\n") + "\n";
-    return File{path: $path, data: convert.bytesFromString("utf-8", substitute($body, $bindings))};
+    return File{path: $path, data: encoding.encode("utf-8", substitute($body, $bindings))};
 }
 
 # --- the built-in frame -----------------------------------------------------

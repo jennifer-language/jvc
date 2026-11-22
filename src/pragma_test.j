@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 #
 # White-box tests for pragma.j: reading the interpreter's read-time guard
 # headers. Every case here was checked against the real interpreter first, so
@@ -316,7 +316,7 @@ func testADepthStillOpenIsCarried() {
 # The scan used to step one character at a time through `strings.substring`,
 # quadratic in the line: a 50 KB one-line comment took about three seconds.
 func testAVeryLongOneLineCommentIsScanned() {
-    def body as string init "/* " + strings.repeat("ab", 100000) + " */";
+    def body as string init "/* " + strings.replicate("ab", 100000) + " */";
     def caps as list of string init capabilities(src([
         $body,
         '# pragma-jennifer-capability: net',

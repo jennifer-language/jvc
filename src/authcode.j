@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * The client half of the `authcode` login flow (client specification 5.1,
@@ -94,7 +94,7 @@ export func newVerifier() {
  * @return {string} the code challenge
  */
 export func challengeOf(verifier as string) {
-    def digest as bytes init hash.compute("sha256", convert.bytesFromString("utf-8", $verifier));
+    def digest as bytes init hash.compute("sha256", encoding.encode("utf-8", $verifier));
     return unpadded(encoding.toText("base64-url", $digest));
 }
 
@@ -110,7 +110,7 @@ export func newState() {
 func unpadded(text as string) {
     def out as string init $text;
     while (strings.endsWith($out, "=")) {
-        $out = strings.substring($out, 0, len($out) - 1);
+        $out = $out[..len($out) - 1];
     }
     return $out;
 }
@@ -134,10 +134,10 @@ export func isBrowserUrl(url as string) {
     }
     def u as string init strings.lower($url);
     if (strings.startsWith($u, "https://")) {
-        return not (hostOf(strings.substring($u, 8, len($u))) == "");
+        return not (hostOf($u[8..len($u)]) == "");
     }
     if (strings.startsWith($u, "http://")) {
-        def host as string init hostOf(strings.substring($u, 7, len($u)));
+        def host as string init hostOf($u[7..len($u)]);
         return $host == "127.0.0.1" or $host == "localhost" or $host == "[::1]";
     }
     return false;
@@ -153,7 +153,7 @@ func hostOf(rest as string) {
             $end = $at;
         }
     }
-    def authority as string init strings.substring($rest, 0, $end);
+    def authority as string init $rest[..$end];
     if (strings.indexOf($authority, "@") >= 0) {
         return "";
     }
@@ -162,11 +162,11 @@ func hostOf(rest as string) {
         if ($close < 0) {
             return "";
         }
-        return strings.substring($authority, 0, $close + 1);
+        return $authority[..$close + 1];
     }
     def colon as int init strings.indexOf($authority, ":");
     if ($colon >= 0) {
-        return strings.substring($authority, 0, $colon);
+        return $authority[..$colon];
     }
     return $authority;
 }
@@ -183,7 +183,7 @@ export func listen() {
     return Listener{
         server: $srv,
         redirectUri: "http://" + $addr + CALLBACK_PATH,
-        port: strings.substring($addr, $colon + 1, len($addr))
+        port: $addr[$colon + 1..len($addr)]
     };
 }
 

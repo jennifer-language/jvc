@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 #
 # White-box tests for verify.j: the publish quality gate. The lint and test
 # checks shell out to the real interpreter against decks built in a temp
@@ -478,7 +478,7 @@ func testRunOverlaysWithholdsSecretsAndTheHome() {
     for (def name in LEAKY) {
         testing.assertEqual(os.getEnv($name), "secret-" + $name);
     }
-    for (def i in lists.range(0, len(LEAKY))) {
+    for (def i in 0..len(LEAKY)) {
         os.setEnv(LEAKY[$i], $saved[$i]);
     }
     os.setEnv("HOME", $savedHome);

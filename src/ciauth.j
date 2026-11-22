@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * Authorising a write when there is nobody at a browser: the two
@@ -236,7 +236,7 @@ func providerFamily(name as string) {
     def out as string init strings.replace(strings.lower(strings.trim($name)), "_", "-");
     for (def suffix in ["-actions", "-ci"]) {
         if (strings.endsWith($out, $suffix)) {
-            return strings.substring($out, 0, len($out) - len($suffix));
+            return $out[..len($out) - len($suffix)];
         }
     }
     return $out;

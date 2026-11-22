@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * Which registry a deck comes from: the manifest's `[registries]` table, read
@@ -97,7 +97,7 @@ export func isPattern(pattern as string) {
     if (len($key) < 1 + len($tail)) {
         return false;
     }
-    return deckname.isScopeIdent(strings.substring($key, 1, len($key) - len($tail)));
+    return deckname.isScopeIdent($key[1..len($key) - len($tail)]);
 }
 
 /**
@@ -154,19 +154,19 @@ export func missMessage(name as string, url as string) {
 func registryKey(url as string) {
     def out as string init strings.trim($url);
     while (strings.endsWith($out, "/")) {
-        $out = strings.substring($out, 0, len($out) - 1);
+        $out = $out[..len($out) - 1];
     }
     def at as int init strings.indexOf($out, "://");
     if ($at < 0) {
         return $out;
     }
-    def rest as string init strings.substring($out, $at + 3, len($out));
+    def rest as string init $out[$at + 3..len($out)];
     def slash as int init strings.indexOf($rest, "/");
     if ($slash < 0) {
         return strings.lower($out);
     }
-    return strings.lower(strings.substring($out, 0, $at + 3 + $slash)) +
-        strings.substring($rest, $slash, len($rest));
+    return strings.lower($out[..$at + 3 + $slash]) +
+        $rest[$slash..len($rest)];
 }
 
 /**

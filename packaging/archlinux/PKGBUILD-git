@@ -4,8 +4,8 @@
 # two directories the launcher needs, plus the completions and the docs.
 #
 # `jennifer-bin` and `jennifer-git` both provide an unversioned `jennifer`, so
-# the sources' floor (`# pragma-jennifer-version: >=0.26.0`) cannot be written
-# here as `jennifer>=0.26.0`: it would be unsatisfiable. The interpreter checks
+# the sources' floor (`# pragma-jennifer-version: >=0.27.0`) cannot be written
+# here as `jennifer>=0.27.0`: it would be unsatisfiable. The interpreter checks
 # the pragma at load time instead; a `-dev` build bypasses it, a release such
 # as 0.25.0 is checked.
 

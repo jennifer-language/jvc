@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * Checks for paths that come from somewhere jvc does not control: an archive
@@ -148,7 +148,7 @@ export func linkOnPath(root as string, rel as string) {
 # stripDot drops one leading "./", the form some tar writers give every member.
 func stripDot(name as string) {
     if (strings.startsWith($name, "./")) {
-        return strings.substring($name, 2, len($name));
+        return $name[2..len($name)];
     }
     return $name;
 }
@@ -193,7 +193,7 @@ export func archiveRoot(names as list of string) {
         if ($slash <= 0) {
             return "";
         }
-        def top as string init strings.substring($name, 0, $slash);
+        def top as string init $name[..$slash];
         if ($wrapper == "") {
             $wrapper = $top;
         } elseif (not ($top == $wrapper)) {
@@ -225,5 +225,5 @@ export func underRoot(name as string, root as string) {
     if (not strings.startsWith($n, $root)) {
         return "";
     }
-    return strings.substring($n, len($root), len($n));
+    return $n[len($root)..len($n)];
 }

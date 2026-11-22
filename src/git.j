@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * A thin wrapper over the `git` binary: the few plumbing calls jvc needs to
@@ -196,7 +196,7 @@ export func run(argv as list of string) {
     }
     def stdout as string init "";
     try {
-        $stdout = convert.stringFromBytes("utf-8", $r.stdout);
+        $stdout = encoding.decode("utf-8", $r.stdout);
     } catch (err) {
         return Result{
             ok: false,
@@ -304,7 +304,7 @@ export func remoteProblem(url as string) {
         }
     }
     def helper as int init strings.indexOf($u, "::");
-    if ($helper > 0 and isTransportName(strings.substring($u, 0, $helper))) {
+    if ($helper > 0 and isTransportName($u[..$helper])) {
         return "refusing git URL \"" + $u + "\": the `<transport>::` form runs " +
             "a git remote helper, which can execute commands";
     }
@@ -340,7 +340,7 @@ export func isNetworkRemote(url as string) {
     if ($colon < 1) {
         return false;
     }
-    return not strings.contains(strings.substring($u, 0, $colon), "/");
+    return not strings.contains($u[..$colon], "/");
 }
 
 # isTransportName reports whether text could be the `<transport>` of git's
@@ -609,7 +609,7 @@ export func readBlobs(dir as string, specs as list of string) {
 # falls back to the exit status.
 func textOrEmpty(b as bytes) {
     try {
-        return convert.stringFromBytes("utf-8", $b);
+        return encoding.decode("utf-8", $b);
     } catch (err) {
         return "";
     }
@@ -629,7 +629,7 @@ func textOrEmpty(b as bytes) {
  */
 export func parseBlobs(output as bytes, specs as list of string) {
     def out as list of Blob init [];
-    def nl as bytes init convert.bytesFromString("utf-8", "\n");
+    def nl as bytes init encoding.encode("utf-8", "\n");
     def pos as int init 0;
     for (def spec in $specs) {
         def eol as int init binary.indexOf($output, $nl, $pos);
@@ -638,7 +638,7 @@ export func parseBlobs(output as bytes, specs as list of string) {
         }
         def header as string init "";
         try {
-            $header = convert.stringFromBytes("utf-8", binary.slice($output, $pos, $eol));
+            $header = encoding.decode("utf-8", $output[$pos..$eol]);
         } catch (err) {
             return blobsFailed("git cat-file answered \"" + $spec + "\" with an unreadable header");
         }
@@ -669,9 +669,7 @@ export func parseBlobs(output as bytes, specs as list of string) {
         def content as string init "";
         if ($f[1] == "blob") {
             try {
-                $content = convert.stringFromBytes(
-                    "utf-8",
-                    binary.slice($output, $pos, $pos + $size));
+                $content = encoding.decode("utf-8", $output[$pos..$pos + $size]);
             } catch (err) {
                 return blobsFailed("\"" + $spec + "\" is not utf-8 text");
             }
@@ -740,7 +738,7 @@ export func parseTags(output as string) {
 export func versionOfTag(tag as string) {
     def v as string init $tag;
     if (strings.startsWith($v, "v")) {
-        $v = strings.substring($v, 1, len($v));
+        $v = $v[1..len($v)];
     }
     if (not semver.isValid($v)) {
         return "";
@@ -758,8 +756,8 @@ export func versionOfTag(tag as string) {
 export func cacheDirName(url as string) {
     def digest as string init encoding.toText(
         "hex",
-        hash.compute("sha256", convert.bytesFromString("utf-8", $url)));
-    def short as string init strings.substring($digest, 0, 12);
+        hash.compute("sha256", encoding.encode("utf-8", $url)));
+    def short as string init $digest[..12];
     # The last non-empty "/"-separated segment.
     def base as string init "";
     for (def seg in strings.split($url, "/")) {
@@ -768,7 +766,7 @@ export func cacheDirName(url as string) {
         }
     }
     if (strings.endsWith($base, ".git")) {
-        $base = strings.substring($base, 0, len($base) - 4);
+        $base = $base[..len($base) - 4];
     }
     if ($base == "") {
         $base = "repo";
@@ -828,14 +826,14 @@ export func httpsRemote(url as string) {
     if ($scheme < 0) {
         return scpToHttps($out);
     }
-    def proto as string init strings.lower(strings.substring($out, 0, $scheme));
-    def rest as string init strings.substring($out, $scheme + 3, len($out));
+    def proto as string init strings.lower($out[..$scheme]);
+    def rest as string init $out[$scheme + 3..len($out)];
     def authority as string init $rest;
     def tail as string init "";
     def slash as int init strings.indexOf($rest, "/");
     if ($slash >= 0) {
-        $authority = strings.substring($rest, 0, $slash);
-        $tail = strings.substring($rest, $slash, len($rest));
+        $authority = $rest[..$slash];
+        $tail = $rest[$slash..len($rest)];
     }
     def host as string init afterLastAt($authority);
     if ($host == "") {
@@ -857,14 +855,14 @@ func scpToHttps(text as string) {
     if ($colon <= 0) {
         return "";
     }
-    def before as string init strings.substring($text, 0, $colon);
+    def before as string init $text[..$colon];
     if (strings.contains($before, "/")) {
         return "";
     }
     def host as string init afterLastAt($before);
-    def rest as string init strings.substring($text, $colon + 1, len($text));
+    def rest as string init $text[$colon + 1..len($text)];
     while (strings.startsWith($rest, "/")) {
-        $rest = strings.substring($rest, 1, len($rest));
+        $rest = $rest[1..len($rest)];
     }
     if ($host == "" or $rest == "" or strings.contains($host, " ")) {
         return "";
@@ -885,13 +883,13 @@ func withoutPort(host as string) {
     if (strings.startsWith($host, "[")) {
         def close as int init strings.indexOf($host, "]");
         if ($close > 0) {
-            return strings.substring($host, 0, $close + 1);
+            return $host[..$close + 1];
         }
         return $host;
     }
     def colon as int init strings.indexOf($host, ":");
     if ($colon >= 0) {
-        return strings.substring($host, 0, $colon);
+        return $host[..$colon];
     }
     return $host;
 }
@@ -961,10 +959,10 @@ export func hostOfRemote(url as string) {
     if ($scheme < 0) {
         return "";
     }
-    $out = strings.substring($out, $scheme + 3, len($out));
+    $out = $out[$scheme + 3..len($out)];
     def slash as int init strings.indexOf($out, "/");
     if ($slash >= 0) {
-        $out = strings.substring($out, 0, $slash);
+        $out = $out[..$slash];
     }
     return strings.lower($out);
 }

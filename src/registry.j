@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * The registry client: discovery and version negotiation, deck metadata
@@ -218,7 +218,7 @@ export def struct Resolution {
 
 # hexDigit returns the uppercase hex character for a nibble (0-15).
 func hexDigit(v as int) {
-    return strings.substring(HEX, $v, $v + 1);
+    return HEX[$v..$v + 1];
 }
 
 # hexByte renders a byte (0-255) as two uppercase hex characters.
@@ -240,7 +240,7 @@ export func percentEncode(s as string) {
         if (strings.indexOf(UNRESERVED, $ch) >= 0) {
             $out[] = $ch;
         } else {
-            def raw as bytes init convert.bytesFromString("utf-8", $ch);
+            def raw as bytes init encoding.encode("utf-8", $ch);
             for (def i as int init 0; $i < len($raw); $i = $i + 1) {
                 $out[] = "%" + hexByte($raw[$i]);
             }
@@ -252,7 +252,7 @@ export func percentEncode(s as string) {
 # trimTrailingSlash drops a single trailing "/" from a base URL.
 func trimTrailingSlash(url as string) {
     if (strings.endsWith($url, "/")) {
-        return strings.substring($url, 0, len($url) - 1);
+        return $url[..len($url) - 1];
     }
     return $url;
 }
@@ -1015,11 +1015,11 @@ func inert(text as string, limit as int) {
     # only to keep its first line.
     def raw as string init $text;
     if (len($raw) > $limit * 8) {
-        $raw = strings.substring($raw, 0, $limit * 8);
+        $raw = $raw[..$limit * 8];
     }
     def flat as string init strings.trim(cleanText($raw));
     if (len($flat) > $limit) {
-        return strings.substring($flat, 0, $limit) + "...";
+        return $flat[..$limit] + "...";
     }
     return $flat;
 }
@@ -1288,12 +1288,12 @@ func originOf(url as string) {
     if ($at < 0) {
         return "";
     }
-    def rest as string init strings.substring($url, $at + 3, len($url));
+    def rest as string init $url[$at + 3..len($url)];
     def slash as int init strings.indexOf($rest, "/");
     if ($slash >= 0) {
-        $rest = strings.substring($rest, 0, $slash);
+        $rest = $rest[..$slash];
     }
-    return strings.lower(strings.substring($url, 0, $at + 3) + $rest);
+    return strings.lower($url[..$at + 3] + $rest);
 }
 
 /**
@@ -1871,7 +1871,7 @@ func padSegment(seg as string) {
 # single-byte codecs, and reaching for `iso-8859-1` there mangles any claim that
 # is not ASCII.
 func segmentText(seg as string) {
-    return convert.stringFromBytes("utf-8", encoding.fromText("base64-url", padSegment($seg)));
+    return encoding.decode("utf-8", encoding.fromText("base64-url", padSegment($seg)));
 }
 
 /**

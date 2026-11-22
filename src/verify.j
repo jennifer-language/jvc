@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * The publish quality gate: the checks a deck must pass before it may be
@@ -64,6 +64,7 @@ use convert;
 use maps;
 use lists;
 use time;
+use encoding;
 import "docblock.j" as docblock;
 import "./pragma.j" as pragma;
 
@@ -305,10 +306,10 @@ export func interpreterVersion() {
     }
     def line as string init strings.trim(strings.split($run.result.stdout, "\n")[0]);
     if (strings.startsWith($line, "jennifer ")) {
-        $line = strings.trim(strings.substring($line, len("jennifer "), len($line)));
+        $line = strings.trim($line[len("jennifer ")..len($line)]);
     }
     if (strings.startsWith($line, "v")) {
-        $line = strings.substring($line, 1, len($line));
+        $line = $line[1..len($line)];
     }
     return $line;
 }
@@ -329,7 +330,7 @@ export func isOverlay(file as string) {
  * @return {string} the expected overlay path
  */
 export func overlayFor(file as string) {
-    return strings.substring($file, 0, len($file) - 2) + "_test.j";
+    return $file[..len($file) - 2] + "_test.j";
 }
 
 /**
@@ -366,10 +367,10 @@ func includeTargets(source as string) {
         if (not strings.startsWith($t, INCLUDE_HEAD)) {
             continue;
         }
-        def rest as string init strings.substring($t, len(INCLUDE_HEAD), len($t));
+        def rest as string init $t[len(INCLUDE_HEAD)..len($t)];
         def end as int init strings.indexOf($rest, "\"");
         if ($end > 0) {
-            $out[] = strings.substring($rest, 0, $end);
+            $out[] = $rest[..$end];
         }
     }
     return $out;
@@ -575,7 +576,7 @@ func runText(argv as list of string) {
 # PASS / FAIL, the summary) survive.
 func displayText(b as bytes) {
     try {
-        return convert.stringFromBytes("utf-8", $b);
+        return encoding.decode("utf-8", $b);
     } catch (whole) {
         return linesText($b);
     }
@@ -586,7 +587,7 @@ func displayText(b as bytes) {
 # a placeholder.
 func linesText(b as bytes) {
     def lines as list of string init [];
-    for (def line in binary.split($b, convert.bytesFromString("utf-8", "\n"))) {
+    for (def line in binary.split($b, encoding.encode("utf-8", "\n"))) {
         $lines[] = lineText($line);
     }
     return strings.join($lines, "\n");
@@ -594,7 +595,7 @@ func linesText(b as bytes) {
 
 func lineText(line as bytes) {
     try {
-        return convert.stringFromBytes("utf-8", $line);
+        return encoding.decode("utf-8", $line);
     } catch (bad) {
         return "[a line that is not UTF-8 text]";
     }
@@ -737,7 +738,7 @@ func vendorOf(dir as string) {
 func rel(dir as string, file as string) {
     def prefix as string init path.clean($dir) + "/";
     if (strings.startsWith($file, $prefix)) {
-        return strings.substring($file, len($prefix), len($file));
+        return $file[len($prefix)..len($file)];
     }
     return $file;
 }

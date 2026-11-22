@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * The jvc command-line logic: the manifest verbs (`init`, `add`, `remove`,
@@ -304,21 +304,21 @@ export func cleartextProblem(base as string) {
 # `localhost`, an address in 127.0.0.0/8, or `[::1]`, with or without a port
 # and userinfo.
 func isLoopbackUrl(u as string) {
-    def rest as string init strings.substring($u, strings.indexOf($u, "://") + 3, len($u));
+    def rest as string init $u[strings.indexOf($u, "://") + 3..len($u)];
     def slash as int init strings.indexOf($rest, "/");
     if ($slash >= 0) {
-        $rest = strings.substring($rest, 0, $slash);
+        $rest = $rest[..$slash];
     }
     def at as int init strings.lastIndexOf($rest, "@");
     if ($at >= 0) {
-        $rest = strings.substring($rest, $at + 1, len($rest));
+        $rest = $rest[$at + 1..len($rest)];
     }
     if (strings.startsWith($rest, "[")) {
         return strings.startsWith($rest, "[::1]");
     }
     def colon as int init strings.indexOf($rest, ":");
     if ($colon >= 0) {
-        $rest = strings.substring($rest, 0, $colon);
+        $rest = $rest[..$colon];
     }
     return $rest == "localhost" or isLoopbackV4($rest);
 }
@@ -376,7 +376,7 @@ export func unpinnedTokenProblem(mapped as string, given as string) {
 func scopeName(scope as string) {
     def s as string init $scope;
     if (strings.startsWith($s, "@")) {
-        $s = strings.substring($s, 1, len($s));
+        $s = $s[1..len($s)];
     }
     return "@" + $s + "/x";
 }
@@ -906,7 +906,7 @@ func tagElsewhere(dir as string, version as string) {
         def got as git.Result init git.run(git.tagCommitArgv($dir, $tag));
         if ($got.ok and not (strings.trim($got.output) == "")) {
             def commit as string init strings.trim($got.output);
-            return $tag + " (at " + strings.substring($commit, 0, 12) + ")";
+            return $tag + " (at " + $commit[..12] + ")";
         }
     }
     return "";
@@ -1908,19 +1908,19 @@ func credentialsDoc(file as string) {
 export func credentialKey(base as string) {
     def url as string init strings.trim($base);
     while (strings.endsWith($url, "/")) {
-        $url = strings.substring($url, 0, len($url) - 1);
+        $url = $url[..len($url) - 1];
     }
     def at as int init strings.indexOf($url, "://");
     if ($at < 0) {
         return $url;
     }
-    def rest as string init strings.substring($url, $at + 3, len($url));
+    def rest as string init $url[$at + 3..len($url)];
     def slash as int init strings.indexOf($rest, "/");
     if ($slash < 0) {
         return strings.lower($url);
     }
-    return strings.lower(strings.substring($url, 0, $at + 3 + $slash)) +
-        strings.substring($rest, $slash, len($rest));
+    return strings.lower($url[..$at + 3 + $slash]) +
+        $rest[$slash..len($rest)];
 }
 
 /**
@@ -3701,7 +3701,7 @@ export func checksumMatches(data as bytes, expected as string) {
     }
     def want as string init $expected;
     if (strings.startsWith($want, "sha256:")) {
-        $want = strings.substring($want, 7, len($want));
+        $want = $want[7..len($want)];
     }
     return strings.lower($want) == hexSha256($data);
 }
@@ -3729,7 +3729,7 @@ export func srcSubpath(entryName as string, root as string) {
     if (not strings.startsWith($n, "src/")) {
         return "";
     }
-    def sub as string init strings.substring($n, 4, len($n));
+    def sub as string init $n[4..len($n)];
     if (not safepath.isSafeRelative($sub)) {
         return "";
     }
@@ -3934,7 +3934,7 @@ func vendoredBin(entries as list of archive.Entry, name as string) {
     }
     try {
         def m as manifest.Manifest init manifest.parse(
-            convert.stringFromBytes("utf-8", $found[0].data),
+            encoding.decode("utf-8", $found[0].data),
             manifest.detectFormat(manifestEntry($found[0].name, $root)));
         if ($m.pkg.bin == "") {
             return "";
@@ -4217,7 +4217,7 @@ func dropEmptyScope(dir as string, sub as string) {
     if ($slash < 1) {
         return;
     }
-    def scopeDir as string init path.join($dir, VENDOR_DIR, strings.substring($sub, 0, $slash));
+    def scopeDir as string init path.join($dir, VENDOR_DIR, $sub[..$slash]);
     try {
         if (len(fs.list($scopeDir)) == 0) {
             fs.remove($scopeDir);
@@ -5188,7 +5188,7 @@ func templateBody(files as list of scaffold.File, path as string) {
     for (def f in $files) {
         if ($f.path == $path) {
             try {
-                return convert.stringFromBytes("utf-8", $f.data);
+                return encoding.decode("utf-8", $f.data);
             } catch (err) {
                 return "";
             }
@@ -5369,11 +5369,7 @@ export func runNew(
     # One fetch of the engine serves both the template read and its vendoring,
     # and it is verified before either: the template is written into the new
     # project, so it is as much the deck's code as its src/ is.
-    def got as Fetched init Fetched{
-        data: convert.bytesFromString("utf-8", ""),
-        format: "",
-        checksum: ""
-    };
+    def got as Fetched init Fetched{data: encoding.encode("utf-8", ""), format: "", checksum: ""};
     try {
         $got = fetchArchive($engine);
     } catch (err) {
@@ -5732,7 +5728,7 @@ export func runAppUpdate(names as list of string, scope as string, baseUrl as st
         # A commit pin was asked for by id, and no constraint can move it.
         if (app.isCommitPin($was)) {
             $report = $report + "\n  ok    " + $was.name + " pinned at " +
-                strings.substring($was.commit, 0, 12);
+                $was.commit[..12];
             continue;
         }
         def step as AppStep init installAppStep($loc, $given, $was.spec, "", $was.name, $baseUrl);
@@ -5760,7 +5756,7 @@ func appVersionOf(r as app.Record) {
     if (not ($r.version == "")) {
         return $r.version;
     }
-    return strings.substring($r.commit, 0, 12);
+    return $r.commit[..12];
 }
 
 # --- installing jvc over a packaged jvc -------------------------------------
@@ -6056,7 +6052,7 @@ func runningEngine() {
 func runningVersion() {
     def raw as string init meta.VERSION;
     if (strings.startsWith($raw, "v")) {
-        $raw = strings.substring($raw, 1, len($raw));
+        $raw = $raw[1..len($raw)];
     }
     return $raw;
 }

@@ -22,7 +22,7 @@ arch=('any')
 url='https://github.com/jennifer-language/jvc'
 license=('LGPL-3.0-only')
 
-# Unversioned on purpose. jvc needs `jennifer >= 0.26.0`, but `jennifer-bin`
+# Unversioned on purpose. jvc needs `jennifer >= 0.27.0`, but `jennifer-bin`
 # and `jennifer-git` provide an unversioned `jennifer`, so the versioned form
 # would be unsatisfiable and pacman would refuse the package. The interpreter
 # enforces the floor at load time from each source file's

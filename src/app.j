@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # SPDX-FileCopyrightText: Copyright (C) 2026 mplx <jennifer@mplx.dev>
-# pragma-jennifer-version: >=0.26.0
+# pragma-jennifer-version: >=0.27.0
 
 /**
  * Installing **apps**: runnable Jennifer programs, as opposed to the decks the
@@ -47,7 +47,6 @@ use fs;
 use path;
 use json;
 use strings;
-use lists;
 use convert;
 import "./deckname.j" as deckname;
 import "./manifest.j" as manifest;
@@ -396,7 +395,7 @@ func normalise(p as string) {
     for (def seg in segments($p)) {
         if ($seg == "..") {
             if (len($out) > 0) {
-                $out = lists.slice($out, 0, len($out) - 1);
+                $out = $out[..len($out) - 1];
             }
         } else {
             $out[] = $seg;
@@ -473,7 +472,7 @@ export func nameFromUrl(url as string) {
         }
     }
     if (strings.endsWith($base, ".git")) {
-        $base = strings.substring($base, 0, len($base) - 4);
+        $base = $base[..len($base) - 4];
     }
     return $base;
 }
@@ -1002,7 +1001,7 @@ func entryProblem(entry as string, file as string) {
             "an app's entry script starts with " + ENTRY_SHEBANG;
     }
     def line as string init strings.split($text, "\n")[0];
-    def why as string init shebangProblem(strings.substring($line, 2, len($line)));
+    def why as string init shebangProblem($line[2..len($line)]);
     if ($why == "") {
         return "";
     }
@@ -1027,7 +1026,7 @@ func shebangProblem(line as string) {
         if (not isJennifer($words[0])) {
             return "";
         }
-        return runProblem(strings.join(lists.slice($words, 1, len($words)), " "));
+        return runProblem(strings.join($words[1..len($words)], " "));
     }
     if (len($words) < 2) {
         return "names no program for env to run";
@@ -1401,7 +1400,7 @@ export func onSearchPath(dir as string, paths as string, home as string) {
 func placeOf(entry as string, home as string) {
     def p as string init $entry;
     if (not ($home == "") and ($p == "~" or strings.startsWith($p, "~/"))) {
-        $p = $home + strings.substring($p, 1, len($p));
+        $p = $home + $p[1..len($p)];
     }
     if (not strings.startsWith($p, "/")) {
         return "";
@@ -1597,7 +1596,7 @@ func installFrom(
     };
     def what as string init $name + " " + $picked.version;
     if ($picked.version == "") {
-        $what = $name + " (" + strings.substring($picked.commit, 0, 12) + ")";
+        $what = $name + " (" + $picked.commit[..12] + ")";
     }
     return Installation{
         ok: true,
@@ -1720,9 +1719,9 @@ export func listApps(loc as Locations) {
     for (def r in $apps) {
         def version as string init $r.version;
         if (isCommitPin($r)) {
-            $version = "commit " + strings.substring($r.commit, 0, 12);
+            $version = "commit " + $r.commit[..12];
         } elseif ($version == "") {
-            $version = $r.ref + " " + strings.substring($r.commit, 0, 12);
+            $version = $r.ref + " " + $r.commit[..12];
         }
         $out = $out + "\n  " + $r.name + " " + $version + "\n      " + $r.url;
     }
