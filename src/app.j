@@ -405,8 +405,119 @@ func normalise(p as string) {
 }
 
 /**
+ * Render the `/bin/sh` shim that starts an app's entry script through a named
+ * interpreter instead of the script's own `#!` line: `exec <interpreter> run
+ * [flags] <entry> "$@"`. Written where the `env` an entry's `#!/usr/bin/env -S
+ * jennifer run` line names does not exist, so the line could not start it.
+ * Every word is single-quoted (`shellQuote`).
+ * @param interpreter {string} the interpreter's absolute path
+ * @param flags {list of string} the `run` flags the entry's `#!` line passes
+ * @param target {string} the absolute path of the app's entry script
+ * @return {string} the shim script text
+ */
+export func interpreterShimText(interpreter as string, flags as list of string, target as string) {
+    return "#!/bin/sh" + "\n" + SHIM_MARKER + "\n" +
+        "exec " + runCommand($interpreter, $flags) + " " + shellQuote($target) + ' "$@"' + "\n";
+}
+
+/**
+ * The relocatable form of `interpreterShimText`, for a command inside a
+ * project: the entry is found relative to the shim, as in `projectShimText`.
+ * The interpreter stays an absolute path, since it is this machine's.
+ * @param interpreter {string} the interpreter's absolute path
+ * @param flags {list of string} the `run` flags the entry's `#!` line passes
+ * @param relative {string} the entry's path relative to the shim's directory
+ * @return {string} the shim script text
+ */
+export func projectInterpreterShimText(
+    interpreter as string,
+    flags as list of string,
+    relative as string) {
+    return "#!/bin/sh" + "\n" + SHIM_MARKER + "\n" +
+        'here=$(cd "$(dirname "$0")" && pwd)' + "\n" +
+        "exec " + runCommand($interpreter, $flags) + ' "$here/"' + shellQuote($relative) +
+        ' "$@"' + "\n";
+}
+
+# runCommand renders `<interpreter> run [flags]`, each word single-quoted.
+func runCommand(interpreter as string, flags as list of string) {
+    def out as string init shellQuote($interpreter) + " run";
+    for (def f in $flags) {
+        $out = $out + " " + shellQuote($f);
+    }
+    return $out;
+}
+
+/**
+ * How a command starts its entry script. With `interpreter` "" it goes through
+ * the script's own `#!` line (a symlink, or a shim that `exec`s the script);
+ * otherwise a shim runs `interpreter run`, passing `flags` first. `error` is
+ * set when neither can work.
+ * @field interpreter {string} the interpreter to run the entry with, or ""
+ * @field flags {list of string} the `run` flags taken from the entry's `#!` line
+ * @field error {string} why the command cannot be made, or ""
+ */
+export def struct Launch {
+    interpreter as string,
+    flags as list of string,
+    error as string
+};
+
+/**
+ * Decide how a command starts an entry script. An entry whose `#!` line runs
+ * jennifer through an `env` that does not exist on this system (`/usr/bin/env`
+ * is not universal) is started by a shim naming the interpreter's absolute
+ * path: `$JVC_JENNIFER` when set, else the first interpreter of the name the
+ * line asks for on `PATH`. Any other entry starts through its own `#!` line.
+ * @param entry {string} the entry script's path
+ * @return {Launch} how to start it
+ */
+export func launchOf(entry as string) {
+    def direct as Launch init Launch{interpreter: "", flags: [], error: ""};
+    def text as string init "";
+    try {
+        $text = fs.readString($entry);
+    } catch (err) {
+        return $direct;
+    }
+    if (not strings.startsWith($text, "#!")) {
+        return $direct;
+    }
+    def line as string init strings.split($text, "\n")[0];
+    def words as list of string init shebangWords($line[2..len($line)]);
+    if (len($words) < 2 or not (path.base($words[0]) == "env") or fs.exists($words[0])) {
+        return $direct;
+    }
+    def at as int init 1;
+    if ($words[1] == "-S") {
+        $at = 2;
+    }
+    if (len($words) <= $at + 1 or not isJennifer($words[$at]) or
+        not ($words[$at + 1] == "run")) {
+        return $direct;
+    }
+    def wanted as string init path.base($words[$at]);
+    def found as string init os.getEnv("JVC_JENNIFER");
+    if ($found == "") {
+        $found = commandOnPath($wanted, "");
+    }
+    if ($found == "") {
+        return Launch{
+            interpreter: "",
+            flags: [],
+            error: $entry + " starts through " + $words[0] + ", which does not exist here, " +
+                "and no " + $wanted + " is on PATH to run it with instead; " +
+                "set JVC_JENNIFER to the interpreter's path"
+        };
+    }
+    return Launch{interpreter: absolute($found), flags: $words[$at + 2..len($words)], error: ""};
+}
+
+/**
  * Create a command pointing at an entry script: a symlink when the filesystem
- * allows one, else a `/bin/sh` shim. An existing command jvc created is
+ * allows one, else a `/bin/sh` shim. An entry whose `#!` line names an `env`
+ * this system lacks gets a shim running the interpreter by its absolute path
+ * instead (`launchOf`). An existing command jvc created is
  * replaced; anything else at that path, a dangling link included, is left
  * alone and reported.
  * @param loc {Locations} where the command goes
@@ -420,6 +531,10 @@ export func linkCommand(loc as Locations, name as string, entry as string) {
             "\": a command name is one file name of letters, digits, `.`, `_` " +
             "and `-`, not starting with `.` or `-`");
     }
+    def launch as Launch init launchOf($entry);
+    if (not ($launch.error == "")) {
+        return fail($launch.error);
+    }
     def target as string init path.join($loc.bin, $name);
     if (occupied($target)) {
         if (not isOurs($target, $loc.store)) {
@@ -432,6 +547,21 @@ export func linkCommand(loc as Locations, name as string, entry as string) {
     def dest as string init absolute($entry);
     if ($loc.relocatable) {
         $dest = relativeFrom($loc.bin, $entry);
+    }
+    if (not ($launch.interpreter == "")) {
+        def via as string init interpreterShimText(
+            $launch.interpreter,
+            $launch.flags,
+            absolute($entry));
+        if ($loc.relocatable) {
+            $via = projectInterpreterShimText($launch.interpreter, $launch.flags, $dest);
+        }
+        try {
+            placeShim($target, $via);
+        } catch (err) {
+            return fail("cannot create " + $target + ": " + $err.message);
+        }
+        return ok($target);
     }
     try {
         fs.symlink($dest, $target);

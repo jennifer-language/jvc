@@ -877,6 +877,125 @@ func testLinkCommandReplacesItsOwn() {
     fs.removeAll($root);
 }
 
+# envEntry writes an executable entry script whose #! line runs jennifer
+# through the given env, and returns its path.
+func envEntry(root as string, env as string, rest as string) {
+    def entry as string init path.join($root, "store", "demo", "demo");
+    fs.mkdirAll(path.dir($entry));
+    fs.writeString($entry, "#!" + $env + " -S jennifer run" + $rest + "\n" + "use io;" + "\n");
+    fs.chmod($entry, 0o755);
+    return $entry;
+}
+
+# where the env an entry names exists, the command stays a symlink to the entry
+func testLinkCommandKeepsTheLinkWhereEnvExists() {
+    def root as string init scratch("envthere");
+    def loc as Locations init where($root);
+    def entry as string init envEntry($root, "/usr/bin/env", "");
+    def launch as Launch init launchOf($entry);
+    testing.assertEqual($launch.interpreter, "");
+    testing.assertEqual($launch.error, "");
+    testing.assertTrue(linkCommand($loc, "demo", $entry).ok);
+    testing.assertEqual(fs.readlink(path.join($loc.bin, "demo")), $entry);
+    fs.removeAll($root);
+}
+
+# where it does not, a shim runs the entry through the interpreter's absolute
+# path, carrying the #! line's run flags
+func testLinkCommandRunsTheInterpreterWhereEnvIsMissing() {
+    def root as string init scratch("envmissing");
+    def loc as Locations init where($root);
+    def entry as string init envEntry($root, path.join($root, "nobin", "env"), " --env=prod");
+    def saved as string init os.getEnv("JVC_JENNIFER");
+    os.setEnv("JVC_JENNIFER", "/opt/j/bin/jennifer");
+    def launch as Launch init launchOf($entry);
+    def r as Outcome init linkCommand($loc, "demo", $entry);
+    os.setEnv("JVC_JENNIFER", $saved);
+    testing.assertEqual($launch.interpreter, "/opt/j/bin/jennifer");
+    testing.assertEqual($launch.flags, ["--env=prod"]);
+    testing.assertTrue($r.ok);
+    def cmd as string init path.join($loc.bin, "demo");
+    testing.assertFalse(isLink($cmd));
+    testing.assertTrue(isOurs($cmd, $loc.store));
+    testing.assertEqual(
+        fs.readString($cmd),
+        "#!/bin/sh" + "\n" + SHIM_MARKER + "\n" +
+            "exec '/opt/j/bin/jennifer' run '--env=prod' '" + $entry + "' \"$@\"" + "\n");
+    fs.removeAll($root);
+}
+
+# without $JVC_JENNIFER the interpreter is the first one on PATH, made absolute,
+# and the shim really starts the entry
+func testLinkCommandFindsTheInterpreterOnPath() {
+    def root as string init scratch("envpath");
+    def loc as Locations init where($root);
+    def entry as string init envEntry($root, path.join($root, "nobin", "env"), "");
+    fs.writeString(
+        $entry,
+        "#!" + path.join($root, "nobin", "env") + " -S jennifer run" + "\n" +
+            "use io;" + "\n" + 'io.printf("ran\n");' + "\n");
+    def fakeBin as string init path.join($root, "fakebin");
+    fs.mkdirAll($fakeBin);
+    fs.writeString(
+        path.join($fakeBin, "jennifer"),
+        "#!/bin/sh" + "\n" + 'shift; echo "run $1"' + "\n");
+    fs.chmod(path.join($fakeBin, "jennifer"), 0o755);
+    def savedJ as string init os.getEnv("JVC_JENNIFER");
+    def savedPath as string init os.getEnv("PATH");
+    os.unsetEnv("JVC_JENNIFER");
+    os.setEnv("PATH", $fakeBin + ":" + $savedPath);
+    def r as Outcome init linkCommand($loc, "demo", $entry);
+    os.setEnv("PATH", $savedPath);
+    os.setEnv("JVC_JENNIFER", $savedJ);
+    testing.assertTrue($r.ok);
+    def ran as os.Result init os.run([path.join($loc.bin, "demo")]);
+    testing.assertEqual($ran.stdout, "run " + $entry + "\n");
+    fs.removeAll($root);
+}
+
+# with no interpreter to name, the command is refused and nothing is touched
+func testLinkCommandRefusesWithoutAnInterpreter() {
+    def root as string init scratch("envnone");
+    def loc as Locations init where($root);
+    def entry as string init envEntry($root, path.join($root, "nobin", "env"), "");
+    def savedJ as string init os.getEnv("JVC_JENNIFER");
+    def savedPath as string init os.getEnv("PATH");
+    os.unsetEnv("JVC_JENNIFER");
+    os.setEnv("PATH", path.join($root, "empty"));
+    def r as Outcome init linkCommand($loc, "demo", $entry);
+    os.setEnv("PATH", $savedPath);
+    os.setEnv("JVC_JENNIFER", $savedJ);
+    testing.assertFalse($r.ok);
+    testing.assertContains($r.message, "does not exist here");
+    testing.assertContains($r.message, "JVC_JENNIFER");
+    testing.assertFalse(occupied(path.join($loc.bin, "demo")));
+    fs.removeAll($root);
+}
+
+# an entry for another interpreter, or a jennifer line without run, is left to
+# its own #! line even when its env is missing
+func testLaunchOfLeavesOtherEntriesAlone() {
+    def root as string init scratch("envother");
+    def entry as string init path.join($root, "e");
+    fs.writeString($entry, "#!" + path.join($root, "nobin", "env") + " python3" + "\n");
+    testing.assertEqual(launchOf($entry).interpreter, "");
+    fs.writeString($entry, "#!/bin/sh" + "\n");
+    testing.assertEqual(launchOf($entry).interpreter, "");
+    fs.writeString($entry, "#!" + path.join($root, "nobin", "env") + " -S jennifer test" + "\n");
+    testing.assertEqual(launchOf($entry).interpreter, "");
+    testing.assertEqual(launchOf(path.join($root, "missing")).interpreter, "");
+    fs.removeAll($root);
+}
+
+# the relocatable shim finds the entry beside itself and names the interpreter
+func testProjectInterpreterShimText() {
+    testing.assertEqual(
+        projectInterpreterShimText("/opt/j/bin/jennifer", [], "../app/x"),
+        "#!/bin/sh" + "\n" + SHIM_MARKER + "\n" +
+            'here=$(cd "$(dirname "$0")" && pwd)' + "\n" +
+            "exec '/opt/j/bin/jennifer' run \"$here/\"'../app/x' \"$@\"" + "\n");
+}
+
 func testUninstallRemovesEverything() {
     def repo as string init appRepo("rm", "demo", manifestFor("demo", "1.0.0", ""), "v1.0.0");
     def root as string init scratch("rmroot");

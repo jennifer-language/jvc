@@ -1179,6 +1179,13 @@ app that locates its assets from `argv[0]` still finds them, because `realpath`
 resolves the link. Where a filesystem has no symlinks, jvc falls back to a
 `/bin/sh` shim that `exec`s the entry.
 
+`/usr/bin/env` is not on every system (some minimal userlands lack it). When the
+entry's `#!` line runs jennifer through an `env` that does not exist, the
+command is instead a `/bin/sh` shim running `<interpreter> run <entry>` (with
+any `run` flags the line passes), naming the interpreter by its absolute path:
+`$JVC_JENNIFER` when set, else the first `jennifer` (or `jennifer-tiny`, as the
+line asks) on `PATH`. With neither, the install is refused and says so.
+
 jvc **refuses to overwrite or delete a command it did not create**. A command is
 jvc's when it is a symlink resolving into jvc's own store, or a shim carrying its
 marker line; the link test is the stronger, since a marker comment can be copied
