@@ -303,8 +303,17 @@ func stampEscaping() {
     return fromArchive($data, "tar", bind());
 }
 
+# The kind is "archive" from 0.28.0 on (each library throws its own kind for
+# bad input) and "runtime" on 0.27.0; CI runs both. Once the floor is 0.28.0,
+# this becomes assertThrows("stampEscaping", "archive").
 func testFromArchiveRefusesEscapingEntries() {
-    testing.assertThrows("stampEscaping", "runtime");
+    def kind as string init "";
+    try {
+        stampEscaping();
+    } catch (e) {
+        $kind = $e.kind;
+    }
+    testing.assertTrue($kind == "archive" or $kind == "runtime");
 }
 
 # a placeholder that renders to a path climbing out is skipped too
