@@ -10,6 +10,8 @@
 
 use testing;
 use convert;
+use httpd;
+use task;
 
 # freshDir makes and returns a unique empty scratch directory.
 func freshDir(name as string) {
@@ -4125,4 +4127,239 @@ func testTheUntrustedTestsNoticeNamesEveryDeck() {
         $notice,
         "running the tests of 2 deck(s) as you, with your file access: " +
             "@acme/widget 1.0.0, @deckyard/geo 0.2.0");
+}
+
+# --- a moved deck (registry move record) -------------------------------------------
+#
+# A stand-in registry on the loopback answers the deck and resolve lookups from
+# fixed bodies, as a legacy registry (no discovery document) would.
+
+def const MOVED_COMMIT as string init "9f2c1d4e5a6b7c8d9e0f1a2b3c4d5e6f70819293";
+
+# movedBodies is what the stand-in serves: @jennifer/slack moved to
+# @deckyard/slack with its one version yanked, and @acme/app requiring it.
+func movedBodies() {
+    return {
+        "/deck @jennifer/slack": '{"name":"@jennifer/slack","movedTo":"@deckyard/slack",' +
+            '"versions":{"0.1.0":{"version":"0.1.0","kind":"git",' +
+            '"url":"https://example.test/slack.git","ref":"0.1.0","commit":"' +
+            MOVED_COMMIT + '","yanked":true,"requires":{},"engines":{}}}}',
+        "/deck @acme/app": '{"name":"@acme/app","versions":{"1.0.0":{"version":"1.0.0",' +
+            '"kind":"git","url":"https://example.test/app.git","ref":"1.0.0","commit":"' +
+            MOVED_COMMIT + '","yanked":false,"requires":{"@jennifer/slack":"^0.1.0"},' +
+            '"engines":{}}}}',
+        "/resolve @jennifer/slack": '{"found":false,"name":"@jennifer/slack",' +
+            '"error":"no version of @jennifer/slack satisfies *","movedTo":"@deckyard/slack"}',
+        "/resolve @acme/old": '{"found":true,"name":"@acme/old","version":"1.0.0",' +
+            '"kind":"git","url":"https://example.test/old.git","movedTo":"@acme/new"}'
+    };
+}
+
+# standInRegistry answers until the server shuts down, then returns how many
+# requests it answered. Anything it holds no body for is a 404.
+func standInRegistry(srv as httpd.Server, bodies as map of string to string) {
+    def served as int init 0;
+    while (true) {
+        def req as httpd.Request;
+        try {
+            $req = httpd.accept($srv);
+        } catch (err) {
+            return $served;
+        }
+        $served = $served + 1;
+        def key as string init httpd.path($req) + " " + httpd.query($req, "name");
+        if (not maps.has($bodies, $key)) {
+            httpd.respond($req, 404, '{"error":"no such deck"}');
+            continue;
+        }
+        def status as int init 200;
+        if (strings.contains($bodies[$key], '"found":false')) {
+            $status = 404;
+        }
+        httpd.respond($req, $status, $bodies[$key]);
+    }
+    return $served;
+}
+
+func testTheMovedMessageNamesTheNewDeckAndItsImports() {
+    testing.assertEqual(
+        movedMessage("@jennifer/slack", "@deckyard/slack"),
+        "@jennifer/slack moved to @deckyard/slack; change the [decks] entry and the " +
+            "imports (`@deckyard/slack/`)");
+    def none as list of string init [];
+    testing.assertEqual(
+        movedRefusal("@jennifer/slack", "@deckyard/slack", $none),
+        movedMessage("@jennifer/slack", "@deckyard/slack"));
+    def dep as string init movedRefusal("@jennifer/slack", "@deckyard/slack", ["@acme/app 1.0.0"]);
+    testing.assertContains($dep, "@jennifer/slack moved to @deckyard/slack; @acme/app 1.0.0");
+    testing.assertContains($dep, "a release of that deck requiring @deckyard/slack");
+}
+
+func testDependentsAreNamedOnceAndSorted() {
+    def cat as catalog.Catalog init catalog.empty();
+    $cat = catalog.add($cat, needs("@acme/b", "1.0.0", "@jennifer/slack", "*"));
+    $cat = catalog.add($cat, needs("@acme/a", "2.0.0", "@Jennifer/Slack", "*"));
+    $cat = catalog.add($cat, catalog.candidate("@acme/c", "1.0.0"));
+    testing.assertEqual(dependentsOf($cat, "@jennifer/slack"), ["@acme/a 2.0.0", "@acme/b 1.0.0"]);
+    testing.assertEqual(len(dependentsOf($cat, "@acme/c")), 0);
+}
+
+func testLockWarningsNameOnlyTheMovedDecks() {
+    def locked as list of catalog.Candidate init [
+        catalog.candidate("@jennifer/slack", "0.1.0"),
+        needs("@acme/app", "1.0.0", "@jennifer/gotify", "^0.3.0"),
+        catalog.candidate("@jennifer/gotify", "0.3.0")
+    ];
+    def none as map of string to string init {};
+    testing.assertEqual(len(lockMovedWarnings($locked, $none)), 0);
+    def w as list of string init lockMovedWarnings(
+        $locked,
+        {"@jennifer/slack": "@deckyard/slack", "@jennifer/gotify": "@deckyard/gotify"});
+    testing.assertEqual(len($w), 2);
+    testing.assertEqual(
+        $w[0],
+        "warning: " + movedMessage("@jennifer/slack", "@deckyard/slack") +
+            ". Installed the locked 0.1.0; jvc update refuses @jennifer/slack.");
+    # a locked dependency names the deck that still requires it
+    testing.assertContains($w[1], "@acme/app 1.0.0 still require(s) it");
+}
+
+func testInstallRefusesAMovedDeck() {
+    def srv as httpd.Server init httpd.listen("127.0.0.1:0");
+    def t as task of int init spawn {
+        return standInRegistry($srv, movedBodies());
+    };
+    def url as string init "http://" + httpd.address($srv);
+    def dir as string init freshDir("movedinstall");
+    runInit($dir, "demo");
+    runAdd($dir, "@jennifer/slack", "^0.1.0", false);
+    def out as Outcome init runInstall($dir, $url, false, false);
+    httpd.shutdown($srv);
+    task.wait($t);
+    testing.assertFalse($out.ok);
+    testing.assertContains($out.message, movedMessage("@jennifer/slack", "@deckyard/slack"));
+    # no alias: nothing was resolved, so nothing was locked
+    testing.assertFalse(fs.exists($dir + "/camcorder.lock"));
+    fs.removeAll($dir);
+}
+
+func testInstallRefusesAMovedDependency() {
+    def srv as httpd.Server init httpd.listen("127.0.0.1:0");
+    def t as task of int init spawn {
+        return standInRegistry($srv, movedBodies());
+    };
+    def url as string init "http://" + httpd.address($srv);
+    def dir as string init freshDir("moveddep");
+    runInit($dir, "demo");
+    runAdd($dir, "@acme/app", "^1.0.0", false);
+    def out as Outcome init runInstall($dir, $url, false, false);
+    httpd.shutdown($srv);
+    task.wait($t);
+    testing.assertFalse($out.ok);
+    testing.assertContains(
+        $out.message,
+        "@jennifer/slack moved to @deckyard/slack; @acme/app 1.0.0 still require(s) it");
+    fs.removeAll($dir);
+}
+
+func testUpdateRefusesAMovedDeckTheLockPins() {
+    def srv as httpd.Server init httpd.listen("127.0.0.1:0");
+    def t as task of int init spawn {
+        return standInRegistry($srv, movedBodies());
+    };
+    def url as string init "http://" + httpd.address($srv);
+    def dir as string init freshDir("movedupdate");
+    runInit($dir, "demo");
+    runAdd($dir, "@jennifer/slack", "^0.1.0", false);
+    def pinned as catalog.Candidate init catalog.candidate("@jennifer/slack", "0.1.0");
+    $pinned.registry = $url;
+    writeLock($dir, [$pinned]);
+    def none as list of string init [];
+    def all as Outcome init runUpdate($dir, $url, false, $none, false);
+    def one as Outcome init runUpdate($dir, $url, false, ["@jennifer/slack"], false);
+    httpd.shutdown($srv);
+    task.wait($t);
+    testing.assertFalse($all.ok);
+    testing.assertContains($all.message, movedMessage("@jennifer/slack", "@deckyard/slack"));
+    testing.assertFalse($one.ok);
+    testing.assertContains($one.message, "@jennifer/slack moved to @deckyard/slack");
+    fs.removeAll($dir);
+}
+
+# The lock still installs the pinned version (here the fetch fails for want of
+# an artifact, which is past the point that matters), with the warning.
+func testInstallFromALockWarnsOfAMove() {
+    def srv as httpd.Server init httpd.listen("127.0.0.1:0");
+    def t as task of int init spawn {
+        return standInRegistry($srv, movedBodies());
+    };
+    def url as string init "http://" + httpd.address($srv);
+    def dir as string init freshDir("movedlock");
+    runInit($dir, "demo");
+    runAdd($dir, "@jennifer/slack", "^0.1.0", false);
+    def pinned as catalog.Candidate init catalog.candidate("@jennifer/slack", "0.1.0");
+    $pinned.registry = $url;
+    writeLock($dir, [$pinned]);
+    def out as Outcome init runInstall($dir, $url, false, false);
+    httpd.shutdown($srv);
+    task.wait($t);
+    # installed from the lock, not re-resolved (which would have refused it)
+    testing.assertContains($out.message, "@jennifer/slack 0.1.0");
+    testing.assertFalse(strings.contains($out.message, "dependency resolution failed"));
+    testing.assertContains(
+        $out.message,
+        "warning: " + movedMessage("@jennifer/slack", "@deckyard/slack") +
+            ". Installed the locked 0.1.0");
+    fs.removeAll($dir);
+}
+
+func testAddRefusesAMovedDeck() {
+    def srv as httpd.Server init httpd.listen("127.0.0.1:0");
+    def t as task of int init spawn {
+        return standInRegistry($srv, movedBodies());
+    };
+    def url as string init "http://" + httpd.address($srv);
+    def dir as string init freshDir("movedadd");
+    runInit($dir, "demo");
+    def out as Outcome init runAddFrom($dir, $url, "@Jennifer/Slack", "^0.1.0", false);
+    def other as Outcome init runAddFrom($dir, $url, "@acme/app", "^1.0.0", false);
+    httpd.shutdown($srv);
+    task.wait($t);
+    testing.assertFalse($out.ok);
+    testing.assertEqual($out.message, movedMessage("@jennifer/slack", "@deckyard/slack"));
+    testing.assertTrue($other.ok);
+    def listed as string init runList($dir).message;
+    testing.assertFalse(strings.contains($listed, "@jennifer/slack"));
+    testing.assertContains($listed, "@acme/app");
+    fs.removeAll($dir);
+}
+
+# The lookup is advice: with no registry answering, add works offline as before.
+func testAddWithNoRegistryStillAdds() {
+    def dir as string init freshDir("movedaddoffline");
+    runInit($dir, "demo");
+    def out as Outcome init runAddFrom($dir, "http://127.0.0.1:1", "@jennifer/slack", "", false);
+    testing.assertTrue($out.ok);
+    testing.assertContains(runList($dir).message, "@jennifer/slack");
+    fs.removeAll($dir);
+}
+
+func testQueryShowsTheMove() {
+    def srv as httpd.Server init httpd.listen("127.0.0.1:0");
+    def t as task of int init spawn {
+        return standInRegistry($srv, movedBodies());
+    };
+    def url as string init "http://" + httpd.address($srv);
+    def gone as Outcome init runQuery($url, "@jennifer/slack", "");
+    def live as Outcome init runQuery($url, "@acme/old", "");
+    httpd.shutdown($srv);
+    task.wait($t);
+    testing.assertFalse($gone.ok);
+    testing.assertEqual($gone.message, movedMessage("@jennifer/slack", "@deckyard/slack"));
+    # a version the registry still resolves is shown, with the record
+    testing.assertTrue($live.ok);
+    testing.assertContains($live.message, "@acme/old 1.0.0");
+    testing.assertContains(
+        $live.message,
+        "moved to: @acme/new (jvc add, install and update refuse @acme/old)");
 }

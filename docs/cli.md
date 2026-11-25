@@ -19,7 +19,7 @@ so no `-I` flag is needed.
 | Command                              | Does                                            |
 | ------------------------------------ | ----------------------------------------------- |
 | `init [name]`                        | create `deck.toml`, plus a deck skeleton for a scoped name (name defaults to the directory) |
-| `add <deck> [constraint] [--dev]`    | add/update a requirement (empty constraint → `*`) |
+| `add <deck> [constraint] [--dev]`    | add/update a requirement (empty constraint → `*`); refused for a [moved deck](#moved-decks) |
 | `remove <deck> [--dev]`              | remove a requirement (refused when it is not there) |
 | `list`                               | print the manifest                              |
 | `check`                              | verify the interpreter is inside the deck's `[engines]` range |
@@ -100,7 +100,7 @@ order:
 3. `https://registry.jennifer-lang.dev` (default)
 
 A project's `[registries]` table (see below) comes first for anything about a
-deck in a mapped scope. `query`, `install`, `update` and `app install` /
+deck in a mapped scope. `add`, `query`, `install`, `update` and `app install` /
 `app update` resolve each name through it, and so do the **writes**:
 `publish`, `yank`, `unyank`, `claim`, `owners` and `trust` go to the registry
 the deck's scope maps to. A `--registry` on a write that contradicts the mapping is
@@ -696,6 +696,30 @@ behind, run `jvc update <deck>`.
 
 Both need a token and a scope you own.
 
+## Moved decks
+
+A registry operator can record that a deck moved to another name
+(`deckadmin move`; the `movedTo` field of the deck record). jvc refuses the old
+name with a message naming the new one:
+
+```text
+@jennifer/slack moved to @deckyard/slack; change the [decks] entry and the imports (`@deckyard/slack/`)
+```
+
+| Command | On a moved deck |
+| ------- | --------------- |
+| `add` | refused with that message; the manifest is not touched. The lookup is advisory: with no registry answering, or a `[sources]` entry for the deck, `add` works offline as before |
+| `install`, resolving (no lock, or a stale one) | refused. Reached as a dependency, the message names the decks that still require the old name: a release of theirs requiring the new one is the fix |
+| `install` from the lock | installs the pinned version, as for a yanked one, and appends `warning: <the message>. Installed the locked <version>; jvc update refuses <deck>.` |
+| `update`, `update <deck>` | refused, as resolving |
+| `query` | fails with that message when no version resolves (the moved deck's versions are yanked); a version that still resolves is shown with `moved to: <deck>` |
+| `app install` | refused, naming the new deck to install |
+
+There is no alias: the old name is never resolved to the new deck's versions,
+since both the `[decks]` entry and every `import "@jennifer/slack/";` have to
+change anyway. A jvc older than the record ignores the field; the move procedure
+yanks the old versions, so it stops choosing them too.
+
 ## Git sources
 
 A deck can come straight from a git remote instead of a registry, so it need
@@ -775,9 +799,11 @@ The two verbs divide the work as in Composer and Cargo, and the split is what
 makes builds reproducible:
 
 - **`install` reproduces.** When `camcorder.lock` covers the manifest, its exact
-  versions are installed with **no resolution and no metadata lookup at all**, so
-  `git clone` + `jvc install` rebuilds the same tree however much has been
-  published since. It resolves only when the lock is absent or stale, and says
+  versions are installed with **no resolution**, so `git clone` + `jvc install`
+  rebuilds the same tree however much has been published since. The one lookup
+  it makes is each locked registry deck's record, for the
+  [moved deck](#moved-decks) warning; a registry that does not answer adds
+  nothing and fails nothing. It resolves only when the lock is absent or stale, and says
   which happened. A manifest that requires no decks prints `nothing to install`
   (pointing at `--dev` when it has only `[dev-decks]`), still writes an empty
   lock, and removes from `vendor/` any deck it no longer requires.

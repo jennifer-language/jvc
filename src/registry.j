@@ -204,6 +204,8 @@ export def struct Negotiated {
  * @field description {string} the matched version's description ("" when not found)
  * @field kind {string} the delivery kind: "file" (single .j), "tar.gz" or "git"
  * @field engines {map of string to string} always empty: `/resolve` carries no engines
+ * @field movedTo {string} the deck this one moved to, when the registry records
+ *     a move ("" otherwise); set on a found and a not-found answer alike
  */
 export def struct Resolution {
     found as bool,
@@ -213,7 +215,8 @@ export def struct Resolution {
     checksum as string,
     description as string,
     kind as string,
-    engines as map of string to string
+    engines as map of string to string,
+    movedTo as string
 };
 
 # hexDigit returns the uppercase hex character for a nibble (0-15).
@@ -335,8 +338,38 @@ export func parseResolution(body as string) {
         checksum: strOr($doc, "/checksum"),
         description: strOr($doc, "/description"),
         kind: $kind,
-        engines: $noEngines
+        engines: $noEngines,
+        movedTo: movedField($doc)
     };
+}
+
+/**
+ * The deck a record says this one moved to, or "" when it names none: the
+ * `movedTo` member of a deck record or a `/resolve` answer (registry
+ * specification, the moved record). The name is printed into messages and
+ * advice, so anything but a valid scoped deck name is refused, not shown.
+ * @param doc {json.Value} the decoded response body
+ * @return {string} the folded deck name, or ""
+ * @throws {Error} kind `registry` when the member is not a valid deck name
+ */
+export func movedField(doc as json.Value) {
+    if (not json.has($doc, "/movedTo")) {
+        return "";
+    }
+    def target as string init "";
+    if (json.typeOf($doc, "/movedTo") == "string") {
+        $target = deckname.fold(json.asString($doc, "/movedTo"));
+    }
+    if (not deckname.isValid($target) or not deckname.isScoped($target)) {
+        throw Error{
+            kind: "registry",
+            message: "the registry's move record names no valid deck",
+            file: "",
+            line: 0,
+            col: 0
+        };
+    }
+    return $target;
 }
 
 # --- deck metadata (what the local resolver resolves against) ---------------
@@ -432,10 +465,56 @@ export func parseDeckDoc(body as string) {
 }
 
 /**
+ * A deck record as the resolver reads it: the versions it publishes, and the
+ * deck it moved to.
+ * @field candidates {list of catalog.Candidate} the deck's candidate versions
+ * @field movedTo {string} the deck it moved to ("" when it has not moved)
+ */
+export def struct DeckRecord {
+    candidates as list of catalog.Candidate,
+    movedTo as string
+};
+
+/**
+ * Parse a deck-record response body into its versions and its move record
+ * (`parseDeckDoc` and `movedField` of one body).
+ * @param body {string} the JSON response body
+ * @return {DeckRecord} the record
+ * @throws {Error} when the body is not valid JSON, or kind `registry` when the
+ *     move record names no valid deck
+ */
+export func parseDeckRecord(body as string) {
+    return DeckRecord{candidates: parseDeckDoc($body), movedTo: movedField(json.decode($body))};
+}
+
+/**
+ * Fetch one deck's record from the repository (a network call): its versions,
+ * for the local resolver, and its move record. An unknown deck is an empty
+ * record, not an error.
+ * @param client {Client} the repository client
+ * @param name {string} the deck name
+ * @param basePath {string} the negotiated API base path ("" for a legacy registry)
+ * @return {DeckRecord} the record (no candidates and no move when unknown)
+ * @throws {Error} on a transport failure or an unparseable body
+ */
+export func fetchDeckRecord(client as Client, name as string, basePath as string) {
+    def headers as map of string to string init about.headers();
+    def resp as http.Response init http.get(deckUrl(apiRoot($client, $basePath), $name), $headers);
+    # Only a 404 means "no such deck"; any other non-2xx is an error, so an
+    # outage is not reported as a typo in the name.
+    if ($resp.status == 404) {
+        def none as list of catalog.Candidate init [];
+        return DeckRecord{candidates: $none, movedTo: ""};
+    }
+    requireSuccess($resp, "deck lookup for " + $name);
+    return parseDeckRecord($resp.body);
+}
+
+/**
  * Fetch one deck's published versions from the repository (a network call), for
  * the local resolver to resolve against. An unknown deck is an empty list, not
  * an error, so the caller can report it against the requirement that asked for
- * it.
+ * it. The move record is dropped; `fetchDeckRecord` keeps it.
  * @param client {Client} the repository client
  * @param name {string} the deck name
  * @param basePath {string} the negotiated API base path ("" for a legacy registry)
@@ -443,16 +522,7 @@ export func parseDeckDoc(body as string) {
  * @throws {Error} on a transport failure or an unparseable body
  */
 export func fetchDeck(client as Client, name as string, basePath as string) {
-    def headers as map of string to string init about.headers();
-    def resp as http.Response init http.get(deckUrl(apiRoot($client, $basePath), $name), $headers);
-    # Only a 404 means "no such deck"; any other non-2xx is an error, so an
-    # outage is not reported as a typo in the name.
-    if ($resp.status == 404) {
-        def none as list of catalog.Candidate init [];
-        return $none;
-    }
-    requireSuccess($resp, "deck lookup for " + $name);
-    return parseDeckDoc($resp.body);
+    return fetchDeckRecord($client, $name, $basePath).candidates;
 }
 
 # requireSuccess throws a `registry` error naming the status and the server's

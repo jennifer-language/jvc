@@ -26,10 +26,13 @@ the mapping has since moved. Writes (`publish`, `yank`, `claim`, `owners`,
 `trust`) follow the same mapping.
 
 **Reproducibility.** `jvc install` installs exactly what `camcorder.lock` pins,
-with no resolution and no metadata lookup, so `git clone` plus `jvc install`
-rebuilds the same tree however much has been published since. It resolves only
-when the lock is absent or stale, and says which. `jvc update` always resolves
-and rewrites the lock.
+with no resolution, so `git clone` plus `jvc install` rebuilds the same tree
+however much has been published since. It resolves only when the lock is absent
+or stale, and says which. `jvc update` always resolves and rewrites the lock.
+
+**Moved decks.** A deck the registry records as moved (`movedTo`) is refused by
+`add`, `install` and `update`, directly or as a dependency, with a message naming
+the new deck; a locked version still installs, with a warning. No alias.
 
 **Checks before running.** `jvc check` asks whether the running interpreter is
 in the deck's `[engines]` allowlist. `jvc install --run-untrusted-tests` (and

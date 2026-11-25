@@ -543,9 +543,9 @@ export func resolveApp(base as string, given as string, spec as string) {
     if (not ($where.error == "")) {
         return AppSource{url: "", version: "", error: $where.error};
     }
-    def found as list of catalog.Candidate init [];
+    def rec as registry.DeckRecord init registry.DeckRecord{candidates: [], movedTo: ""};
     try {
-        $found = registry.fetchDeck(registry.newClient($where.url), $name, $where.basePath);
+        $rec = registry.fetchDeckRecord(registry.newClient($where.url), $name, $where.basePath);
     } catch (err) {
         return AppSource{
             url: "",
@@ -554,10 +554,18 @@ export func resolveApp(base as string, given as string, spec as string) {
                 $err.message
         };
     }
-    if (len($found) == 0) {
+    if (not ($rec.movedTo == "")) {
+        return AppSource{
+            url: "",
+            version: "",
+            error: $name + " moved to " + $rec.movedTo + "; install that name instead " +
+                "(jvc app install " + $rec.movedTo + ")"
+        };
+    }
+    if (len($rec.candidates) == 0) {
         return AppSource{url: "", version: "", error: scopemap.missMessage($name, $where.url)};
     }
-    return pickApp($found, $name, $spec, $where.url);
+    return pickApp($rec.candidates, $name, $spec, $where.url);
 }
 
 # pickApp chooses the version to install and checks it is installable as an app.
@@ -3003,6 +3011,110 @@ export func runAdd(dir as string, name as string, constraint as string, dev as b
 }
 
 /**
+ * `jvc add`: `runAdd`, refused when the registry the deck's scope maps to
+ * records it as moved (`movedMessage`). The lookup is advisory: an unreachable
+ * registry, an unknown deck or a deck with a `[sources]` entry adds as
+ * `runAdd` does, offline, and `install` resolves it later.
+ * @param dir {string} the directory holding the manifest
+ * @param baseUrl {string} the registry for a scope the mapping does not cover
+ * @param name {string} the deck to require
+ * @param constraint {string} the version constraint ("" -> "*")
+ * @param dev {bool} target the dev-requirements instead of the runtime ones
+ * @return {Outcome} the result to print
+ */
+export func runAddFrom(
+    dir as string,
+    baseUrl as string,
+    name as string,
+    constraint as string,
+    dev as bool) {
+    if (deckname.isScoped($name) and isDeckName($name) and not (locate($dir).path == "")) {
+        def deck as string init deckname.fold($name);
+        def m as manifest.Manifest init manifestOrEmpty($dir);
+        if (manifest.depListGet($m.sources, $deck) == "") {
+            def moved as string init movedRecordOf(newMapper($m.registries, $baseUrl), $deck);
+            if (not ($moved == "")) {
+                return fail(movedMessage($deck, $moved));
+            }
+        }
+    }
+    return runAdd($dir, $name, $constraint, $dev);
+}
+
+# movedRecordOf asks the registry a deck maps to for its move record: the deck
+# it moved to, or "" when it has not moved, is unknown, or nobody answered.
+func movedRecordOf(mapper as Mapper, name as string) {
+    def where as Mapped init mapFor($mapper, $name);
+    if (not ($where.error == "")) {
+        return "";
+    }
+    def moved as string init "";
+    try {
+        def client as registry.Client init registry.newClient($where.url);
+        $moved = registry.fetchDeckRecord($client, $name, $where.basePath).movedTo;
+    } catch (err) {
+        $moved = "";
+    }
+    return $moved;
+}
+
+/**
+ * The warnings for locked decks whose registry records a move: the lockfile
+ * still installs the pinned version, as it installs a yanked one, but
+ * `jvc update` will refuse the old name. Pure.
+ * @param locked {list of catalog.Candidate} the lockfile's entries
+ * @param moved {map of string to string} deck -> the deck it moved to, for the
+ *     locked decks that moved
+ * @return {list of string} one warning per moved deck, in lock order
+ */
+export func lockMovedWarnings(
+    locked as list of catalog.Candidate,
+    moved as map of string to string) {
+    def out as list of string init [];
+    if (len($moved) == 0) {
+        return $out;
+    }
+    def cat as catalog.Catalog init catalog.addAll(catalog.empty(), $locked);
+    for (def c in $locked) {
+        def name as string init deckname.fold($c.name);
+        if (not maps.has($moved, $name)) {
+            continue;
+        }
+        $out[] = "warning: " + movedRefusal($name, $moved[$name], dependentsOf($cat, $name)) +
+            ". Installed the locked " + $c.version + "; jvc update refuses " + $name + ".";
+    }
+    return $out;
+}
+
+# lockMovedNotes asks each locked registry deck's registry for its move record
+# and renders `lockMovedWarnings` as lines to append to an install report. A
+# `[sources]` deck has no registry to ask, and a registry that does not answer
+# adds nothing: the install itself needs no metadata.
+func lockMovedNotes(
+    m as manifest.Manifest,
+    baseUrl as string,
+    locked as list of catalog.Candidate) {
+    def moved as map of string to string init {};
+    def mapper as Mapper init newMapper($m.registries, $baseUrl);
+    for (def c in $locked) {
+        if ($c.registry == "") {
+            continue;
+        }
+        def name as string init deckname.fold($c.name);
+        $mapper = learn($mapper, $name);
+        def target as string init movedRecordOf($mapper, $name);
+        if (not ($target == "")) {
+            $moved[$name] = $target;
+        }
+    }
+    def out as string init "";
+    for (def line in lockMovedWarnings($locked, $moved)) {
+        $out = $out + "\n" + $line;
+    }
+    return $out;
+}
+
+/**
  * Remove a requirement from dir's manifest. With dev = true the dev-requirement
  * is removed instead.
  * @param dir {string} the directory holding the manifest
@@ -4372,7 +4484,8 @@ export func runQuery(baseUrl as string, given as string, constraint as string) {
         checksum: "",
         description: "",
         kind: "file",
-        engines: $noEngines
+        engines: $noEngines,
+        movedTo: ""
     };
     try {
         $res = registry.resolve($client, $name, $spec, $api.basePath);
@@ -4380,6 +4493,9 @@ export func runQuery(baseUrl as string, given as string, constraint as string) {
         return fail("could not resolve: " + $err.message);
     }
     if (not $res.found) {
+        if (not ($res.movedTo == "")) {
+            return fail(movedMessage($name, $res.movedTo));
+        }
         return fail("no version of " + $name + " satisfies " + $spec);
     }
     def msg as string init $res.name + " " + $res.version;
@@ -4387,6 +4503,12 @@ export func runQuery(baseUrl as string, given as string, constraint as string) {
     $msg = $msg + "\n  checksum: " + $res.checksum;
     if (not ($res.description == "")) {
         $msg = $msg + "\n  " + $res.description;
+    }
+    # A version the registry still resolves (not yet yanked) is shown, with the
+    # record that makes add, install and update refuse it.
+    if (not ($res.movedTo == "")) {
+        $msg = $msg + "\n  moved to: " + $res.movedTo + " (jvc add, install and update " +
+            "refuse " + $name + ")";
     }
     return ok($msg);
 }
@@ -4447,7 +4569,13 @@ export func agreeApi(client as registry.Client) {
 # fetchInto reads every version of one deck from whichever source owns it: the
 # `[sources]` git URL when the manifest gives the deck one, else the repository.
 # Returns the candidates to add, or the reason that source could not supply them.
-func fetchInto(mapper as Mapper, sources as list of manifest.Dependency, name as string) {
+# A deck the repository records as moved is refused, naming the new deck and,
+# for a dependency, the `dependents` that still require the old name.
+func fetchInto(
+    mapper as Mapper,
+    sources as list of manifest.Dependency,
+    name as string,
+    dependents as list of string) {
     def url as string init manifest.depListGet($sources, $name);
     if ($url == "") {
         # Only now is a registry needed, which is why the mapping is consulted
@@ -4458,15 +4586,21 @@ func fetchInto(mapper as Mapper, sources as list of manifest.Dependency, name as
             return resolveFailed($reg.error);
         }
         def client as registry.Client init registry.newClient($reg.url);
-        def found as list of catalog.Candidate init [];
+        def rec as registry.DeckRecord init registry.DeckRecord{candidates: [], movedTo: ""};
         # Caught here, where the deck and the registry are known, so a failure
         # at a mapped registry is not blamed on the fallback.
         try {
-            $found = registry.fetchDeck($client, $name, $reg.basePath);
+            $rec = registry.fetchDeckRecord($client, $name, $reg.basePath);
         } catch (err) {
             return resolveFailed("could not fetch " + $name + " from " + $reg.url + ": " +
                 $err.message);
         }
+        # Before the versions are looked at: the old name is never resolved,
+        # not even to a version it still offers (no alias, no fallback).
+        if (not ($rec.movedTo == "")) {
+            return resolveFailed(movedRefusal($name, $rec.movedTo, $dependents));
+        }
+        def found as list of catalog.Candidate init $rec.candidates;
         if (len($found) == 0) {
             # Reported against the mapped registry, and there is no second one
             # to try: that is what makes dependency confusion impossible here.
@@ -4508,6 +4642,56 @@ export func noGitRelease(name as string, url as string, skipped as list of strin
         return $head + " (that repository has no SemVer tags)";
     }
     return $head + ": no version tag is a release of it (" + strings.join($skipped, "; ") + ")";
+}
+
+/**
+ * The refusal for a deck the registry records as moved (`deckadmin move`):
+ * what the user changes, the `[decks]` entry and the imports. Never an alias:
+ * the old name is not resolved to the new deck.
+ * @param name {string} the deck that moved
+ * @param target {string} the deck it moved to
+ * @return {string} the message
+ */
+export func movedMessage(name as string, target as string) {
+    return $name + " moved to " + $target + "; change the [decks] entry and the imports (`" +
+        $target + "/`)";
+}
+
+/**
+ * The refusal for a moved deck reached in a resolution: `movedMessage` for a
+ * deck of the project's own, or, when other decks require it, which ones, since
+ * the fix is a release of theirs rather than an edit here.
+ * @param name {string} the deck that moved
+ * @param target {string} the deck it moved to
+ * @param dependents {list of string} the decks requiring it, as `dependentsOf` names them
+ * @return {string} the message
+ */
+export func movedRefusal(name as string, target as string, dependents as list of string) {
+    if (len($dependents) == 0) {
+        return movedMessage($name, $target);
+    }
+    return $name + " moved to " + $target + "; " + strings.join($dependents, ", ") +
+        " still require(s) it, so a release of that deck requiring " + $target +
+        " is needed (or a [sources] / [registries] entry of your own for it)";
+}
+
+/**
+ * The decks in a catalog that require a deck, as `name version`, sorted and
+ * each once: who reached a dependency.
+ * @param cat {catalog.Catalog} the candidates known so far
+ * @param name {string} the required deck (folded)
+ * @return {list of string} the requiring versions, empty for a deck nobody requires
+ */
+export func dependentsOf(cat as catalog.Catalog, name as string) {
+    def seen as map of string to bool init {};
+    for (def e in $cat.entries) {
+        for (def dep in $e.requires) {
+            if (deckname.fold($dep) == $name) {
+                $seen[$e.name + " " + $e.version] = true;
+            }
+        }
+    }
+    return lists.sort(maps.keys($seen));
 }
 
 /**
@@ -4572,7 +4756,7 @@ export func resolveRoots(
             if (manifest.depListGet($sources, $name) == "") {
                 $mapper = learn($mapper, $name);
             }
-            def got as Resolved init fetchInto($mapper, $sources, $name);
+            def got as Resolved init fetchInto($mapper, $sources, $name, dependentsOf($cat, $name));
             if (not $got.ok) {
                 return $got;
             }
@@ -4777,9 +4961,10 @@ func linkRefusal(dir as string, rel as string) {
  * Install dir's manifest.
  *
  * **The lockfile wins.** When `camcorder.lock` covers the manifest, its exact
- * versions are installed with no resolution and no metadata lookup, which is
- * what makes `git clone` + `jvc install` reproduce a build byte for byte however
- * much has been published since. Only when the lock is absent or stale (the
+ * versions are installed with no resolution, which is what makes `git clone` +
+ * `jvc install` reproduce a build byte for byte however much has been published
+ * since. The one lookup is each locked registry deck's move record, which only
+ * adds a warning (`lockMovedNotes`). Only when the lock is absent or stale (the
  * manifest changed, a locked deck's own requirements are no longer met, a
  * locked deck is no longer required, or `[sources]` changed) does jvc resolve,
  * and it says so. A lock whose registries the mapping has since moved is
@@ -4857,7 +5042,7 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool, run
             if (len($pinned) > 0) {
                 return fail(strings.join($pinned, "\n"));
             }
-            return applySet(
+            def fromLock as Outcome init applySet(
                 $dir,
                 $m,
                 $locked.decks,
@@ -4865,6 +5050,10 @@ export func runInstall(dir as string, baseUrl as string, includeDev as bool, run
                     " deck(s) from " + LOCK_FILE + ":",
                 $runTests,
                 $target);
+            # A moved deck installs from its pin, as a yanked one does; the
+            # warning names the deck to move to before `update` refuses it.
+            $fromLock.message = $fromLock.message + lockMovedNotes($m, $baseUrl, $locked.decks);
+            return $fromLock;
         }
         def resolvedOut as Outcome init resolveAndApply(
             $dir,
@@ -6455,7 +6644,12 @@ export func dispatch(args as list of string) {
         return runInit(".", $name);
     }
     if ($command == "add") {
-        return runAdd(".", posAt($pos, 0), posAt($pos, 1), hasFlag($args, "--dev"));
+        return runAddFrom(
+            ".",
+            registryBase($args),
+            posAt($pos, 0),
+            posAt($pos, 1),
+            hasFlag($args, "--dev"));
     }
     if ($command == "remove" or $command == "rm") {
         return runRemove(".", posAt($pos, 0), hasFlag($args, "--dev"));

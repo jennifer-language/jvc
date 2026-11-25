@@ -233,6 +233,62 @@ func testParseDeckDocDefaultsKindToTarGz() {
     testing.assertEqual($cands[0].kind, "tar.gz");
 }
 
+# --- the moved record --------------------------------------------------------
+
+func testADeckRecordCarriesItsMove() {
+    def body as string init '{"name":"@jennifer/slack","movedTo":"@Deckyard/Slack","versions":{' +
+        '"0.1.0":{"version":"0.1.0","kind":"git","url":"https://x/s.git","yanked":true}}}';
+    def rec as DeckRecord init parseDeckRecord($body);
+    testing.assertEqual($rec.movedTo, "@deckyard/slack");
+    # the old name's own versions, never the new deck's
+    testing.assertEqual(len($rec.candidates), 1);
+    testing.assertEqual($rec.candidates[0].name, "@jennifer/slack");
+    testing.assertTrue($rec.candidates[0].yanked);
+}
+
+func testADeckRecordWithoutAMoveHasNone() {
+    testing.assertEqual(parseDeckRecord(deckDoc()).movedTo, "");
+    testing.assertEqual(len(parseDeckRecord(deckDoc()).candidates), 2);
+}
+
+# What a move record says is printed into advice, so a name that is not a deck
+# is refused rather than shown.
+func badMoveTarget() {
+    parseDeckRecord('{"name":"@a/b","movedTo":"\u001b[31mgo here","versions":{}}');
+}
+
+func moveTargetNotAString() {
+    parseDeckRecord('{"name":"@a/b","movedTo":7,"versions":{}}');
+}
+
+func bareMoveTarget() {
+    parseResolution('{"found":false,"name":"@a/b","movedTo":"slack"}');
+}
+
+func testAMoveRecordNamingNoDeckIsRefused() {
+    testing.assertThrows("badMoveTarget", "registry");
+    testing.assertThrows("moveTargetNotAString", "registry");
+    testing.assertThrows("bareMoveTarget", "registry");
+}
+
+func testAResolutionCarriesTheMove() {
+    def miss as Resolution init parseResolution(
+        '{"found":false,"name":"@jennifer/slack","error":"no version",' +
+            '"movedTo":"@deckyard/slack"}');
+    testing.assertFalse($miss.found);
+    testing.assertEqual($miss.movedTo, "@deckyard/slack");
+    def hit as Resolution init parseResolution(
+        '{"found":true,"name":"@jennifer/slack","version":"0.1.0","url":"u",' +
+            '"movedTo":"@deckyard/slack"}');
+    testing.assertTrue($hit.found);
+    testing.assertEqual($hit.version, "0.1.0");
+    testing.assertEqual($hit.movedTo, "@deckyard/slack");
+    # an older registry sends no field
+    testing.assertEqual(
+        parseResolution('{"found":true,"name":"@a/b","version":"1.0.0"}').movedTo,
+        "");
+}
+
 # --- login: what the discovery document says about it ------------------------
 
 func testDiscoveryWithoutAuthMeansNoLogins() {
