@@ -29,9 +29,9 @@ rm -rf /tmp/jvc
 Or from a release:
 
 ```sh
-sudo apt install ./jvc_0.2.0_all.deb          # Debian / Ubuntu
-sudo pacman -U jvc-0.2.0-1-any.pkg.tar.zst    # Arch
-tar xzf jvc-0.2.0.tar.gz                      # anywhere else
+sudo apt install ./jvc_0.3.0_all.deb          # Debian / Ubuntu
+sudo pacman -U jvc-0.3.0-1-any.pkg.tar.zst    # Arch
+tar xzf jvc-0.3.0.tar.gz                      # anywhere else
 ```
 
 Each artifact has a sidecar `.sha256`. All need `jennifer` 0.27.0 or later.

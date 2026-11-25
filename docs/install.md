@@ -35,14 +35,14 @@ from the `# pragma-jennifer-version` header in each shipped source file.
 
 ```sh
 # Debian / Ubuntu
-sudo apt install ./jvc_0.2.0_all.deb
+sudo apt install ./jvc_0.3.0_all.deb
 
 # Arch
-sudo pacman -U jvc-0.2.0-1-any.pkg.tar.zst
+sudo pacman -U jvc-0.3.0-1-any.pkg.tar.zst
 
 # anywhere else: unpack and put the launcher on PATH
-tar xzf jvc-0.2.0.tar.gz
-ln -s "$PWD/jvc-0.2.0/bin/jvc" ~/.local/bin/jvc
+tar xzf jvc-0.3.0.tar.gz
+ln -s "$PWD/jvc-0.3.0/bin/jvc" ~/.local/bin/jvc
 jvc version
 ```
 
@@ -86,8 +86,8 @@ start an interpreter.
 ## Building the artifacts yourself
 
 ```sh
-scripts/build-tarball.sh 0.2.0 release   # runtime tree, reproducible
-scripts/build-deb.sh     0.2.0 release   # .deb, floor read from [engines]
+scripts/build-tarball.sh 0.3.0 release   # runtime tree, reproducible
+scripts/build-deb.sh     0.3.0 release   # .deb, floor read from [engines]
 ```
 
 `build-deb.sh` reads the Debian dependency floor from `[engines]`, so the

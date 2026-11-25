@@ -10,7 +10,7 @@
  * same as any other Jennifer program. A registry operator, a CDN rule or
  * GitHub's API then cannot tell jvc from a script, nor one jvc release from
  * another. The agent follows RFC 9110's `product/version (comment)` form:
- * `jvc/0.2.0 (Jennifer Vendor Console; +https://jvc.jennifer-lang.dev)`. The
+ * `jvc/0.3.0 (Jennifer Vendor Console; +https://jvc.jennifer-lang.dev)`. The
  * product token leads, so a rule or log query matches the `jvc/` prefix; the
  * comment spells the name out and says where to read about the client.
  *
@@ -24,7 +24,7 @@
  */
 
 /** jvc's own version, reported by `jvc version` and sent in `USER_AGENT`. */
-export def const VERSION as string init "0.2.0";
+export def const VERSION as string init "0.3.0";
 
 /** jvc's name spelled out, the first part of the comment in `USER_AGENT`. */
 export def const NAME as string init "Jennifer Vendor Console";
