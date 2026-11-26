@@ -806,6 +806,25 @@ export func tagCommitArgv(dir as string, tag as string) {
 }
 
 /**
+ * Build the argv that counts the commits on each side of a tag and HEAD,
+ * printing "<only in the tag> <only in HEAD>".
+ * @param dir {string} the working tree
+ * @param tag {string} the tag name
+ * @return {list of string} the git argv
+ */
+export func tagHeadCountsArgv(dir as string, tag as string) {
+    return [
+        GIT,
+        "-C",
+        $dir,
+        "rev-list",
+        "--left-right",
+        "--count",
+        tagRef($tag) + '^{commit}...HEAD'
+    ];
+}
+
+/**
  * Normalise a remote URL to the `https://` clone URL a registry can fetch.
  *
  * A `git@host:owner/name.git` remote is the common case for a repository you

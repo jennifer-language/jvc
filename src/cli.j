@@ -768,14 +768,7 @@ func localSource(
     if (not ($tag == "") and not tagOnHead($dir, $tag)) {
         # The gate checked HEAD; a tag elsewhere is other code, which the
         # registry would read and publish unchecked.
-        return Source{
-            repository: $repo,
-            tag: "",
-            error: "--tag " + $tag + " is not on HEAD, which holds " + $version +
-                " and is what the checks above ran on. Check out the tag and " +
-                "publish from there, so what is checked is what is published:\n  git checkout " +
-                $tag
-        };
+        return Source{repository: $repo, tag: "", error: tagOffHead($dir, $tag, $version)};
     }
     if ($tag == "") {
         $tag = tagForVersion($dir, $version);
@@ -918,6 +911,41 @@ func tagElsewhere(dir as string, version as string) {
         }
     }
     return "";
+}
+
+# tagOffHead explains a --tag that is not on HEAD: where HEAD stands relative
+# to it, or that there is no such tag, since "check out the tag" is no help
+# then.
+func tagOffHead(dir as string, tag as string, version as string) {
+    if (not git.run(git.tagCommitArgv($dir, $tag)).ok) {
+        return "--tag " + $tag + " does not exist here. Tag the release and push " +
+            "it, or pass an existing tag:\n  git tag " + $tag + " && git push origin " + $tag;
+    }
+    def where as string init "HEAD is another commit";
+    def got as git.Result init git.run(git.tagHeadCountsArgv($dir, $tag));
+    def counts as list of string init strings.split(strings.trim($got.output), "\t");
+    if ($got.ok and len($counts) == 2) {
+        if ($counts[0] == "0") {
+            $where = "HEAD is " + commits($counts[1]) + " past it";
+        } elseif ($counts[1] == "0") {
+            $where = "HEAD is " + commits($counts[0]) + " behind it";
+        } else {
+            $where = "HEAD and the tag have diverged (" + commits($counts[1]) +
+                " only on HEAD, " + commits($counts[0]) + " only in the tag)";
+        }
+    }
+    return "--tag " + $tag + " is not on HEAD: " + $where + ". The checks above ran " +
+        "on HEAD (manifest version " + $version + "), not on the tag. Check out the " +
+        "tag and publish from there, so what is checked is what is published:\n" +
+        "  git checkout " + $tag;
+}
+
+# commits spells a commit count from rev-list: "1 commit", "3 commits".
+func commits(count as string) {
+    if ($count == "1") {
+        return "1 commit";
+    }
+    return $count + " commits";
 }
 
 # tagOnHead reports whether a tag points at HEAD. A git that cannot list the

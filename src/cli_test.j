@@ -3837,6 +3837,37 @@ func testATagOnAnotherCommitIsNamed() {
     fs.removeAll($dir);
 }
 
+# A --tag off HEAD says how far, not "HEAD holds <version>", which read as if
+# HEAD carried the tag.
+func testATagOffHeadSaysHowFar() {
+    def dir as string init fs.makeTempDir("", "jvc-tagflag");
+    git.run(["git", "-C", $dir, "init", "-q", "-b", "main"]);
+    git.run(["git", "-C", $dir, "config", "user.email", "t@x"]);
+    git.run(["git", "-C", $dir, "config", "user.name", "t"]);
+    fs.writeString($dir + "/a", "1");
+    git.run(["git", "-C", $dir, "add", "-A"]);
+    git.run(["git", "-C", $dir, "commit", "-q", "-m", "one"]);
+    git.run(["git", "-C", $dir, "tag", "0.5.0"]);
+    fs.writeString($dir + "/a", "2");
+    git.run(["git", "-C", $dir, "commit", "-q", "-am", "two"]);
+    def one as Source init publishSource($dir, "0.5.0", "https://x/y.git", "0.5.0", "");
+    testing.assertContains($one.error, "--tag 0.5.0 is not on HEAD: HEAD is 1 commit past it.");
+    testing.assertContains($one.error, "(manifest version 0.5.0)");
+    testing.assertContains($one.error, "git checkout 0.5.0");
+    fs.writeString($dir + "/a", "3");
+    git.run(["git", "-C", $dir, "commit", "-q", "-am", "three"]);
+    def two as Source init publishSource($dir, "0.5.0", "https://x/y.git", "0.5.0", "");
+    testing.assertContains($two.error, "HEAD is 2 commits past it.");
+    git.run(["git", "-C", $dir, "tag", "0.6.0"]);
+    git.run(["git", "-C", $dir, "checkout", "-q", "0.5.0"]);
+    def behind as Source init publishSource($dir, "0.5.0", "https://x/y.git", "0.6.0", "");
+    testing.assertContains($behind.error, "HEAD is 2 commits behind it.");
+    def none as Source init publishSource($dir, "0.5.0", "https://x/y.git", "0.9.0", "");
+    testing.assertContains($none.error, "--tag 0.9.0 does not exist here.");
+    testing.assertFalse(strings.contains($none.error, "git checkout"));
+    fs.removeAll($dir);
+}
+
 # --- the version index ------------------------------------------------------
 
 func testVersionIndexIsFoldedAndKeepsTheFirst() {
