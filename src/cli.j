@@ -6170,6 +6170,7 @@ export func runPublish(
     }
     # Unreachable is reported as unreachable, not folded into "no publish
     # endpoint" (which would suggest hand-packing a release).
+    verify.progress("contacting " + $base);
     def api as registry.Negotiated init agreeApi(registry.newClient($base));
     if (not $api.ok) {
         return fail($head + $api.error);
@@ -6187,10 +6188,12 @@ export func runPublish(
     }
     # Only now ask the forge, since a registry that would refuse makes the
     # answer moot.
+    verify.progress("looking for tag " + $src.tag + " on " + $src.repository);
     $src.error = pushedTagProblem($dir, $src, $repoFlag, $remote);
     if (not ($src.error == "")) {
         return fail($head + $src.error);
     }
+    verify.progress("publishing: the registry reads the tagged commit and runs the tests again");
     def done as Sent init sendPublish($base, $src);
     def out as Outcome init $done.outcome;
     if (remoteHintWanted($done, $repoFlag)) {

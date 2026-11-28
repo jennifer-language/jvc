@@ -160,6 +160,11 @@ The order after that is local first, network last:
    once the registry would accept the publish;
 4. the publish itself.
 
+On a terminal, jvc says on stderr what it is doing while the gate and the
+publish run, a line per step (lint, each test overlay, the docblocks, the
+registry, the tag, the publish), since the gate can take a minute. Piped or
+in CI only the report below is printed.
+
 What happens next depends on the repository. If it advertises `publish` and you
 are logged in, jvc **names a repository and a tag** and the registry reads the
 manifest from that commit itself:

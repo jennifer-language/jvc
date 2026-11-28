@@ -58,6 +58,7 @@
 use binary;
 use os;
 use fs;
+use io;
 use path;
 use strings;
 use convert;
@@ -749,6 +750,18 @@ func rel(dir as string, file as string) {
 # verdict: non-zero for a warning or error, zero when only info findings remain.
 # Lint reads the sources and runs none of them, so it is not isolated; an
 # interpreter that cannot be started is a failed check, not a crash.
+/**
+ * Say on stderr what a slow step is about to do, so a publish that spends a
+ * minute in the gate does not look hung. Only when stderr is a terminal: a
+ * pipe, a log or a test run gets the final report alone.
+ * @param text {string} the step, one line without its newline
+ */
+export func progress(text as string) {
+    if (os.isTerminal("stderr")) {
+        io.eprintf("%s\n", $text);
+    }
+}
+
 func lintCheck(dir as string) {
     def modules as list of string init modulesOf($dir);
     def overlays as list of string init [];
@@ -768,6 +781,8 @@ func lintCheck(dir as string) {
     if (len($modules) == 0) {
         return Finding{check: "lint", ok: true, detail: "no modules to lint"};
     }
+    progress("  lint: " + convert.toString(len($modules)) + " module(s), " +
+        convert.toString(len($overlays)) + " overlay(s)");
     def run as Bounded init Bounded{
         result: os.Result{exitCode: 0, stdout: "", stderr: ""},
         stopped: false
@@ -840,7 +855,11 @@ func overlayCheck(dir as string) {
     # Removed however this exits, a throwing overlay included.
     defer fs.removeAll($stage);
     def vendor as string init vendorOf($dir);
+    def n as int init 0;
     for (def module in $modules) {
+        $n = $n + 1;
+        progress("  tests: " + rel($dir, overlayFor($module)) + " (" + convert.toString($n) +
+            " of " + convert.toString(len($modules)) + ")");
         def problem as string init runOverlay($dir, overlayFor($module), $stage, $vendor);
         if (not ($problem == "")) {
             return Finding{check: "tests", ok: false, detail: $problem};
@@ -856,6 +875,7 @@ func overlayCheck(dir as string) {
 # docblockCheck parses every source's docblocks, included files too, and blocks
 # on drift.
 func docblockCheck(dir as string) {
+    progress("  docblocks");
     def problems as string init "";
     def count as int init 0;
     for (def module in sourcesOf($dir)) {

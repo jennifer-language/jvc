@@ -520,6 +520,7 @@ export func check(dir as string, runChecks as bool) {
     if (not ($warning == "")) {
         io.eprintf("warning: %s\n\n", $warning);
     }
+    verify.progress("checking " + $m.pkg.name + "@" + $m.pkg.version);
     def report as verify.Report init verify.verify($dir);
     if (not $report.ok) {
         def why as string init "";
